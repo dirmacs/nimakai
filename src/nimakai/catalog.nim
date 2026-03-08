@@ -1,7 +1,7 @@
 ## Model catalog for NVIDIA NIM models.
 ## Contains compiled-in metadata and user model file loading.
 
-import std/[json, os, options, strutils, algorithm]
+import std/[json, os, options, strutils, algorithm, tables]
 import ./types
 
 const BuiltinCatalog*: seq[ModelMeta] = @[
@@ -128,6 +128,39 @@ proc loadCatalog*(userModelsPath: string = ""): seq[ModelMeta] =
         break
     if not found:
       result.add(um)
+
+proc buildCatalogIndex*(catalog: seq[ModelMeta]): Table[string, ModelMeta] =
+  ## Build an O(1) lookup table from model ID to metadata.
+  result = initTable[string, ModelMeta]()
+  for m in catalog:
+    result[m.id] = m
+
+proc lookupMeta*(index: Table[string, ModelMeta], id: string): Option[ModelMeta] =
+  ## O(1) lookup by model ID from a pre-built index.
+  if id in index:
+    some(index[id])
+  else:
+    none(ModelMeta)
+
+proc printCatalogJson*(catalog: seq[ModelMeta]) =
+  ## Print the catalog as JSON.
+  var arr = newJArray()
+  for m in catalog:
+    let ctxStr = if m.ctxSize >= 1048576: $(m.ctxSize div 1048576) & "M"
+                 elif m.ctxSize >= 1024: $(m.ctxSize div 1024) & "k"
+                 else: $m.ctxSize
+    arr.add(%*{
+      "id": m.id,
+      "name": m.name,
+      "tier": $m.tier,
+      "swe_score": m.sweScore,
+      "ctx_size": m.ctxSize,
+      "ctx_display": ctxStr,
+      "output_limit": m.outputLimit,
+      "thinking": m.thinking,
+      "multimodal": m.multimodal,
+    })
+  echo $(%*{"models": arr, "count": catalog.len})
 
 proc printCatalog*(catalog: seq[ModelMeta]) =
   ## Print the catalog as a formatted table.

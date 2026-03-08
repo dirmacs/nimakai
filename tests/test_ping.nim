@@ -1,6 +1,21 @@
 import std/unittest
 import nimakai/[types, ping]
 
+suite "ThroughputResult defaults":
+  test "default ThroughputResult has zero values":
+    let r = ThroughputResult()
+    check r.ttft == 0.0
+    check r.totalMs == 0.0
+    check r.tokenCount == 0
+    check r.tokPerSec == 0.0
+
+  test "ThroughputResult fields can be set":
+    let r = ThroughputResult(ttft: 100.0, totalMs: 500.0,
+                              tokenCount: 32, tokPerSec: 80.0)
+    check r.ttft == 100.0
+    check r.tokenCount == 32
+    check r.tokPerSec == 80.0
+
 suite "classifyHealth":
   test "200 returns UP":
     check classifyHealth(200, "") == hUp

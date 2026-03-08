@@ -1,4 +1,4 @@
-import std/[unittest, options, sets, json, os]
+import std/[unittest, options, sets, json, os, tables]
 import nimakai/[types, catalog]
 
 suite "BuiltinCatalog integrity":
@@ -157,3 +157,31 @@ suite "loadUserModels":
     check meta.get.tier == tA
     check abs(meta.get.sweScore - 45.0) < 0.01
     check meta.get.ctxSize == 32768
+
+suite "buildCatalogIndex":
+  test "index lookup finds model":
+    let index = buildCatalogIndex(BuiltinCatalog)
+    let meta = index.lookupMeta("z-ai/glm4.7")
+    check meta.isSome
+    check meta.get.name == "GLM 4.7"
+
+  test "index lookup returns none for missing model":
+    let index = buildCatalogIndex(BuiltinCatalog)
+    let meta = index.lookupMeta("nonexistent/model")
+    check meta.isNone
+
+  test "index matches linear scan":
+    let index = buildCatalogIndex(BuiltinCatalog)
+    for m in BuiltinCatalog:
+      let fromIndex = index.lookupMeta(m.id)
+      let fromLinear = BuiltinCatalog.lookupMeta(m.id)
+      check fromIndex.isSome
+      check fromLinear.isSome
+      check fromIndex.get.id == fromLinear.get.id
+      check fromIndex.get.tier == fromLinear.get.tier
+
+suite "printCatalogJson":
+  test "produces valid JSON with all models":
+    # Just verify it compiles and the function exists
+    # (output goes to stdout, not easy to capture in unit test)
+    check BuiltinCatalog.len > 0

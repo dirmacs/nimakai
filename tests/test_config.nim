@@ -138,3 +138,64 @@ suite "loadConfigFile category_weights":
         check cw.weights.stability == 0.20
     check foundQuick
     check foundDeep
+
+suite "loadProfile":
+  test "loads profile from config":
+    let path = "/tmp/test-nimakai-profile.json"
+    let data = %*{
+      "profiles": {
+        "work": {"interval": 10, "tier_filter": "S", "rounds": 5}
+      }
+    }
+    writeFile(path, $data)
+    defer: removeFile(path)
+
+    let prof = loadProfile("work", path)
+    check prof.hasInterval == true
+    check prof.interval == 10
+    check prof.hasTierFilter == true
+    check prof.tierFilter == "S"
+    check prof.hasRounds == true
+    check prof.rounds == 5
+    check prof.hasTimeout == false
+
+  test "unknown profile returns empty overrides":
+    let path = "/tmp/test-nimakai-profile-unk.json"
+    let data = %*{
+      "profiles": {
+        "work": {"interval": 10}
+      }
+    }
+    writeFile(path, $data)
+    defer: removeFile(path)
+
+    let prof = loadProfile("nonexistent", path)
+    check prof.hasInterval == false
+    check prof.hasTimeout == false
+    check prof.hasTierFilter == false
+    check prof.hasRounds == false
+
+  test "partial profile settings":
+    let path = "/tmp/test-nimakai-profile-partial.json"
+    let data = %*{
+      "profiles": {
+        "fast": {"timeout": 5}
+      }
+    }
+    writeFile(path, $data)
+    defer: removeFile(path)
+
+    let prof = loadProfile("fast", path)
+    check prof.hasTimeout == true
+    check prof.timeout == 5
+    check prof.hasInterval == false
+    check prof.hasTierFilter == false
+
+  test "missing profiles section returns empty":
+    let path = "/tmp/test-nimakai-profile-noprof.json"
+    let data = %*{"interval": 5}
+    writeFile(path, $data)
+    defer: removeFile(path)
+
+    let prof = loadProfile("any", path)
+    check prof.hasInterval == false

@@ -3,7 +3,7 @@
 import std/strutils
 
 const
-  Version* = "0.5.0"
+  Version* = "0.9.0"
   GitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null || echo unknown").strip()
   BuildDate* = CompileDate & " " & CompileTime
   BaseURL* = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -67,8 +67,15 @@ type
     tier*: Tier
     sweScore*: float
     ctxSize*: int
+    outputLimit*: int
     thinking*: bool
     multimodal*: bool
+
+  ThroughputResult* = object
+    ttft*: float       ## time to first token (ms)
+    totalMs*: float    ## total response time (ms)
+    tokenCount*: int   ## tokens generated
+    tokPerSec*: float  ## throughput
 
   Thresholds* = object
     perfectAvg*: float
@@ -100,6 +107,9 @@ type
     smHistory = "history"
     smTrends = "trends"
     smOpencode = "opencode"
+    smWatch = "watch"
+    smCheck = "check"
+    smDiscover = "discover"
 
   Config* = object
     models*: seq[string]
@@ -118,6 +128,12 @@ type
     rounds*: int
     applySync*: bool
     rollback*: bool
+    recHistory*: bool
+    throughput*: bool
+    alertThreshold*: float
+    failIfDegraded*: bool
+    days*: int
+    profile*: string
     thresholds*: Thresholds
     categoryWeights*: seq[tuple[category: string, weights: CategoryWeights]]
 

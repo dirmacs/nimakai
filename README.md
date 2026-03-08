@@ -14,7 +14,7 @@
 
 ---
 
-A focused, single-binary tool that continuously pings NVIDIA NIM models and reports latency metrics. Includes a 46-model tiered catalog, recommendation engine for [oh-my-opencode](https://github.com/bkataru/oh-my-opencode) routing, and full sync mode. No bloat, no TUI framework, no telemetry. Just latency numbers.
+A focused, single-binary tool that continuously pings NVIDIA NIM models and reports latency metrics. Includes a 46-model tiered catalog, recommendation engine for [oh-my-opencode](https://github.com/bkataru/oh-my-opencode) routing, watch mode with alerts, CI health checks, live model discovery, and full sync mode. No bloat, no TUI framework, no telemetry. Just latency numbers.
 
 ## Metrics
 
@@ -73,6 +73,9 @@ nimakai --once --json
 nimakai                    Continuous benchmark (default)
 nimakai catalog            List all 46 known models with tiers and metadata
 nimakai recommend          Benchmark and recommend routing changes
+nimakai watch              Monitor OMO-routed models with alerts
+nimakai check              CI health check with exit codes
+nimakai discover           Compare API models against catalog
 nimakai history            Show historical benchmark data
 nimakai trends             Show latency trend analysis (improving/degrading/stable)
 nimakai opencode           Show models from opencode.json + OMO routing
@@ -131,6 +134,15 @@ Each OMO category is scored using weighted criteria:
 | `--rounds` | `-r` | Benchmark rounds for recommend | 3 |
 | `--apply` | | Apply recommendations to oh-my-opencode.json | |
 | `--rollback` | | Rollback oh-my-opencode.json from backup | |
+| `--quiet` | `-q` | Suppress stderr status messages | |
+| `--no-history` | | Don't write to history file | |
+| `--dry-run` | | Preview recommend changes without applying | |
+| `--rec-history` | | Show recommendation history | |
+| `--throughput` | | Measure output token throughput | |
+| `--alert-threshold` | | Alert threshold for watch mode | 50 |
+| `--fail-if-degraded` | | Exit 1 if any model is degraded (check mode) | |
+| `--days` | `-d` | Days of history to show | 7 |
+| `--profile` | | Load named profile from config | |
 | `--help` | `-h` | Show help | |
 | `--version` | `-v` | Show version | |
 
@@ -149,9 +161,15 @@ Optional config at `~/.config/nimakai/config.json`:
     "normal_p95": 2000,
     "spike_ms": 3000
   },
+  "profiles": {
+    "work": { "interval": 10, "tier_filter": "S", "rounds": 5 },
+    "fast": { "timeout": 5 }
+  },
   "favorites": []
 }
 ```
+
+Use profiles with `nimakai --profile work` to load pre-configured settings.
 
 Custom models can be added via `~/.config/nimakai/models.json` to extend the built-in catalog.
 
@@ -161,29 +179,38 @@ History is persisted to `~/.local/share/nimakai/history.jsonl` (30-day auto-prun
 
 ```
 src/
-  nimakai.nim              Entry point, CLI parsing, main loop
+  nimakai.nim              Entry point, main loop, SIGINT handler
   nimakai/
     types.nim              Types, enums, constants
+    cli.nim                CLI argument parsing with profiles
     metrics.nim            Pure metric functions (avg, p50, p95, p99, jitter, stability)
-    ping.nim               HTTP ping + status-code error classification
-    catalog.nim            46-model catalog with SWE-bench tiers
+    ping.nim               HTTP ping + throughput measurement
+    catalog.nim            46-model catalog with SWE-bench tiers, O(1) index
     display.nim            Table/JSON rendering, ANSI helpers
-    config.nim             Config file persistence
-    history.nim            JSONL history persistence
+    config.nim             Config file persistence + profile loading
+    history.nim            JSONL history persistence + trend detection
     opencode.nim           OpenCode + oh-my-opencode integration
-    recommend.nim          Recommendation engine with category scoring
+    recommend.nim          Recommendation engine (categories + agents + uptime)
+    rechistory.nim         Recommendation history tracking (JSONL)
     sync.nim               Backup, apply, rollback for OMO config
+    watch.nim              Watch mode alerting (down/recovered/degraded)
+    discovery.nim          Live model discovery from NVIDIA API
 tests/
     test_types.nim         9 tests
     test_metrics.nim       37 tests
-    test_display.nim       21 tests
-    test_ping.nim          13 tests
-    test_catalog.nim       13 tests
-    test_config.nim        5 tests
+    test_display.nim       32 tests
+    test_ping.nim          15 tests
+    test_catalog.nim       22 tests
+    test_config.nim        12 tests
     test_opencode.nim      5 tests
-    test_recommend.nim     15 tests
-    test_sync.nim          16 tests
+    test_recommend.nim     33 tests
+    test_sync.nim          17 tests
     test_history.nim       28 tests
+    test_rechistory.nim    9 tests
+    test_watch.nim         8 tests
+    test_integration.nim   12 tests
+    test_discovery.nim     9 tests
+    test_cli.nim           68 tests
 ```
 
 ## License

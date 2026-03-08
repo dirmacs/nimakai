@@ -231,6 +231,53 @@ suite "parseArgs subcommands":
     check cfg.subcommand == smCatalog
     check cfg.tierFilter == "A"
 
+suite "parseArgs space-separated values":
+  test "--interval space-separated":
+    let cfg = parseArgs(@["--interval", "10"])
+    check cfg.interval == 10
+
+  test "-i space-separated":
+    let cfg = parseArgs(@["-i", "20"])
+    check cfg.interval == 20
+
+  test "--timeout space-separated":
+    let cfg = parseArgs(@["--timeout", "30"])
+    check cfg.timeout == 30
+
+  test "--rounds space-separated":
+    let cfg = parseArgs(@["--rounds", "5"])
+    check cfg.rounds == 5
+
+  test "--models space-separated":
+    let cfg = parseArgs(@["--models", "m1,m2"])
+    check cfg.models == @["m1", "m2"]
+
+  test "--tier space-separated":
+    let cfg = parseArgs(@["--tier", "S"])
+    check cfg.tierFilter == "S"
+
+  test "--sort space-separated":
+    let cfg = parseArgs(@["--sort", "avg"])
+    check cfg.sortColumn == scAvg
+
+suite "parseArgs watch and check":
+  test "watch subcommand":
+    let cfg = parseArgs(@["watch"])
+    check cfg.subcommand == smWatch
+
+  test "check subcommand":
+    let cfg = parseArgs(@["check"])
+    check cfg.subcommand == smCheck
+
+  test "--fail-if-degraded":
+    let cfg = parseArgs(@["check", "--fail-if-degraded"])
+    check cfg.subcommand == smCheck
+    check cfg.failIfDegraded == true
+
+  test "--throughput":
+    let cfg = parseArgs(@["--throughput"])
+    check cfg.throughput == true
+
 suite "parseArgs combined scenarios":
   test "full recommend command":
     let cfg = parseArgs(@["recommend", "--rounds=5", "--apply", "--quiet"])
@@ -266,3 +313,43 @@ suite "parseArgs combined scenarios":
     let cfg = parseArgs(@["--json", "opencode"])
     check cfg.subcommand == smOpencode
     check cfg.jsonOutput == true
+
+suite "parseArgs days flag":
+  test "--days default":
+    let cfg = parseArgs(@[])
+    check cfg.days == 7
+
+  test "--days with value":
+    let cfg = parseArgs(@["--days=14"])
+    check cfg.days == 14
+
+  test "-d short flag":
+    let cfg = parseArgs(@["-d:30"])
+    check cfg.days == 30
+
+  test "--days space-separated":
+    let cfg = parseArgs(@["--days", "21"])
+    check cfg.days == 21
+
+  test "--days with history subcommand":
+    let cfg = parseArgs(@["history", "--days=14"])
+    check cfg.subcommand == smHistory
+    check cfg.days == 14
+
+suite "parseArgs discover and profile":
+  test "discover subcommand":
+    let cfg = parseArgs(@["discover"])
+    check cfg.subcommand == smDiscover
+
+  test "discover with --json":
+    let cfg = parseArgs(@["discover", "--json"])
+    check cfg.subcommand == smDiscover
+    check cfg.jsonOutput == true
+
+  test "--profile flag":
+    let cfg = parseArgs(@["--profile=work"])
+    check cfg.profile == "work"
+
+  test "--profile space-separated":
+    let cfg = parseArgs(@["--profile", "fast"])
+    check cfg.profile == "fast"

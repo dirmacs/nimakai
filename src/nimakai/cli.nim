@@ -21,6 +21,7 @@ proc parseArgs*(params: seq[string]): Config =
     rounds: 3,
     applySync: false,
     rollback: false,
+    days: 7,
     thresholds: DefaultThresholds,
   )
 
@@ -44,9 +45,18 @@ proc parseArgs*(params: seq[string]): Config =
     of "history": result.subcommand = smHistory
     of "trends": result.subcommand = smTrends
     of "opencode": result.subcommand = smOpencode
+    of "watch": result.subcommand = smWatch
+    of "check": result.subcommand = smCheck
+    of "discover": result.subcommand = smDiscover
     else: discard
 
-  var p = initOptParser(params)
+  const shortNoVal = {'1', 'j', 'q'}
+  const longNoVal = @["once", "json", "quiet", "no-history", "dry-run",
+                       "apply", "rollback", "opencode", "help", "version",
+                       "rec-history", "throughput", "fail-if-degraded"]
+  var cliSetInterval, cliSetTimeout, cliSetTierFilter, cliSetRounds = false
+  var p = initOptParser(params, shortNoVal = shortNoVal, longNoVal = longNoVal,
+                        mode = LaxMode)
   while true:
     p.next()
     case p.kind
@@ -61,13 +71,18 @@ proc parseArgs*(params: seq[string]): Config =
           let trimmed = m.strip()
           if trimmed.len > 0: result.models.add(trimmed)
       of "interval", "i":
-        try: result.interval = parseInt(p.val)
+        try:
+          result.interval = parseInt(p.val)
+          cliSetInterval = true
         except ValueError: discard
       of "timeout", "t":
-        try: result.timeout = parseInt(p.val)
+        try:
+          result.timeout = parseInt(p.val)
+          cliSetTimeout = true
         except ValueError: discard
       of "tier":
         result.tierFilter = p.val
+        cliSetTierFilter = true
       of "sort":
         case p.val.toLowerAscii()
         of "avg", "a": result.sortColumn = scAvg
@@ -79,13 +94,26 @@ proc parseArgs*(params: seq[string]): Config =
         else: discard
       of "opencode": result.useOpencode = true
       of "rounds", "r":
-        try: result.rounds = parseInt(p.val)
+        try:
+          result.rounds = parseInt(p.val)
+          cliSetRounds = true
         except ValueError: discard
       of "quiet", "q": result.quiet = true
       of "no-history": result.noHistory = true
       of "dry-run": result.dryRun = true
       of "apply": result.applySync = true
       of "rollback": result.rollback = true
+      of "rec-history": result.recHistory = true
+      of "throughput": result.throughput = true
+      of "fail-if-degraded": result.failIfDegraded = true
+      of "alert-threshold":
+        try: result.alertThreshold = parseFloat(p.val)
+        except ValueError: discard
+      of "days", "d":
+        try: result.days = parseInt(p.val)
+        except ValueError: discard
+      of "profile":
+        result.profile = p.val
       of "help", "h":
         echo &"""
 nimakai v{Version} - NVIDIA NIM latency benchmarker
@@ -96,6 +124,9 @@ Commands:
   (default)              Continuous benchmark
   catalog                List all known models with metadata
   recommend              Benchmark and recommend routing changes
+  watch                  Monitor OMO-routed models with alerts
+  check                  CI health check with exit codes
+  discover               Compare API models against catalog
   history                Show historical benchmark data
   trends                 Show latency trend analysis
   opencode               Show models from opencode.json
@@ -115,6 +146,12 @@ Options:
   --quiet, -q            Suppress stderr status messages
   --no-history           Don't write to history file
   --dry-run              Preview recommend changes without applying
+  --rec-history          Show recommendation history
+  --throughput           Measure output token throughput
+  --alert-threshold <n>  Alert threshold for watch mode (default: 50)
+  --fail-if-degraded     Exit 1 if any model is degraded (check mode)
+  --days, -d <n>         Days of history to show (default: 7)
+  --profile <name>       Load named profile from config
   --help, -h             Show this help
   --version, -v          Show version
 
@@ -143,6 +180,19 @@ Examples:
     of cmdArgument:
       # Subcommand args already handled above
       discard
+
+  # Apply profile overrides after CLI parsing.
+  # Profile values are applied only when the CLI didn't explicitly set them.
+  if result.profile.len > 0:
+    let prof = loadProfile(result.profile)
+    if prof.hasInterval and not cliSetInterval:
+      result.interval = prof.interval
+    if prof.hasTimeout and not cliSetTimeout:
+      result.timeout = prof.timeout
+    if prof.hasTierFilter and not cliSetTierFilter:
+      result.tierFilter = prof.tierFilter
+    if prof.hasRounds and not cliSetRounds:
+      result.rounds = prof.rounds
 
 proc parseArgs*(): Config =
   parseArgs(commandLineParams())

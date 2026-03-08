@@ -13,6 +13,8 @@ type
   OmoAgent* = object
     name*: string
     model*: string  # model ID without "nvidia/" prefix
+    maxTokens*: int
+    thinking*: bool
 
   OmoCategory* = object
     name*: string
@@ -71,10 +73,14 @@ proc parseOmoConfig*(path: string = ""): OmoConfig =
       for name, cfg in data["agents"].pairs:
         let model = cfg{"model"}.getStr("")
         if model.len > 0:
-          result.agents.add(OmoAgent(
+          var agent = OmoAgent(
             name: name,
             model: stripNvidiaPrefix(model),
-          ))
+            maxTokens: cfg{"max_tokens"}.getInt(0),
+          )
+          if cfg.hasKey("chat_template_kwargs"):
+            agent.thinking = cfg["chat_template_kwargs"]{"enable_thinking"}.getBool(false)
+          result.agents.add(agent)
 
     if data.hasKey("categories"):
       for name, cfg in data["categories"].pairs:

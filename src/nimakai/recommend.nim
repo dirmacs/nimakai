@@ -71,6 +71,19 @@ proc scoreModel*(stats: ModelStats, meta: ModelMeta, need: CategoryNeed,
   if need == cnVision and not meta.multimodal:
     score *= 0.20
 
+  # Thinking bonus: 10% for quality/reliability needs
+  if meta.thinking and need in {cnQuality, cnReliability}:
+    score *= 1.10
+
+  # Output limit penalty: if known and < 8192, penalize quality/reliability
+  if meta.outputLimit > 0 and meta.outputLimit < 8192 and need in {cnQuality, cnReliability}:
+    score *= 0.70
+
+  # Availability gate: low uptime penalizes score proportionally
+  if stats.totalPings > 0:
+    let up = stats.uptime()
+    score *= (up / 100.0)
+
   score
 
 proc recommend*(stats: seq[ModelStats], cat: seq[ModelMeta],
@@ -185,3 +198,102 @@ proc recommendationsToJson*(recs: seq[Recommendation]): JsonNode =
       "recommended_score": r.recommendedScore,
     })
   %*{"recommendations": arr}
+
+proc classifyAgentNeed*(agent: OmoAgent): CategoryNeed =
+  ## Classify an OMO agent's need based on its parameters.
+  let nameLower = agent.name.toLowerAscii()
+  if "multimodal" in nameLower or "visual" in nameLower:
+    return cnVision
+  if agent.thinking and agent.maxTokens > 16384:
+    return cnQuality
+  if agent.thinking and agent.maxTokens <= 16384:
+    return cnReliability
+  if agent.maxTokens > 0 and agent.maxTokens <= 4096 or
+     (not agent.thinking and agent.maxTokens == 0):
+    return cnSpeed
+  cnBalance
+
+proc recommendAgents*(stats: seq[ModelStats], cat: seq[ModelMeta],
+                      omo: OmoConfig,
+                      th: Thresholds = DefaultThresholds,
+                      weightOverrides: seq[tuple[category: string, weights: CategoryWeights]] = @[]): seq[Recommendation] =
+  ## Generate routing recommendations for each OMO agent.
+  for agent in omo.agents:
+    let need = classifyAgentNeed(agent)
+
+    var customW = CategoryWeights()
+    for wo in weightOverrides:
+      if wo.category == agent.name:
+        customW = wo.weights
+        break
+
+    var bestModel = ""
+    var bestScore = -1.0
+    var currentScore = -1.0
+
+    for s in stats:
+      let meta = cat.lookupMeta(s.id)
+      if meta.isNone: continue
+      if s.ringLen == 0: continue
+
+      let score = scoreModel(s, meta.get, need, th, customW)
+
+      if score > bestScore:
+        bestScore = score
+        bestModel = s.id
+
+      if s.id == agent.model:
+        currentScore = score
+
+    if bestModel.len == 0: continue
+
+    var reason = ""
+    if bestModel == agent.model:
+      reason = "already optimal"
+    else:
+      reason = "higher composite score for " & $need
+
+    result.add(Recommendation(
+      category: agent.name,
+      currentModel: agent.model,
+      recommendedModel: bestModel,
+      reason: reason,
+      currentScore: currentScore,
+      recommendedScore: bestScore,
+    ))
+
+proc printAgentRecommendations*(recs: seq[Recommendation], rounds: int) =
+  if recs.len == 0: return
+
+  echo ""
+  echo &"\e[1m nimakai v{Version}\e[0m  \e[90magent recommendations based on {rounds} rounds\e[0m"
+  echo ""
+
+  echo "\e[1;90m  " & padRight("AGENT", 22) & padRight("CURRENT", 32) &
+       padRight("RECOMMENDED", 32) & padRight("REASON", 40) & "\e[0m"
+  echo "\e[90m  " & "-".repeat(126) & "\e[0m"
+
+  for r in recs:
+    let recDisplay = if r.recommendedModel == r.currentModel: "(no change)"
+                     else: r.recommendedModel
+    let recColor = if r.recommendedModel == r.currentModel: "\e[90m"
+                   else: "\e[32m"
+    echo "  " & padRight(r.category, 22) &
+         padRight(r.currentModel, 32) &
+         recColor & padRight(recDisplay, 32) & "\e[0m" &
+         "\e[90m" & r.reason & "\e[0m"
+
+  echo ""
+
+proc agentRecommendationsToJson*(recs: seq[Recommendation]): JsonNode =
+  var arr = newJArray()
+  for r in recs:
+    arr.add(%*{
+      "agent": r.category,
+      "current_model": r.currentModel,
+      "recommended_model": r.recommendedModel,
+      "reason": r.reason,
+      "current_score": r.currentScore,
+      "recommended_score": r.recommendedScore,
+    })
+  %*{"agent_recommendations": arr}

@@ -1,6 +1,6 @@
 ## HTTP ping and error classification for nimakai.
 
-import std/[httpclient, json, times, strutils, net]
+import std/[httpclient, json, times, strutils, net, streams]
 import ./types
 
 proc classifyHealth*(statusCode: int, msg: string): Health =
@@ -57,3 +57,71 @@ proc doPing*(apiKey, modelId: string, timeout: int): PingResult {.gcsafe.} =
       errorMsg: e.msg,
       timestamp: t0,
     )
+
+proc doThroughputPing*(apiKey, modelId: string, timeout: int,
+                       maxTokens: int = 64): ThroughputResult {.gcsafe.} =
+  ## Send a streaming chat completion request to measure throughput.
+  let payload = $(%*{
+    "model": modelId,
+    "messages": [{"role": "user", "content": "Count from 1 to 20."}],
+    "max_tokens": maxTokens,
+    "stream": true
+  })
+
+  let sslCtx = newContext(verifyMode = CVerifyPeer)
+  let client = newHttpClient(timeout = timeout * 1000, sslContext = sslCtx)
+  client.headers = newHttpHeaders({
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " & apiKey
+  })
+
+  let t0 = epochTime()
+  try:
+    let resp = client.post(BaseURL, payload)
+    let code = parseInt($resp.code)
+    if code != 200:
+      let ms = (epochTime() - t0) * 1000.0
+      client.close()
+      return ThroughputResult(ttft: ms, totalMs: ms)
+
+    let body = resp.body
+    var ttft = -1.0
+    var tokenCount = 0
+
+    for line in body.splitLines():
+      if not line.startsWith("data: "): continue
+      let data = line[6..^1].strip()
+      if data == "[DONE]": break
+
+      if ttft < 0:
+        ttft = (epochTime() - t0) * 1000.0
+
+      try:
+        let chunk = parseJson(data)
+        if chunk.hasKey("choices") and chunk["choices"].len > 0:
+          let delta = chunk["choices"][0]{"delta"}
+          if delta != nil and delta.hasKey("content"):
+            let content = delta["content"].getStr()
+            if content.len > 0:
+              inc tokenCount
+      except CatchableError:
+        discard
+
+    let totalMs = (epochTime() - t0) * 1000.0
+    if ttft < 0: ttft = totalMs
+    let tokPerSec = if totalMs > ttft and tokenCount > 0:
+                      tokenCount.float / ((totalMs - ttft) / 1000.0)
+                    else: 0.0
+
+    client.close()
+    result = ThroughputResult(
+      ttft: ttft,
+      totalMs: totalMs,
+      tokenCount: tokenCount,
+      tokPerSec: tokPerSec,
+    )
+  except CatchableError:
+    let ms = (epochTime() - t0) * 1000.0
+    try: client.close()
+    except CatchableError: discard
+    result = ThroughputResult(ttft: ms, totalMs: ms)

@@ -5,13 +5,19 @@ import std/[os, strformat, strutils, times, options, json]
 import std/posix
 import posix/termios as term_mod
 import malebolgia
-import nimakai/[types, ping, catalog, display, config, history,
-                opencode, recommend, sync, cli]
+import nimakai/[types, ping, catalog, display, config, history, metrics,
+                opencode, recommend, rechistory, sync, watch, discovery, cli]
 
 # --- Terminal raw mode for interactive sorting ---
 
 var origTermios: Termios
 var rawModeEnabled = false
+
+proc disableRawMode()
+
+proc sigintHandler(sig: cint) {.noconv.} =
+  disableRawMode()
+  quit(0)
 
 proc enableRawMode() =
   discard tcGetAttr(0.cint, addr origTermios)
@@ -21,6 +27,7 @@ proc enableRawMode() =
   raw.c_cc[VTIME] = '\0'
   discard tcSetAttr(0.cint, TCSANOW, addr raw)
   rawModeEnabled = true
+  discard signal(SIGINT, sigintHandler)
 
 proc disableRawMode() =
   if rawModeEnabled:
@@ -166,6 +173,10 @@ proc runRecommend(cfg: Config, cat: seq[ModelMeta]) =
     discard rollbackOmo()
     return
 
+  if cfg.recHistory:
+    printRecHistory()
+    return
+
   if cfg.apiKey.len == 0:
     stderr.writeLine "\e[31mError: NVIDIA_API_KEY required for benchmarking\e[0m"
     quit(1)
@@ -176,6 +187,10 @@ proc runRecommend(cfg: Config, cat: seq[ModelMeta]) =
   for c in omo.categories:
     if c.model notin modelSet:
       modelSet.add(c.model)
+  # Include agent models
+  for a in omo.agents:
+    if a.model notin modelSet:
+      modelSet.add(a.model)
   # Also benchmark all catalog models that could be alternatives
   for m in cat:
     if m.id notin modelSet:
@@ -225,16 +240,192 @@ proc runRecommend(cfg: Config, cat: seq[ModelMeta]) =
     stderr.writeLine "\r\e[90m  benchmarking complete.     \e[0m"
 
   let recs = recommend(stats, cat, omo, cfg.thresholds, cfg.categoryWeights)
+  let agentRecs = recommendAgents(stats, cat, omo, cfg.thresholds, cfg.categoryWeights)
 
   if cfg.jsonOutput:
-    echo $recommendationsToJson(recs)
+    var j = recommendationsToJson(recs)
+    let aj = agentRecommendationsToJson(agentRecs)
+    j["agent_recommendations"] = aj["agent_recommendations"]
+    echo $j
   elif cfg.applySync and not cfg.dryRun:
     printRecommendations(recs, cfg.rounds)
+    printAgentRecommendations(agentRecs, cfg.rounds)
     discard syncRecommendations(recs)
   else:
     printRecommendations(recs, cfg.rounds)
+    printAgentRecommendations(agentRecs, cfg.rounds)
     if cfg.dryRun and cfg.applySync:
       stderr.writeLine "\e[90m  (dry-run: changes not applied)\e[0m"
+
+  # Persist to recommendation history
+  let applied = cfg.applySync and not cfg.dryRun
+  appendRecHistory(recs, agentRecs, cfg.rounds, applied)
+
+proc runWatch(cfg: Config, cat: seq[ModelMeta]) =
+  if cfg.apiKey.len == 0:
+    stderr.writeLine "\e[31mError: NVIDIA_API_KEY required\e[0m"
+    quit(1)
+
+  let omo = parseOmoConfig()
+  var modelSet: seq[string] = @[]
+  for c in omo.categories:
+    if c.model notin modelSet:
+      modelSet.add(c.model)
+  for a in omo.agents:
+    if a.model notin modelSet:
+      modelSet.add(a.model)
+
+  if modelSet.len == 0:
+    stderr.writeLine "\e[31mError: no OMO-routed models found\e[0m"
+    quit(1)
+
+  if not cfg.quiet:
+    stderr.writeLine &"\e[1m nimakai\e[0m v{Version}"
+    stderr.writeLine &"\e[90m  watch mode | {modelSet.len} OMO models | {cfg.interval}s interval\e[0m"
+
+  var stats: seq[ModelStats] = @[]
+  for m in modelSet:
+    let meta = cat.lookupMeta(m)
+    let name = if meta.isSome: meta.get.name else: m
+    stats.add(ModelStats(id: m, name: name, lastHealth: hPending))
+
+  var prevStats: seq[ModelStats] = @[]
+  var round = 0
+  let stabThreshold = if cfg.alertThreshold > 0: cfg.alertThreshold else: 50.0
+
+  while true:
+    inc round
+    prevStats = stats
+
+    var results = newSeq[PingResult](stats.len)
+    for i in 0..<results.len:
+      results[i] = PingResult(health: hTimeout, ms: float(cfg.timeout * 1000))
+
+    try:
+      var m = createMaster(timeout = initDuration(seconds = cfg.timeout + 5))
+      m.awaitAll:
+        for i in 0..<stats.len:
+          m.spawn doPing(cfg.apiKey, stats[i].id, cfg.timeout) -> results[i]
+    except CatchableError as e:
+      if not cfg.quiet:
+        stderr.writeLine &"\e[33mWarning: ping pool error: {e.msg}\e[0m"
+
+    for i in 0..<stats.len:
+      let pr = results[i]
+      stats[i].totalPings += 1
+      stats[i].lastMs = pr.ms
+      stats[i].lastHealth = pr.health
+      if pr.health == hUp:
+        stats[i].successPings += 1
+        stats[i].addSample(pr.ms)
+
+    sortStats(stats, cfg.sortColumn, cat, cfg.thresholds)
+
+    if not cfg.jsonOutput:
+      if round > 1:
+        stdout.write "\e[2J\e[H"
+      printTable(stats, round, cat, cfg.sortColumn, cfg.thresholds)
+
+    # Check alerts
+    if round > 1:
+      let alerts = checkAlerts(stats, prevStats, cfg.thresholds, stabThreshold)
+      for alert in alerts:
+        printAlert(alert)
+
+    if not cfg.noHistory:
+      appendRound(stats, round)
+
+    if cfg.once:
+      break
+
+    sleep(cfg.interval * 1000)
+
+proc runCheck(cfg: Config, cat: seq[ModelMeta]) =
+  if cfg.apiKey.len == 0:
+    stderr.writeLine "\e[31mError: NVIDIA_API_KEY required\e[0m"
+    quit(1)
+
+  let omo = parseOmoConfig()
+  var modelSet: seq[string] = @[]
+  for c in omo.categories:
+    if c.model notin modelSet:
+      modelSet.add(c.model)
+  for a in omo.agents:
+    if a.model notin modelSet:
+      modelSet.add(a.model)
+
+  if modelSet.len == 0:
+    stderr.writeLine "\e[31mError: no OMO-routed models found\e[0m"
+    quit(1)
+
+  if not cfg.quiet:
+    stderr.writeLine &"\e[1m nimakai\e[0m v{Version}"
+    stderr.writeLine &"\e[90m  check mode | {cfg.rounds} rounds | {modelSet.len} models\e[0m"
+
+  var stats: seq[ModelStats] = @[]
+  for m in modelSet:
+    let meta = cat.lookupMeta(m)
+    let name = if meta.isSome: meta.get.name else: m
+    stats.add(ModelStats(id: m, name: name, lastHealth: hPending))
+
+  for round in 1..cfg.rounds:
+    if not cfg.quiet:
+      stderr.write &"\r\e[90m  round {round}/{cfg.rounds}...\e[0m"
+
+    var results = newSeq[PingResult](stats.len)
+    for i in 0..<results.len:
+      results[i] = PingResult(health: hTimeout, ms: float(cfg.timeout * 1000))
+
+    try:
+      var m = createMaster(timeout = initDuration(seconds = cfg.timeout + 5))
+      m.awaitAll:
+        for i in 0..<stats.len:
+          m.spawn doPing(cfg.apiKey, stats[i].id, cfg.timeout) -> results[i]
+    except CatchableError as e:
+      if not cfg.quiet:
+        stderr.writeLine &"\e[33mWarning: ping pool error: {e.msg}\e[0m"
+
+    for i in 0..<stats.len:
+      let pr = results[i]
+      stats[i].totalPings += 1
+      stats[i].lastMs = pr.ms
+      stats[i].lastHealth = pr.health
+      if pr.health == hUp:
+        stats[i].successPings += 1
+        stats[i].addSample(pr.ms)
+
+    if round < cfg.rounds:
+      sleep(2000)
+
+  if not cfg.quiet:
+    stderr.writeLine "\r\e[90m  check complete.         \e[0m"
+
+  # Build JSON summary
+  var degraded = false
+  var results = newJArray()
+  for s in stats:
+    let up = s.uptime()
+    let stab = s.stabilityScore(cfg.thresholds)
+    let isDegraded = s.lastHealth != hUp or up < 50 or (stab >= 0 and stab < 50)
+    if isDegraded: degraded = true
+    results.add(%*{
+      "model": s.id,
+      "health": $s.lastHealth,
+      "avg_ms": s.avg(),
+      "uptime_pct": up,
+      "stability": stab,
+      "degraded": isDegraded,
+    })
+
+  let output = %*{
+    "status": if degraded: "degraded" else: "healthy",
+    "rounds": cfg.rounds,
+    "models": results,
+  }
+  echo $output
+
+  if degraded and cfg.failIfDegraded:
+    quit(1)
 
 proc main() =
   let cfg = parseArgs()
@@ -245,15 +436,18 @@ proc main() =
     var filtered = cat
     if cfg.tierFilter.len > 0:
       filtered = filterByTier(cat, cfg.tierFilter)
-    printCatalog(filtered)
+    if cfg.jsonOutput:
+      printCatalogJson(filtered)
+    else:
+      printCatalog(filtered)
     return
 
   of smHistory:
-    printHistory()
+    printHistory(cfg.days)
     return
 
   of smTrends:
-    printTrends()
+    printTrends(cfg.days)
     return
 
   of smOpencode:
@@ -265,6 +459,25 @@ proc main() =
 
   of smRecommend:
     runRecommend(cfg, cat)
+    return
+
+  of smWatch:
+    runWatch(cfg, cat)
+    return
+
+  of smCheck:
+    runCheck(cfg, cat)
+    return
+
+  of smDiscover:
+    if cfg.apiKey.len == 0:
+      stderr.writeLine "\e[31mError: NVIDIA_API_KEY required\e[0m"
+      quit(1)
+    let discovered = discoverModels(cfg.apiKey, cfg.timeout)
+    if cfg.jsonOutput:
+      echo discoveryToJson(discovered, cat)
+    else:
+      printDiscovery(discovered, cat)
     return
 
   of smBenchmark:

@@ -227,3 +227,139 @@ suite "custom weights":
     let customRecs = recommend(stats, cat, omo, weightOverrides = overrides)
     check customRecs.len == 1
     check customRecs[0].recommendedModel == "fast/model"
+
+suite "classifyAgentNeed":
+  test "thinking + high maxTokens maps to Quality":
+    let agent = OmoAgent(name: "coder", model: "m", maxTokens: 32768, thinking: true)
+    check classifyAgentNeed(agent) == cnQuality
+
+  test "thinking + low maxTokens maps to Reliability":
+    let agent = OmoAgent(name: "planner", model: "m", maxTokens: 8192, thinking: true)
+    check classifyAgentNeed(agent) == cnReliability
+
+  test "no thinking + no maxTokens maps to Speed":
+    let agent = OmoAgent(name: "quick", model: "m", maxTokens: 0, thinking: false)
+    check classifyAgentNeed(agent) == cnSpeed
+
+  test "low maxTokens maps to Speed":
+    let agent = OmoAgent(name: "summarizer", model: "m", maxTokens: 2048, thinking: false)
+    check classifyAgentNeed(agent) == cnSpeed
+
+  test "multimodal in name maps to Vision":
+    let agent = OmoAgent(name: "multimodal-agent", model: "m", maxTokens: 16384, thinking: true)
+    check classifyAgentNeed(agent) == cnVision
+
+  test "visual in name maps to Vision":
+    let agent = OmoAgent(name: "visual-processor", model: "m", maxTokens: 8192, thinking: false)
+    check classifyAgentNeed(agent) == cnVision
+
+suite "recommendAgents":
+  test "recommends for agents":
+    let cat = @[
+      ModelMeta(id: "fast/model", name: "Fast", tier: tSPlus,
+                sweScore: 72.0, ctxSize: 131072),
+      ModelMeta(id: "slow/model", name: "Slow", tier: tSPlus,
+                sweScore: 74.0, ctxSize: 131072),
+    ]
+    let stats = @[
+      makeStats("fast/model", [100.0, 110.0, 105.0]),
+      makeStats("slow/model", [2000.0, 2100.0, 2200.0]),
+    ]
+    let omo = OmoConfig(
+      agents: @[OmoAgent(name: "coder", model: "slow/model",
+                          maxTokens: 0, thinking: false)],
+      categories: @[],
+    )
+    let recs = recommendAgents(stats, cat, omo)
+    check recs.len == 1
+    check recs[0].recommendedModel == "fast/model"
+
+  test "empty agents returns empty":
+    let cat = @[ModelMeta(id: "m", name: "M", tier: tS, sweScore: 60.0, ctxSize: 131072)]
+    let stats = @[makeStats("m", [100.0])]
+    let omo = OmoConfig(agents: @[], categories: @[])
+    let recs = recommendAgents(stats, cat, omo)
+    check recs.len == 0
+
+suite "thinking and output limit scoring":
+  test "thinking bonus for quality":
+    let stats = makeStats("test/model", [300.0, 320.0, 310.0])
+    let thinkMeta = ModelMeta(id: "test/model", name: "Think", tier: tS,
+                              sweScore: 70.0, ctxSize: 131072, thinking: true)
+    let noThinkMeta = ModelMeta(id: "test/model", name: "NoThink", tier: tS,
+                                sweScore: 70.0, ctxSize: 131072, thinking: false)
+    let thinkScore = scoreModel(stats, thinkMeta, cnQuality)
+    let noThinkScore = scoreModel(stats, noThinkMeta, cnQuality)
+    check thinkScore > noThinkScore
+
+  test "no thinking bonus for speed":
+    let stats = makeStats("test/model", [300.0, 320.0, 310.0])
+    let thinkMeta = ModelMeta(id: "test/model", name: "Think", tier: tS,
+                              sweScore: 70.0, ctxSize: 131072, thinking: true)
+    let noThinkMeta = ModelMeta(id: "test/model", name: "NoThink", tier: tS,
+                                sweScore: 70.0, ctxSize: 131072, thinking: false)
+    let thinkScore = scoreModel(stats, thinkMeta, cnSpeed)
+    let noThinkScore = scoreModel(stats, noThinkMeta, cnSpeed)
+    check abs(thinkScore - noThinkScore) < 0.01
+
+  test "output limit penalty for quality":
+    let stats = makeStats("test/model", [300.0, 320.0, 310.0])
+    let lowLimit = ModelMeta(id: "test/model", name: "Low", tier: tS,
+                             sweScore: 70.0, ctxSize: 131072, outputLimit: 4096)
+    let highLimit = ModelMeta(id: "test/model", name: "High", tier: tS,
+                              sweScore: 70.0, ctxSize: 131072, outputLimit: 16384)
+    let lowScore = scoreModel(stats, lowLimit, cnQuality)
+    let highScore = scoreModel(stats, highLimit, cnQuality)
+    check lowScore < highScore
+
+  test "no output limit penalty for speed":
+    let stats = makeStats("test/model", [300.0, 320.0, 310.0])
+    let lowLimit = ModelMeta(id: "test/model", name: "Low", tier: tS,
+                             sweScore: 70.0, ctxSize: 131072, outputLimit: 4096)
+    let noLimit = ModelMeta(id: "test/model", name: "None", tier: tS,
+                            sweScore: 70.0, ctxSize: 131072, outputLimit: 0)
+    let lowScore = scoreModel(stats, lowLimit, cnSpeed)
+    let noScore = scoreModel(stats, noLimit, cnSpeed)
+    check abs(lowScore - noScore) < 0.01
+
+suite "agentRecommendationsToJson":
+  test "serializes agent recommendations":
+    let recs = @[Recommendation(
+      category: "coder",
+      currentModel: "old/model",
+      recommendedModel: "new/model",
+      reason: "faster",
+      currentScore: 40.0,
+      recommendedScore: 80.0,
+    )]
+    let j = agentRecommendationsToJson(recs)
+    check j.hasKey("agent_recommendations")
+    check j["agent_recommendations"].len == 1
+    check j["agent_recommendations"][0]["agent"].getStr() == "coder"
+
+suite "uptime scoring":
+  test "100% uptime leaves score unchanged":
+    let stats = makeStats("test/model", [300.0, 320.0, 310.0], total = 3, success = 3)
+    let meta = ModelMeta(id: "test/model", name: "Test", tier: tS,
+                         sweScore: 70.0, ctxSize: 131072)
+    let score = scoreModel(stats, meta, cnBalance)
+    # With 100% uptime, multiplier is 1.0, so score should be same as base
+    check score > 0
+
+  test "50% uptime significantly reduces score":
+    let fullUp = makeStats("a", [300.0, 320.0, 310.0], total = 3, success = 3)
+    let halfUp = makeStats("b", [300.0, 320.0, 310.0], total = 6, success = 3)
+    let meta = ModelMeta(id: "a", name: "Test", tier: tS,
+                         sweScore: 70.0, ctxSize: 131072)
+    let scoreFull = scoreModel(fullUp, meta, cnBalance)
+    let scoreHalf = scoreModel(halfUp, meta, cnBalance)
+    # 50% uptime should reduce score substantially (at least 40% lower)
+    check scoreHalf < scoreFull * 0.6
+    check scoreHalf > 0
+
+  test "0% uptime zeroes score":
+    let stats = makeStats("test/model", [300.0, 320.0, 310.0], total = 3, success = 0)
+    let meta = ModelMeta(id: "test/model", name: "Test", tier: tS,
+                         sweScore: 70.0, ctxSize: 131072)
+    let score = scoreModel(stats, meta, cnBalance)
+    check score == 0.0

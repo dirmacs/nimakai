@@ -95,6 +95,45 @@ proc saveConfigFile*(path: string = "", favorites: seq[string] = @[],
   }
   writeFile(p, pretty(data))
 
+type
+  ProfileOverrides* = object
+    interval*: int
+    timeout*: int
+    tierFilter*: string
+    rounds*: int
+    hasInterval*: bool
+    hasTimeout*: bool
+    hasTierFilter*: bool
+    hasRounds*: bool
+
+proc loadProfile*(name: string, path: string = ""): ProfileOverrides =
+  ## Load a named profile from the config file's "profiles" section.
+  ## Returns an overrides object; unset fields are left at defaults.
+  let p = if path.len > 0: path else: defaultConfigPath()
+  if not fileExists(p): return
+
+  try:
+    let data = parseJson(readFile(p))
+    if not data.hasKey("profiles"): return
+    let profiles = data["profiles"]
+    if not profiles.hasKey(name): return
+    let prof = profiles[name]
+
+    if prof.hasKey("interval"):
+      result.interval = prof["interval"].getInt()
+      result.hasInterval = true
+    if prof.hasKey("timeout"):
+      result.timeout = prof["timeout"].getInt()
+      result.hasTimeout = true
+    if prof.hasKey("tier_filter"):
+      result.tierFilter = prof["tier_filter"].getStr()
+      result.hasTierFilter = true
+    if prof.hasKey("rounds"):
+      result.rounds = prof["rounds"].getInt()
+      result.hasRounds = true
+  except CatchableError:
+    discard
+
 proc saveFavorites*(path: string, favorites: seq[string]) =
   ## Update only the favorites field in the config file.
   let p = if path.len > 0: path else: defaultConfigPath()
