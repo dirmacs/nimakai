@@ -1,5 +1,5 @@
 ## nimakai — NVIDIA NIM model latency benchmarker
-## https://github.com/bkataru/nimakai
+## https://github.com/dirmacs/nimakai
 
 import std/[os, strformat, strutils, times, options, json]
 import std/posix
