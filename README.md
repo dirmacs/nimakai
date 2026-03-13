@@ -33,7 +33,7 @@ A focused, single-binary tool that continuously pings NVIDIA NIM models and repo
 ## Install
 
 ```bash
-git clone https://github.com/bkataru/nimakai.git
+git clone https://github.com/dirmacs/nimakai.git
 cd nimakai
 nimble build
 ```
