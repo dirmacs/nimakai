@@ -31,6 +31,7 @@ const BuiltinCatalog*: seq[ModelMeta] = @[
   ModelMeta(id: "openai/gpt-oss-120b", name: "GPT OSS 120B", tier: tS, sweScore: 60.0, ctxSize: 131072, thinking: false, multimodal: false),
 
   # A+ tier (50-60%)
+  ModelMeta(id: "nvidia/nemotron-3-super-120b-a12b", name: "Nemotron 3 Super", tier: tAPlus, sweScore: 59.2, ctxSize: 1048576, thinking: true, multimodal: false),
   ModelMeta(id: "mistralai/mistral-large-3-675b-instruct-2512", name: "Mistral Large 675B", tier: tAPlus, sweScore: 58.0, ctxSize: 262144, thinking: false, multimodal: false),
   ModelMeta(id: "nvidia/llama-3.1-nemotron-ultra-253b-v1", name: "Nemotron Ultra 253B", tier: tAPlus, sweScore: 56.0, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "igenius/colosseum_355b_instruct_16k", name: "Colosseum 355B", tier: tAPlus, sweScore: 52.0, ctxSize: 16384, thinking: false, multimodal: false),
