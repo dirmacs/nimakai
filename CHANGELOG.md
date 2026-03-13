@@ -2,6 +2,11 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.9.1] - 2026-03-13
+
+### Fixed
+- **Critical**: Fix HTTP status code parsing in `doPing` and `doThroughputPing` — `parseInt($resp.code)` failed because Nim's `$HttpCode` returns `"200 OK"` not `"200"`. Replaced with `resp.code.int` which extracts the integer directly. This caused all models to show as ERROR despite being reachable.
+
 ## [0.9.0] - 2026-03-08
 
 ### Added
