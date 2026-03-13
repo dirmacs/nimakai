@@ -38,7 +38,7 @@ proc doPing*(apiKey, modelId: string, timeout: int): PingResult {.gcsafe.} =
   try:
     let resp = client.post(BaseURL, payload)
     let ms = (epochTime() - t0) * 1000.0
-    let code = parseInt($resp.code)
+    let code = resp.code.int
     client.close()
     result = PingResult(
       health: classifyHealth(code, ""),
@@ -78,7 +78,7 @@ proc doThroughputPing*(apiKey, modelId: string, timeout: int,
   let t0 = epochTime()
   try:
     let resp = client.post(BaseURL, payload)
-    let code = parseInt($resp.code)
+    let code = resp.code.int
     if code != 200:
       let ms = (epochTime() - t0) * 1000.0
       client.close()
