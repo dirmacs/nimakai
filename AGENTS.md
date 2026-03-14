@@ -1,0 +1,78 @@
+# Nimakai — Agent Context
+
+Nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.9.1. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+
+## Architecture
+
+```
+src/
+  nimakai.nim   — CLI entry: parse args, dispatch to subcommands
+  ping.nim      — HTTP ping: timed GET to NIM health endpoint, parse resp.code.int
+  metrics.nim   — Ring buffer (last 100 samples), P50/P95/P99, jitter (stddev),
+                  stability score 0–100 = composite of P95 + jitter + spike rate + uptime
+  catalog.nim   — 46-model catalog: model IDs, tier labels (S+ down to C), context windows
+  display.nim   — ncurses-style terminal table: live refresh, ANSI colors per health state
+  config.nim    — Load nim.cfg, parse --profile flag, profile variable overrides
+  recommend.nim — Score-based recommendation: given task type → best available model
+  discovery.nim — discoverModels() via NVIDIA API, diffCatalog() vs hardcoded catalog
+  history.nim   — Persist latency samples to disk, read/display trends with --days flag
+
+tests/          — 15 test files, one per module (test_metrics.nim, test_catalog.nim, etc.)
+```
+
+## Metrics Reference
+
+| Metric | How Computed |
+|--------|-------------|
+| Latest | Last round-trip time (ms) |
+| Avg | Mean of ring buffer (last 100 samples) |
+| P50 | Median of sorted ring buffer |
+| P95 | 95th percentile |
+| P99 | 99th percentile |
+| Jitter | Standard deviation of ring buffer |
+| Stability | `(100 - P95_penalty - jitter_penalty - spike_rate_penalty) * uptime_factor` |
+
+Health states: `UP`, `TIMEOUT`, `OVERLOADED`, `ERROR`, `NO_KEY`, `NOT_FOUND`
+Verdict labels: `Perfect`, `Normal`, `Slow`, `Spiky`, `Very Slow`, `Unstable`, `Not Active`
+Tiers: `S+` (SWE-bench >60%) → `S` → `A+` → `A` → `A-` → `B+` → `B` → `C`
+
+## Common Tasks
+
+**Add a new model to the catalog:**
+1. Edit `src/catalog.nim` — add entry to `MODEL_CATALOG` sequence
+2. Set tier based on SWE-bench Verified score (or reasoning equivalent)
+3. Run `nimble test` — `test_catalog.nim` validates catalog integrity
+4. Rebuild: `nimble build`
+
+**Add a new subcommand:**
+1. Add proc in the relevant module (e.g., `discovery.nim`)
+2. Add CLI dispatch case in `src/nimakai.nim`
+3. Add test file `tests/test_<name>.nim`
+4. Register test in `nimakai.nimble` task block
+
+**Change stability score formula:**
+- Formula in `src/metrics.nim` — `calcStability()` proc
+- Re-run `nimble test` to catch regressions in `test_metrics.nim`
+
+## Key Decisions
+
+- **Nim over Rust** — name pun (NIM + Nim = nimakai), fast compile, small binary
+- **`resp.code.int` not `parseInt($resp.code)`** — Nim's `$HttpCode` returns "200 OK" not "200"; fixed in 0.9.1
+- **Ring buffer capped at 100** — balances memory and statistical relevance
+- **Hardcoded catalog, not fetched** — NIM API doesn't expose tier/capability metadata; catalog is curated manually
+- **`malebolgia` for parallel pinging** — concurrent HTTP without full async overhead
+
+## Integration with oh-my-opencode
+
+Nimakai's `recommend` subcommand outputs JSON consumed by aegis-opencode for routing config generation:
+
+```bash
+./nimakai recommend --task coding --format json
+# → {"primary": "nvidia/devstral-2-123b", "fallback": "stepfun-ai/step-3.5-flash"}
+```
+
+## Environment
+
+- `NVIDIA_API_KEY` — required for NIM endpoint access; can also be set in `nim.cfg`
+- `RUST_LOG` equivalent: `nimakai --verbose` flag
+- Config file: `nim.cfg` in cwd, or `~/.config/nimakai/nim.cfg`
