@@ -6,7 +6,8 @@ import std/posix
 import posix/termios as term_mod
 import malebolgia
 import nimakai/[types, ping, catalog, display, config, history, metrics,
-                opencode, recommend, rechistory, sync, watch, discovery, cli]
+                opencode, recommend, rechistory, sync, watch, discovery, cli,
+                rustffi]
 
 # --- Terminal raw mode for interactive sorting ---
 
@@ -100,20 +101,12 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
     while true:
       inc round
 
-      var results = newSeq[PingResult](stats.len)
-      for i in 0..<results.len:
-        results[i] = PingResult(health: hTimeout, ms: float(cfg.timeout * 1000))
+      # Rust-accelerated concurrent ping
+      var modelIds: seq[string] = @[]
+      for s in stats: modelIds.add(s.id)
+      let results = rustPingBatch(cfg.apiKey, modelIds, cfg.timeout)
 
-      try:
-        var m = createMaster(timeout = initDuration(seconds = cfg.timeout + 5))
-        m.awaitAll:
-          for i in 0..<stats.len:
-            m.spawn doPing(cfg.apiKey, stats[i].id, cfg.timeout) -> results[i]
-      except CatchableError as e:
-        if not cfg.jsonOutput and not cfg.quiet:
-          stderr.writeLine &"\e[33mWarning: ping pool error: {e.msg}\e[0m"
-
-      for i in 0..<stats.len:
+      for i in 0..<min(results.len, stats.len):
         let pr = results[i]
         stats[i].totalPings += 1
         stats[i].lastMs = pr.ms
@@ -211,20 +204,12 @@ proc runRecommend(cfg: Config, cat: seq[ModelMeta]) =
     if not cfg.jsonOutput and not cfg.quiet:
       stderr.write &"\r\e[90m  round {round}/{cfg.rounds}...\e[0m"
 
-    var results = newSeq[PingResult](stats.len)
-    for i in 0..<results.len:
-      results[i] = PingResult(health: hTimeout, ms: float(cfg.timeout * 1000))
+    # Rust-accelerated concurrent ping
+    var modelIds: seq[string] = @[]
+    for s in stats: modelIds.add(s.id)
+    let results = rustPingBatch(cfg.apiKey, modelIds, cfg.timeout)
 
-    try:
-      var m = createMaster(timeout = initDuration(seconds = cfg.timeout + 5))
-      m.awaitAll:
-        for i in 0..<stats.len:
-          m.spawn doPing(cfg.apiKey, stats[i].id, cfg.timeout) -> results[i]
-    except CatchableError as e:
-      if not cfg.jsonOutput and not cfg.quiet:
-        stderr.writeLine &"\e[33mWarning: ping pool error: {e.msg}\e[0m"
-
-    for i in 0..<stats.len:
+    for i in 0..<min(results.len, stats.len):
       let pr = results[i]
       stats[i].totalPings += 1
       stats[i].lastMs = pr.ms
@@ -297,20 +282,12 @@ proc runWatch(cfg: Config, cat: seq[ModelMeta]) =
     inc round
     prevStats = stats
 
-    var results = newSeq[PingResult](stats.len)
-    for i in 0..<results.len:
-      results[i] = PingResult(health: hTimeout, ms: float(cfg.timeout * 1000))
+    # Rust-accelerated concurrent ping
+    var watchModelIds: seq[string] = @[]
+    for s in stats: watchModelIds.add(s.id)
+    let results = rustPingBatch(cfg.apiKey, watchModelIds, cfg.timeout)
 
-    try:
-      var m = createMaster(timeout = initDuration(seconds = cfg.timeout + 5))
-      m.awaitAll:
-        for i in 0..<stats.len:
-          m.spawn doPing(cfg.apiKey, stats[i].id, cfg.timeout) -> results[i]
-    except CatchableError as e:
-      if not cfg.quiet:
-        stderr.writeLine &"\e[33mWarning: ping pool error: {e.msg}\e[0m"
-
-    for i in 0..<stats.len:
+    for i in 0..<min(results.len, stats.len):
       let pr = results[i]
       stats[i].totalPings += 1
       stats[i].lastMs = pr.ms
@@ -372,20 +349,12 @@ proc runCheck(cfg: Config, cat: seq[ModelMeta]) =
     if not cfg.quiet:
       stderr.write &"\r\e[90m  round {round}/{cfg.rounds}...\e[0m"
 
-    var results = newSeq[PingResult](stats.len)
-    for i in 0..<results.len:
-      results[i] = PingResult(health: hTimeout, ms: float(cfg.timeout * 1000))
+    # Rust-accelerated concurrent ping
+    var checkModelIds: seq[string] = @[]
+    for s in stats: checkModelIds.add(s.id)
+    let results = rustPingBatch(cfg.apiKey, checkModelIds, cfg.timeout)
 
-    try:
-      var m = createMaster(timeout = initDuration(seconds = cfg.timeout + 5))
-      m.awaitAll:
-        for i in 0..<stats.len:
-          m.spawn doPing(cfg.apiKey, stats[i].id, cfg.timeout) -> results[i]
-    except CatchableError as e:
-      if not cfg.quiet:
-        stderr.writeLine &"\e[33mWarning: ping pool error: {e.msg}\e[0m"
-
-    for i in 0..<stats.len:
+    for i in 0..<min(results.len, stats.len):
       let pr = results[i]
       stats[i].totalPings += 1
       stats[i].lastMs = pr.ms
@@ -473,7 +442,8 @@ proc main() =
     if cfg.apiKey.len == 0:
       stderr.writeLine "\e[31mError: NVIDIA_API_KEY required\e[0m"
       quit(1)
-    let discovered = discoverModels(cfg.apiKey, cfg.timeout)
+    let rawJson = rustDiscoverModels(cfg.apiKey, cfg.timeout)
+    let discovered = parseDiscoverResponse(rawJson)
     if cfg.jsonOutput:
       echo discoveryToJson(discovered, cat)
     else:
