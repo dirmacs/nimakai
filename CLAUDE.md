@@ -5,7 +5,7 @@ NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.9.1. 46-
 ## Build & Test
 
 ```bash
-cd /opt/nimakai
+cd nimakai
 nimble build                       # → ./nimakai binary
 nimble test                        # runs 15 test suites
 
