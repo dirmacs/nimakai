@@ -14,7 +14,7 @@
 
 ---
 
-A focused, single-binary tool that continuously pings NVIDIA NIM models and reports latency metrics. Includes a 46-model tiered catalog, recommendation engine for [oh-my-opencode](https://github.com/bkataru/oh-my-opencode) routing, watch mode with alerts, CI health checks, live model discovery, and full sync mode. No bloat, no TUI framework, no telemetry. Just latency numbers.
+A focused, single-binary tool that continuously pings NVIDIA NIM models and reports latency metrics. Includes an 80-model tiered catalog, recommendation engine for [oh-my-opencode](https://github.com/bkataru/oh-my-opencode) routing, watch mode with alerts, CI health checks, live model discovery, and full sync mode. No bloat, no TUI framework, no telemetry. Just latency numbers.
 
 Also includes **nimaproxy** — a Rust-based key-rotation proxy for production use.
 
@@ -189,7 +189,7 @@ src/
     cli.nim                CLI argument parsing with profiles
     metrics.nim            Pure metric functions (avg, p50, p95, p99, jitter, stability)
     ping.nim               HTTP ping + throughput measurement
-    catalog.nim            46-model catalog with SWE-bench tiers, O(1) index
+    catalog.nim            80-model catalog with SWE-bench tiers, O(1) index
     display.nim            Table/JSON rendering, ANSI helpers
     config.nim             Config file persistence + profile loading
     history.nim            JSONL history persistence + trend detection
@@ -236,6 +236,7 @@ nimaproxy/
   tests/
     integration.rs         12 integration tests
     e2e_live.rs            6 E2E tests with real NVIDIA API
+    stress_test.rs         25-turn live stress test
 ```
 
 ## nimaproxy — Key-Rotation Proxy
@@ -265,6 +266,7 @@ cp nimaproxy.toml.example nimaproxy.toml
 - Automatic 429 handling with per-key cooldown
 - Latency-aware model routing (`"model": "auto"`)
 - Per-model stats tracking (TTFC, success rate, degradation detection)
+- `x-key-label` response header: tracks which key was used for rotation debugging
 
 **Model Racing (Speculative Execution):**
 ```toml
@@ -273,6 +275,7 @@ enabled = true
 models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
 max_parallel = 3
 timeout_ms = 8000
+strategy = "complete"
 ```
 Fires N parallel requests to N models, returns first response. Trades N×token budget for min(P50 latency).
 

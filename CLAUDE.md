@@ -1,6 +1,6 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.9.1. 80-model catalog with tier labels, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.9.2. 80-model catalog with tier labels, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
@@ -50,6 +50,7 @@ nimaproxy/
   tests/
     integration.rs       — 12 tests
     e2e_live.rs           — 6 live API tests
+    stress_test.rs         — 25-turn live stress test
 ```
 
 ## Key Rules
@@ -103,24 +104,22 @@ Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /health`, `GET /s
 
 **Config example:**
 ```toml
+listen = "127.0.0.1:8080"
+target = "https://integrate.api.nvidia.com"
+
 [[keys]]
 key = "nvapi-YOUR_KEY_HERE"
 label = "production"
-
-[routing]
-strategy = "latency_aware"
-spike_threshold_ms = 3000
-models = [
-  "nvidia/llama-3.3-70b-instruct",
-  "mistralai/devstral-2-123b-instruct-2512",
-]
 
 [racing]
 enabled = true
 models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
 max_parallel = 3
 timeout_ms = 8000
+strategy = "complete"
 ```
+
+`x-key-label` response header tracks which key was used for rotation debugging.
 
 ## Git Author
 
