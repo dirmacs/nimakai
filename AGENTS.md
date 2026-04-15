@@ -43,6 +43,7 @@ nimaproxy/
   tests/
     integration.rs         12 integration tests
     e2e_live.rs            6 E2E tests with real NVIDIA API (z-ai/glm4.7 model)
+    stress_test.rs         25-turn live stress test (key rotation + racing validation)
 
 ## Racing (Speculative Execution)
 
@@ -57,8 +58,7 @@ max_parallel = 3
 timeout_ms = 8000
 ```
 
-Available models: z-ai/glm4.7, qwen/qwen3.5-397b-a17b, mistralai/devstral-2-123b-instruct-2512, moonshotai/kimi-k2-instruct, minimaxai/minimax-m2.7
-```
+Available racing models: z-ai/glm4.7, qwen/qwen3.5-397b-a17b, mistralai/devstral-2-123b-instruct-2512, moonshotai/kimi-k2-instruct, minimaxai/minimax-m2.7
 
 ## Metrics Reference
 
