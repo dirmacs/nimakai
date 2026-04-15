@@ -3,7 +3,7 @@
 import std/strutils
 
 const
-  Version* = "0.9.1"
+  Version* = "0.10.0"
   GitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null || echo unknown").strip()
   BuildDate* = CompileDate & " " & CompileTime
   BaseURL* = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -77,6 +77,36 @@ type
     tokenCount*: int   ## tokens generated
     tokPerSec*: float  ## throughput
 
+  ProxyHealth* = object
+    status*: string
+    activeKeys*: int
+    routingEnabled*: bool
+    racingEnabled*: bool
+
+  ProxyModelStats* = object
+    model*: string
+    avgMs*: float
+    p95Ms*: float
+    total*: int
+    success*: int
+    successRate*: float
+    sampleCount*: int
+    consecutiveFailures*: int
+    degraded*: bool
+
+  ProxyKeyStats* = object
+    label*: string
+    keyHint*: string
+    active*: bool
+    cooldownSecsRemaining*: int
+
+  ProxyStats* = object
+    models*: seq[ProxyModelStats]
+    keys*: seq[ProxyKeyStats]
+    racingModels*: seq[string]
+    racingMaxParallel*: int
+    racingTimeoutMs*: int
+
   Thresholds* = object
     perfectAvg*: float
     perfectP95*: float
@@ -110,6 +140,12 @@ type
     smWatch = "watch"
     smCheck = "check"
     smDiscover = "discover"
+    smProxy = "proxy"
+
+  ProxyAction* = enum
+    paStart = "start"
+    paStop = "stop"
+    paStatus = "status"
 
   Config* = object
     models*: seq[string]
@@ -136,6 +172,9 @@ type
     profile*: string
     thresholds*: Thresholds
     categoryWeights*: seq[tuple[category: string, weights: CategoryWeights]]
+    proxyAction*: ProxyAction
+    proxyConfigPath*: string
+    proxyPort*: int
 
 const DefaultThresholds* = Thresholds(
   perfectAvg: 400.0,

@@ -142,13 +142,13 @@ impl ModelStatsStore {
         for m in candidates {
             match map.get(m) {
                 None => untried.push(m),
-                Some(e) if e.ring_len < 3 => untried.push(m),
                 Some(e) => {
-                    let avg = e.avg_ms().unwrap_or(f64::MAX);
-                    if e.is_degraded(threshold) {
-                        degraded.push((m, avg));
+                    if e.total == 0 || e.ring_len < 3 {
+                        untried.push(m);
+                    } else if e.is_degraded(threshold) {
+                        degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
                     } else {
-                        ok.push((m, avg));
+                        ok.push((m, e.avg_ms().unwrap_or(f64::MAX)));
                     }
                 }
             }

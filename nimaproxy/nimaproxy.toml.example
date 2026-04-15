@@ -33,22 +33,26 @@ key = "nvapi-YOUR_FOURTH_KEY_HERE"
 label = "key4"
 
 # ── V2: Latency-Aware Model Routing (optional) ──────────────────────────────
-# When a request arrives with `"model": "auto"`, the proxy picks the fastest
-# non-degraded model from this list using real-time TTFC stats.
+# When a request arrives with `"model": "auto"`, the proxy picks the best
+# model from this list using real-time TTFC stats.
 #
 # Untried models (< 3 samples) get priority. Degraded models (≥3 consecutive
 # failures or avg TTFC > spike_threshold_ms) are skipped until they recover.
 #
-# [routing]
-#   strategy          = "latency_aware"   # or "round_robin" (default)
-#   spike_threshold_ms = 3000             # ms — above this avg marks degraded
+# Strategies:
+#   round_robin    — cycles through models in order (ignores latency data)
+#   latency_aware  — prefers fastest non-degraded model by avg TTFC (default)
 #
-#   models = [
-#     "nvidia/meta/llama-3.3-70b-instruct",
-#     "nvidia/qwen/qwen2.5-coder-32b-instruct",
-#     "nvidia/moonshotai/kimi-k2-instruct",
-#     "nvidia/mistralai/devstral-2-123b-instruct-2512",
-#   ]
+# [routing]
+# strategy           = "latency_aware"   # or "round_robin"
+# spike_threshold_ms = 3000              # ms — above this avg marks degraded
+#
+# models = [
+#   "nvidia/meta/llama-3.3-70b-instruct",
+#   "nvidia/qwen/qwen2.5-coder-32b-instruct",
+#   "nvidia/moonshotai/kimi-k2-instruct",
+#   "nvidia/mistralai/devstral-2-123b-instruct-2512",
+# ]
 
 # ── V3: Model Racing (Speculative Execution) ────────────────────
 # Fire N parallel requests to N models, return first response.

@@ -2,6 +2,14 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.9.3] - 2026-04-15
+
+### Added (nimaproxy)
+- `[routing]` section documented and wired: `strategy` (round_robin/latency_aware), `models` list, `spike_threshold_ms`. When requests arrive with `"model": "auto"`, the proxy picks the best model from the list using real-time TTFC stats
+- Routing config helpers in `config.rs`: `routing_models()`, `routing_strategy()`, `routing_spike_threshold_ms()`, `routing_enabled()`
+- Startup print shows routing strategy, model count, spike threshold, and racing config when enabled
+- 6 new integration tests for auto routing: latency-aware fastest pick, degraded skip, untried priority, multiple healthy models
+
 ## [0.9.2] - 2026-04-15
 
 ### Added (nimaproxy)
