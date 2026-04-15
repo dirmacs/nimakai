@@ -116,10 +116,10 @@ async fn test_e2e_key_pool_status() {
 async fn test_e2e_chat_via_proxy() {
     let state = make_state();
     
-    state.model_stats.record("nvidia/llama-3.1-nemotrion-70b-instruct", 500.0, true);
+    state.model_stats.record("nvidia/z-ai/glm4.7", 500.0, true);
     
     let body = serde_json::json!({
-        "model": "nvidia/llama-3.1-nemotrion-70b-instruct",
+        "model": "nvidia/z-ai/glm4.7",
         "messages": [{"role": "user", "content": "Say 'test' in one word."}],
         "max_tokens": 10,
         "temperature": 0.0
