@@ -1,0 +1,6 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# Local config with secrets
+nimaproxy.toml

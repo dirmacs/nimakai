@@ -29,3 +29,6 @@ nimbledeps/
 
 # Secrets
 .env
+
+# nimaproxy secrets
+nimaproxy.toml
