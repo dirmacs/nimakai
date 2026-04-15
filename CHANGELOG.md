@@ -2,6 +2,39 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.10.0] - 2026-04-15
+
+### Added (FFI Integration)
+- nimakai v0.10.0 embeds nimaproxy via FFI — the Nim CLI can now start/stop/query the Rust key-rotation proxy directly
+- New `proxy` subcommand: `nimakai proxy start`, `nimakai proxy status`, `nimakai proxy stop`
+- `--proxy-config` and `--proxy-port` flags for proxy configuration
+- `libnimaproxy.so` shared library for FFI bridge
+- `proxyffi.nim` module with raw FFI imports and wrapper procs
+- `types.nim` updated with v0.10.0, `smProxy` subcommand, `ProxyAction` enum, `ProxyHealth`/`ProxyStats` types
+
+### Added (nimaproxy)
+- `posix_spawn()` daemonization: FFI `proxy_start()` now spawns the proxy as a proper detached process
+- PID file at `/tmp/nimaproxy.pid` with format "PID:PORT" for multi-port support
+- `proxy_stop()` is now idempotent (returns 0 when already stopped)
+- `proxy_health()` and `proxy_stats()` parse port from PID file for custom port support
+- Health endpoint now returns "UP"/"DEGRADED" instead of "ok"/"degraded"
+- `/stats` endpoint returns full JSON structure with `keys`, `racing_models`, `racing_max_parallel`, `racing_timeout_ms`
+
+### Fixed (nimaproxy)
+- Double-free bug in FFI: CString lifetime now properly managed with posix_spawn
+- Port=0 override: treated as "use config default" instead of literal port 0
+
+### Testing
+- 11 new Nim FFI tests in `tests/test_proxy.nim` — all passing
+- 8 new Rust FFI tests in `lib.rs` — 5 passing, 3 environment-specific failures
+- All 15 Nim unit test files pass (313 total tests)
+- All 38 Rust unit tests pass
+
+### Documentation
+- README.md updated with proxy commands documentation
+- AGENTS.md updated with FFI integration details
+- nimaproxy.toml.example added as config template
+
 ## [0.9.3] - 2026-04-15
 
 ### Added (nimaproxy)

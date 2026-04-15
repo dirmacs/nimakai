@@ -153,16 +153,16 @@ pub extern "C" fn proxy_start(config_path: *const c_char, port: u32) -> i32 {
     0
 }
 
-/// FFI: Stop the proxy server. Returns 0 on success, -1 if not running.
+/// FFI: Stop the proxy server. Returns 0 on success (including if already stopped), -1 on error.
 #[no_mangle]
 pub extern "C" fn proxy_stop() -> i32 {
     let pid: libc::pid_t = std::fs::read_to_string("/tmp/nimaproxy.pid")
         .ok()
-        .and_then(|s| s.trim().parse().ok())
+        .and_then(|s| s.trim().split(':').next().and_then(|p| p.parse().ok()))
         .unwrap_or(0);
 
     if pid == 0 {
-        return -1;
+        return 0;
     }
 
     unsafe { libc::kill(pid, libc::SIGTERM); }
@@ -173,9 +173,14 @@ pub extern "C" fn proxy_stop() -> i32 {
 /// FFI: Get health status. Returns JSON C string (caller must free with proxy_free_string).
 #[no_mangle]
 pub extern "C" fn proxy_health() -> *mut c_char {
+    let port: u16 = std::fs::read_to_string("/tmp/nimaproxy.pid")
+        .ok()
+        .and_then(|s| s.trim().split(':').nth(1).and_then(|p| p.parse().ok()))
+        .unwrap_or(8080);
+
     let pid: libc::pid_t = std::fs::read_to_string("/tmp/nimaproxy.pid")
         .ok()
-        .and_then(|s| s.trim().parse().ok())
+        .and_then(|s| s.trim().split(':').next().and_then(|p| p.parse().ok()))
         .unwrap_or(0);
 
     if pid == 0 || unsafe { libc::kill(pid, 0) } != 0 {
@@ -184,7 +189,7 @@ pub extern "C" fn proxy_health() -> *mut c_char {
     }
 
     let body = reqwest::blocking::Client::new()
-        .get("http://127.0.0.1:8080/health")
+        .get(format!("http://127.0.0.1:{}/health", port))
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .ok()
@@ -199,9 +204,14 @@ pub extern "C" fn proxy_health() -> *mut c_char {
 /// FFI: Get per-model latency stats. Returns JSON C string (caller must free with proxy_free_string).
 #[no_mangle]
 pub extern "C" fn proxy_stats() -> *mut c_char {
+    let port: u16 = std::fs::read_to_string("/tmp/nimaproxy.pid")
+        .ok()
+        .and_then(|s| s.trim().split(':').nth(1).and_then(|p| p.parse().ok()))
+        .unwrap_or(8080);
+
     let pid: libc::pid_t = std::fs::read_to_string("/tmp/nimaproxy.pid")
         .ok()
-        .and_then(|s| s.trim().parse().ok())
+        .and_then(|s| s.trim().split(':').next().and_then(|p| p.parse().ok()))
         .unwrap_or(0);
 
     if pid == 0 || unsafe { libc::kill(pid, 0) } != 0 {
@@ -210,7 +220,7 @@ pub extern "C" fn proxy_stats() -> *mut c_char {
     }
 
     let body = reqwest::blocking::Client::new()
-        .get("http://127.0.0.1:8080/stats")
+        .get(format!("http://127.0.0.1:{}/stats", port))
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .ok()
@@ -229,4 +239,126 @@ pub extern "C" fn proxy_free_string(s: *mut c_char) {
         return;
     }
     unsafe { let _ = CString::from_raw(s); }
+}
+
+#[cfg(test)]
+mod ffi_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    fn cleanup() {
+        std::fs::remove_file("/tmp/nimaproxy.pid").ok();
+    }
+
+    #[test]
+    fn test_proxy_start_stop_cycle() {
+        cleanup();
+        
+        let config_path = CString::new("/opt/nimakai/nimaproxy/nimaproxy.toml").unwrap();
+        let result = unsafe { proxy_start(config_path.as_ptr(), 0) };
+        assert_eq!(result, 0, "proxy_start should succeed");
+        
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        let stop_result = unsafe { proxy_stop() };
+        assert_eq!(stop_result, 0, "proxy_stop should succeed");
+        
+        cleanup();
+    }
+
+    #[test]
+    fn test_proxy_health_when_running() {
+        cleanup();
+        
+        let config_path = CString::new("/opt/nimakai/nimaproxy/nimaproxy.toml").unwrap();
+        unsafe { proxy_start(config_path.as_ptr(), 0) };
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        let health = unsafe { proxy_health() };
+        assert!(!health.is_null(), "health should return valid string when running");
+        
+        unsafe { proxy_free_string(health) };
+        unsafe { proxy_stop() };
+        cleanup();
+    }
+
+    #[test]
+    fn test_proxy_stats_when_running() {
+        cleanup();
+        
+        let config_path = CString::new("/opt/nimakai/nimaproxy/nimaproxy.toml").unwrap();
+        unsafe { proxy_start(config_path.as_ptr(), 0) };
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        let stats = unsafe { proxy_stats() };
+        assert!(!stats.is_null(), "stats should return valid string when running");
+        
+        unsafe { proxy_free_string(stats) };
+        unsafe { proxy_stop() };
+        cleanup();
+    }
+
+    #[test]
+    fn test_proxy_health_when_stopped() {
+        cleanup();
+        
+        let health = unsafe { proxy_health() };
+        assert!(health.is_null(), "health should return null when not running");
+    }
+
+    #[test]
+    fn test_proxy_stop_idempotent() {
+        cleanup();
+        
+        let result1 = unsafe { proxy_stop() };
+        let result2 = unsafe { proxy_stop() };
+        
+        assert_eq!(result1, 0, "first stop should return 0");
+        assert_eq!(result2, 0, "second stop should also return 0 (idempotent)");
+    }
+
+    #[test]
+    fn test_proxy_start_already_running() {
+        cleanup();
+        
+        let config_path = CString::new("/opt/nimakai/nimaproxy/nimaproxy.toml").unwrap();
+        let result1 = unsafe { proxy_start(config_path.as_ptr(), 0) };
+        assert_eq!(result1, 0, "first start should succeed");
+        
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        let result2 = unsafe { proxy_start(config_path.as_ptr(), 0) };
+        assert_eq!(result2, -1, "second start should fail (already running)");
+        
+        unsafe { proxy_stop() };
+        cleanup();
+    }
+
+    #[test]
+    fn test_proxy_start_invalid_config() {
+        cleanup();
+        
+        let config_path = CString::new("/nonexistent/config.toml").unwrap();
+        let result = unsafe { proxy_start(config_path.as_ptr(), 0) };
+        assert_eq!(result, -1, "start with invalid config should fail");
+        
+        cleanup();
+    }
+
+    #[test]
+    fn test_proxy_start_with_custom_port() {
+        cleanup();
+        
+        let config_path = CString::new("/opt/nimakai/nimaproxy/nimaproxy.toml").unwrap();
+        let result = unsafe { proxy_start(config_path.as_ptr(), 9090) };
+        assert_eq!(result, 0, "proxy_start with custom port should succeed");
+        
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        let pid_content = std::fs::read_to_string("/tmp/nimaproxy.pid").unwrap_or_default();
+        assert!(pid_content.contains("9090"), "PID file should contain custom port");
+        
+        unsafe { proxy_stop() };
+        cleanup();
+    }
 }

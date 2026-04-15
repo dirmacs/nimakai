@@ -133,7 +133,13 @@ async fn main() {
             std::process::exit(1);
         });
 
-    std::fs::write("/tmp/nimaproxy.pid", std::process::id().to_string()).ok();
+    // Extract port from listen address and write PID file with format: "PID:PORT"
+    let port = listen.split(':').last().unwrap_or("8080");
+    std::fs::write(
+        "/tmp/nimaproxy.pid",
+        format!("{}:{}", std::process::id(), port),
+    )
+    .ok();
 
     axum::serve(listener, app)
         .await
