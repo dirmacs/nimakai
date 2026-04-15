@@ -94,6 +94,35 @@ impl Config {
             .and_then(|r| r.strategy.clone())
             .unwrap_or_else(|| "complete".to_string())
     }
+
+    pub fn routing_models(&self) -> Vec<String> {
+        self.routing
+            .as_ref()
+            .and_then(|r| r.models.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn routing_strategy(&self) -> String {
+        self.routing
+            .as_ref()
+            .and_then(|r| r.strategy.clone())
+            .unwrap_or_else(|| "round_robin".to_string())
+    }
+
+    pub fn routing_spike_threshold_ms(&self) -> f64 {
+        self.routing
+            .as_ref()
+            .and_then(|r| r.spike_threshold_ms)
+            .unwrap_or(3000.0)
+    }
+
+    pub fn routing_enabled(&self) -> bool {
+        self.routing
+            .as_ref()
+            .and_then(|r| r.models.as_ref())
+            .map(|m| !m.is_empty())
+            .unwrap_or(false)
+    }
 }
 
 pub fn load(path: &str) -> Result<Config, String> {

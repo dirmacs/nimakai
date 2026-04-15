@@ -222,12 +222,12 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .iter()
         .map(|s| {
             serde_json::json!({
-                "id": s.id,
+                "model": s.id,
                 "avg_ms": s.avg_ms,
                 "p95_ms": s.p95_ms,
-                "total_requests": s.total,
-                "success_requests": s.success,
-                "success_rate_pct": s.success_rate,
+                "total": s.total,
+                "success": s.success,
+                "success_rate": s.success_rate,
                 "sample_count": s.sample_count,
                 "consecutive_failures": s.consecutive_failures,
                 "degraded": s.degraded,
@@ -235,9 +235,32 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         })
         .collect();
 
+    let keys_json: Vec<Value> = state
+        .pool
+        .status()
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "label": s.label,
+                "key_hint": s.key_hint,
+                "active": s.active,
+                "cooldown_secs_remaining": s.cooldown_secs_remaining,
+            })
+        })
+        .collect();
+
+    let racing_models: Vec<Value> = state
+        .racing_models
+        .iter()
+        .map(|m| serde_json::json!(m))
+        .collect();
+
     let body = serde_json::json!({
         "models": models_json,
-        "count": models_json.len(),
+        "keys": keys_json,
+        "racing_models": racing_models,
+        "racing_max_parallel": state.racing_max_parallel,
+        "racing_timeout_ms": state.racing_timeout_ms,
     });
 
     (

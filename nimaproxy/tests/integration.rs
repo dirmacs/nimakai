@@ -201,3 +201,115 @@ fn test_integration_strategy_parsing() {
     ));
     assert!(matches!(Strategy::from_str("random"), Strategy::RoundRobin));
 }
+
+#[test]
+fn test_integration_auto_routing_picks_fastest() {
+    // Fast model has 3+ samples with low avg
+    let mut stats = make_stats();
+    stats.record("fast-model", 150.0, true);
+    stats.record("fast-model", 200.0, true);
+    stats.record("fast-model", 250.0, true);
+
+    // Slow model has 3+ samples with high avg
+    stats.record("slow-model", 3000.0, true);
+    stats.record("slow-model", 3500.0, true);
+    stats.record("slow-model", 4000.0, true);
+
+    let router = ModelRouter::new(
+        vec!["slow-model".to_string(), "fast-model".to_string()],
+        Strategy::LatencyAware,
+    );
+
+    // Latency-aware should pick fast-model (lower avg)
+    let picked = router.pick(&stats);
+    assert_eq!(picked, Some("fast-model".to_string()));
+}
+
+#[test]
+fn test_integration_auto_routing_skips_degraded() {
+    let mut stats = make_stats();
+
+    // Mark model-a as degraded: 3+ successful samples (ring_len >= 3) but avg > spike
+    stats.record("model-a", 6000.0, true);
+    stats.record("model-a", 7000.0, true);
+    stats.record("model-a", 8000.0, true);
+
+    // model-b is healthy with low avg
+    stats.record("model-b", 500.0, true);
+
+    let router = ModelRouter::new(
+        vec!["model-a".to_string(), "model-b".to_string()],
+        Strategy::LatencyAware,
+    );
+
+    // Should skip degraded model-a (avg > 3000ms spike threshold) and pick model-b
+    let picked = router.pick(&stats);
+    assert_eq!(picked, Some("model-b".to_string()));
+}
+
+#[test]
+fn test_integration_auto_routing_untried_model() {
+    let stats = make_stats();
+
+    let router = ModelRouter::new(
+        vec!["never-tried-model".to_string()],
+        Strategy::LatencyAware,
+    );
+
+    // Untried models get priority — picks it even with no stats
+    let picked = router.pick(&stats);
+    assert_eq!(picked, Some("never-tried-model".to_string()));
+}
+
+#[test]
+fn test_integration_auto_routing_no_router() {
+    let keys = vec![KeyEntry {
+        key: "test-key".to_string(),
+        label: None,
+    }];
+    let stats = make_stats();
+
+    // No router configured
+    let state = Arc::new(AppState::new(
+        keys,
+        "https://api.example.com".to_string(),
+        None,
+        stats,
+        vec![],
+        3,
+        8000,
+        "complete".to_string(),
+    ));
+
+    assert!(state.router.is_none());
+}
+
+#[test]
+fn test_integration_auto_routing_with_multiple_healthy_models() {
+    let mut stats = make_stats();
+
+    stats.record("model-a", 100.0, true);
+    stats.record("model-a", 110.0, true);
+    stats.record("model-a", 120.0, true);
+
+    stats.record("model-b", 400.0, true);
+    stats.record("model-b", 420.0, true);
+    stats.record("model-b", 440.0, true);
+
+    stats.record("model-c", 800.0, true);
+    stats.record("model-c", 850.0, true);
+    stats.record("model-c", 900.0, true);
+
+    let router = ModelRouter::new(
+        vec![
+            "model-c".to_string(),
+            "model-a".to_string(),
+            "model-b".to_string(),
+        ],
+        Strategy::LatencyAware,
+    );
+
+    // Picks lowest avg — model-a
+    let picked = router.pick(&stats);
+    assert_eq!(picked, Some("model-a".to_string()));
+}

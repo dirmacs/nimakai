@@ -23,6 +23,9 @@ proc parseArgs*(params: seq[string]): Config =
     rollback: false,
     days: 7,
     thresholds: DefaultThresholds,
+    proxyAction: paStart,
+    proxyConfigPath: "",
+    proxyPort: 0,
   )
 
   result.apiKey = getEnv("NVIDIA_API_KEY", "")
@@ -48,6 +51,17 @@ proc parseArgs*(params: seq[string]): Config =
     of "watch": result.subcommand = smWatch
     of "check": result.subcommand = smCheck
     of "discover": result.subcommand = smDiscover
+    of "proxy":
+      result.subcommand = smProxy
+      # Parse the proxy action (start/stop/status) — must be the next non-flag arg
+      let args = params
+      for i, arg in args:
+        if arg == "proxy" and i + 1 < args.len:
+          let action = args[i + 1]
+          if action == "start": result.proxyAction = paStart
+          elif action == "stop": result.proxyAction = paStop
+          elif action == "status": result.proxyAction = paStatus
+          break
     else: discard
 
   const shortNoVal = {'1', 'j', 'q'}
@@ -106,6 +120,11 @@ proc parseArgs*(params: seq[string]): Config =
       of "rec-history": result.recHistory = true
       of "throughput": result.throughput = true
       of "fail-if-degraded": result.failIfDegraded = true
+      of "proxy-config":
+        result.proxyConfigPath = p.val
+      of "proxy-port":
+        try: result.proxyPort = parseInt(p.val)
+        except ValueError: discard
       of "alert-threshold":
         try: result.alertThreshold = parseFloat(p.val)
         except ValueError: discard
@@ -130,6 +149,16 @@ Commands:
   history                Show historical benchmark data
   trends                 Show latency trend analysis
   opencode               Show models from opencode.json
+  proxy                  Manage embedded nimaproxy (start|stop|status)
+
+Proxy Options:
+  --proxy-config <path>  Path to nimaproxy.toml config (required for start)
+  --proxy-port <port>    Override listen port
+
+Proxy Examples:
+  nimakai proxy start --proxy-config nimaproxy.toml
+  nimakai proxy stop
+  nimakai proxy status
 
 Options:
   --once, -1             Single round, then exit
