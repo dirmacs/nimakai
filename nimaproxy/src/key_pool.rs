@@ -58,6 +58,12 @@ impl KeyPool {
         }
     }
 
+    pub fn get_key_label(&self, idx: usize) -> Option<String> {
+        self.keys
+            .get(idx)
+            .map(|k| k.label.clone().unwrap_or_else(|| format!("key-{}", idx)))
+    }
+
     /// Return status of all keys (for /health endpoint).
     pub fn status(&self) -> Vec<KeyStatus> {
         let now = Instant::now();
