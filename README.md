@@ -18,6 +18,20 @@ A focused, single-binary tool that continuously pings NVIDIA NIM models and repo
 
 Also includes **nimaproxy** — a Rust-based key-rotation proxy for production use.
 
+## Metrics
+
+- **Latest** — most recent round-trip time
+- **Avg** — rolling average (ring buffer, last 100 samples)
+- **P50** — median latency
+- **P95** — 95th percentile (tail spikes)
+- **P99** — 99th percentile (worst case)
+- **Jitter** — standard deviation (consistency)
+- **Stability** — composite score 0-100 (P95 + jitter + spike rate + reliability)
+- **Health** — UP / TIMEOUT / OVERLOADED / ERROR / NO_KEY / NOT_FOUND
+- **Verdict** — Perfect / Normal / Slow / Spiky / Very Slow / Unstable / Not Active / Not Found
+- **Up%** — uptime percentage
+- **Tier** — S+ / S / A+ / A / A- / B+ / B / C (based on SWE-bench Verified scores)
+
 ## Install
 
 ```bash
