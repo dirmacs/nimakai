@@ -2,7 +2,11 @@
 
 Nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.9.1. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory).
+
 ## Architecture
+
+### nimakai (Nim)
 
 ```
 src/
@@ -18,6 +22,27 @@ src/
   history.nim   — Persist latency samples to disk, read/display trends with --days flag
 
 tests/          — 15 test files, one per module (test_metrics.nim, test_catalog.nim, etc.)
+```
+
+### nimaproxy (Rust)
+
+```
+nimaproxy/
+  Cargo.toml               lib + bin + tests
+  nimaproxy.toml           Config (NOT committed - contains API keys)
+  nimaproxy.toml.example   Template
+  .gitignore               Excludes nimaproxy.toml
+  src/
+    lib.rs                 Exports modules + AppState
+    main.rs                Binary entry point
+    config.rs              TOML config parsing + unit tests
+    key_pool.rs            Key rotation, rate-limit tracking + unit tests
+    model_stats.rs         Per-model latency tracking + unit tests
+    model_router.rs        Latency-aware model selection + unit tests
+    proxy.rs               HTTP handlers
+  tests/
+    integration.rs         12 integration tests
+    e2e_live.rs            6 E2E tests with real NVIDIA API (z-ai/glm4.7 model)
 ```
 
 ## Metrics Reference
