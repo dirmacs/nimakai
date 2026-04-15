@@ -1,6 +1,6 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.9.1. 46-model catalog with tier labels, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.9.1. 80-model catalog with tier labels, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
@@ -21,7 +21,7 @@ Single Nim binary with modules in `src/`:
 src/
   nimakai.nim   — Entry point, CLI dispatch (default/watch/check/discover/sync)
   metrics.nim   — Latency ring buffer, percentiles (P50/P95/P99), jitter, stability score
-  catalog.nim   — 46-model catalog with tier labels (S+/S/A+/A/A-/B+/B/C)
+  catalog.nim   — 80-model catalog with tier labels (S+/S/A+/A/A-/B+/B/C)
   ping.nim      — HTTP ping to NIM endpoint, response time measurement
   display.nim   — Terminal UI: live metrics table, health state colors
   config.nim    — Config loading from nim.cfg / CLI flags, named benchmark profiles
@@ -36,7 +36,7 @@ src/
 - **SSL flag required** — build with `-d:ssl`; NIM endpoints are HTTPS
 - **Release build uses size optimization** — `--opt:size` in the build task; keep binary small
 - **`malebolgia` for parallelism** — used for concurrent model pinging; don't swap it out
-- **46-model catalog is hardcoded in `catalog.nim`** — update there when new NIM models launch
+- **80-model catalog is hardcoded in `catalog.nim`** — update there when new NIM models launch
 
 ## Config
 
@@ -61,6 +61,18 @@ interval_ms = 2000
 ./nimakai sync                      # full catalog sync
 ./nimakai --profile work            # named benchmark profile
 ```
+
+## nimaproxy — Key-Rotation Proxy
+
+Standalone Rust binary in `nimaproxy/`. Exposes OpenAI-compatible API on localhost with key rotation and latency-aware routing.
+
+```bash
+cargo build --release --manifest-path=nimaproxy/Cargo.toml
+./nimaproxy/target/release/nimaproxy --config nimaproxy.toml
+# or: nimble proxy
+```
+
+Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /health`, `GET /stats`
 
 ## Git Author
 
