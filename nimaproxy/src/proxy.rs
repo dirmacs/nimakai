@@ -100,6 +100,14 @@ pub async fn chat_completions(
                     HeaderValue::from_str(&content_type)
                         .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                 );
+                // Track which key was used for rotation debugging
+                if let Some(label) = state.pool.get_key_label(idx) {
+                    response.headers_mut().insert(
+                        "x-key-label",
+                        HeaderValue::from_str(&label)
+                            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                    );
+                }
                 if content_type.contains("event-stream") {
                     response.headers_mut().insert(
                         "cache-control",
@@ -272,9 +280,10 @@ async fn race_models(
         let timeout_val = timeout_ms;
 
         let handle = tokio::spawn(async move {
-            let Some((key, _)) = state_clone.pool.next_key() else {
+            let Some((key, key_idx)) = state_clone.pool.next_key() else {
                 return Err(format!("no keys"));
             };
+            let key_label = state_clone.pool.get_key_label(key_idx);
 
             let t0 = Instant::now();
             let result = timeout(
@@ -313,6 +322,13 @@ async fn race_models(
                         HeaderValue::from_str(&content_type)
                             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                     );
+                    if let Some(ref label) = key_label {
+                        response.headers_mut().insert(
+                            "x-key-label",
+                            HeaderValue::from_str(label)
+                                .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                        );
+                    }
                     Ok::<Response, String>(response)
                 }
                 Ok(Err(e)) => {
