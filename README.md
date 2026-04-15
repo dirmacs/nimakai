@@ -266,6 +266,16 @@ cp nimaproxy.toml.example nimaproxy.toml
 - Latency-aware model routing (`"model": "auto"`)
 - Per-model stats tracking (TTFC, success rate, degradation detection)
 
+**Model Racing (Speculative Execution):**
+```toml
+[racing]
+enabled = true
+models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
+max_parallel = 3
+timeout_ms = 8000
+```
+Fires N parallel requests to N models, returns first response. Trades N×token budget for min(P50 latency).
+
 ## License
 
 MIT

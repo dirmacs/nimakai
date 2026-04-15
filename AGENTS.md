@@ -43,6 +43,21 @@ nimaproxy/
   tests/
     integration.rs         12 integration tests
     e2e_live.rs            6 E2E tests with real NVIDIA API (z-ai/glm4.7 model)
+
+## Racing (Speculative Execution)
+
+V3 feature: fires N parallel requests to N models, returns first response.
+Trades N×token budget for min(P50 latency).
+
+```toml
+[racing]
+enabled = true
+models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
+max_parallel = 3
+timeout_ms = 8000
+```
+
+Available models: z-ai/glm4.7, qwen/qwen3.5-397b-a17b, mistralai/devstral-2-123b-instruct-2512, moonshotai/kimi-k2-instruct, minimaxai/minimax-m2.7
 ```
 
 ## Metrics Reference
