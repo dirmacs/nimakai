@@ -2,6 +2,17 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.9.2] - 2026-04-15
+
+### Added (nimaproxy)
+- `stress_test.rs`: 25-turn live stress test validating key rotation + model racing with real API calls. Confirms ares: 13, doltares: 12 (key rotation) and z-ai/glm4.7: 76%, qwen: 0%, devstral: 24% (racing wins)
+- `x-key-label` response header: injected in both standard and racing proxy paths to track which key was used
+- `get_key_label()` method in KeyPool for header injection
+- `strategy = "complete"` racing config option documented
+
+### Fixed (nimaproxy)
+- Racing pre-population: stress test now displays all 3 racing models including 0-win models
+
 ## [0.9.1] - 2026-03-13
 
 ### Fixed
