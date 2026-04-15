@@ -16,19 +16,7 @@
 
 A focused, single-binary tool that continuously pings NVIDIA NIM models and reports latency metrics. Includes a 46-model tiered catalog, recommendation engine for [oh-my-opencode](https://github.com/bkataru/oh-my-opencode) routing, watch mode with alerts, CI health checks, live model discovery, and full sync mode. No bloat, no TUI framework, no telemetry. Just latency numbers.
 
-## Metrics
-
-- **Latest** — most recent round-trip time
-- **Avg** — rolling average (ring buffer, last 100 samples)
-- **P50** — median latency
-- **P95** — 95th percentile (tail spikes)
-- **P99** — 99th percentile (worst case)
-- **Jitter** — standard deviation (consistency)
-- **Stability** — composite score 0-100 (P95 + jitter + spike rate + reliability)
-- **Health** — UP / TIMEOUT / OVERLOADED / ERROR / NO_KEY / NOT_FOUND
-- **Verdict** — Perfect / Normal / Slow / Spiky / Very Slow / Unstable / Not Active / Not Found
-- **Up%** — uptime percentage
-- **Tier** — S+ / S / A+ / A / A- / B+ / B / C (based on SWE-bench Verified scores)
+Also includes **nimaproxy** — a Rust-based key-rotation proxy for production use.
 
 ## Install
 
@@ -177,6 +165,8 @@ History is persisted to `~/.local/share/nimakai/history.jsonl` (30-day auto-prun
 
 ## Architecture
 
+### nimakai (Nim)
+
 ```
 src/
   nimakai.nim              Entry point, main loop, SIGINT handler
@@ -212,6 +202,55 @@ tests/
     test_discovery.nim     9 tests
     test_cli.nim           72 tests
 ```
+
+### nimaproxy (Rust)
+
+```
+nimaproxy/
+  Cargo.toml               lib + bin + tests
+  nimaproxy.toml           Config (NOT committed - contains API keys)
+  nimaproxy.toml.example   Template for users
+  .gitignore               Excludes nimaproxy.toml
+  src/
+    lib.rs                 Exports modules + AppState
+    main.rs                Binary entry point
+    config.rs              TOML config parsing
+    key_pool.rs            Key rotation, rate-limit tracking
+    model_stats.rs          Per-model latency tracking
+    model_router.rs        Latency-aware model selection
+    proxy.rs               HTTP handlers
+  tests/
+    integration.rs         12 integration tests
+    e2e_live.rs            6 E2E tests with real NVIDIA API
+```
+
+## nimaproxy — Key-Rotation Proxy
+
+Standalone Rust binary for production use. Provides OpenAI-compatible API with key rotation and latency-aware routing.
+
+```bash
+cd nimaproxy
+cargo build --release
+
+# Copy and edit config
+cp nimaproxy.toml.example nimaproxy.toml
+# Edit nimaproxy.toml with your NVIDIA API keys
+
+# Run
+./target/release/nimaproxy --config nimaproxy.toml
+```
+
+**Endpoints:**
+- `GET /health` — Key pool status
+- `GET /stats` — Per-model latency stats
+- `GET /v1/models` — Passthrough to NVIDIA
+- `POST /v1/chat/completions` — Proxy with key rotation
+
+**Features:**
+- Round-robin key rotation across multiple API keys
+- Automatic 429 handling with per-key cooldown
+- Latency-aware model routing (`"model": "auto"`)
+- Per-model stats tracking (TTFC, success rate, degradation detection)
 
 ## License
 
