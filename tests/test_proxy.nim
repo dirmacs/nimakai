@@ -105,19 +105,23 @@ suite "Proxy FFI Tests":
     let health = get(healthOpt)
     check health.status == "UP"
 
-  test "proxyStats includes racing configuration":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
-    let port = 8080
+test "proxyStats includes racing configuration":
+  let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+  let port = 8080
 
-    discard proxyStart(configPath, port)
-    sleep(500)
+  discard proxyStart(configPath, port)
+  sleep(600)
 
-    let statsOpt = proxyStats()
-    check isSome(statsOpt)
-    let stats = get(statsOpt)
-    check stats.racingModels.len >= 0
-    check stats.racingMaxParallel >= 0
-    check stats.racingTimeoutMs >= 0
+  let healthOpt = proxyHealth()
+  check isSome(healthOpt)
+  discard get(healthOpt)
+
+  let statsOpt = proxyStats()
+  check isSome(statsOpt)
+  let stats = get(statsOpt)
+  check stats.racingModels.len >= 0
+  check stats.racingMaxParallel >= 0
+  check stats.racingTimeoutMs >= 0
 
   test "proxyStop is idempotent":
     let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
@@ -144,16 +148,25 @@ suite "Proxy FFI Tests":
     # Should return non-zero on failure
     check result != 0
 
-  test "proxyStats returns empty arrays when no requests made":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
-    let port = 8080
+test "proxyStats returns empty arrays when no requests made":
+  let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+  let port = 9095
 
-    discard proxyStart(configPath, port)
-    sleep(500)
+  let startResult = proxyStart(configPath, port)
+  check startResult == 0
 
-    let statsOpt = proxyStats()
-    check isSome(statsOpt)
-    let stats = get(statsOpt)
-    # Should have models and keys from config, but no request stats yet
-    check stats.models.len >= 0
-    check stats.keys.len >= 0
+  var healthOpt = proxyHealth()
+  var retries = 0
+  while isNone(healthOpt) and retries < 5:
+    sleep(400)
+    healthOpt = proxyHealth()
+    retries += 1
+
+  check isSome(healthOpt)
+  discard get(healthOpt)
+
+  let statsOpt = proxyStats()
+  check isSome(statsOpt)
+  let stats = get(statsOpt)
+  check stats.models.len >= 0
+  check stats.keys.len >= 0
