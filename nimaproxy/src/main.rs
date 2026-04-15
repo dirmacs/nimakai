@@ -1,6 +1,4 @@
 use nimaproxy::{config, AppState, ModelRouter, ModelStatsStore, Strategy};
-
-use std::sync::Arc;
 use axum::{routing, Router};
 
 fn usage() -> ! {
@@ -31,7 +29,11 @@ async fn main() {
             }
             "--port" | "-p" => {
                 i += 1;
-                port_override = args.get(i).and_then(|v| v.parse().ok());
+                if let Some(p) = args.get(i).and_then(|v| v.parse::<u16>().ok()) {
+                    if p != 0 {
+                        port_override = Some(p);
+                    }
+                }
             }
             "--help" | "-h" => usage(),
             _ => {}
@@ -83,7 +85,8 @@ async fn main() {
     let racing_strategy = cfg.racing_strategy();
     let keys = cfg.keys;
 
-    let state = Arc::new(AppState::new(
+    // AppState::new already returns Arc<AppState> — do NOT wrap in Arc::new again
+    let state = AppState::new(
         keys,
         target.clone(),
         router,
@@ -92,7 +95,7 @@ async fn main() {
         racing_max_parallel,
         racing_timeout_ms,
         racing_strategy,
-    ));
+    );
 
     let app = Router::new()
         .route("/v1/chat/completions", routing::post(nimaproxy::proxy::chat_completions))
@@ -105,6 +108,22 @@ async fn main() {
     println!("nimaproxy listening on http://{}", listen);
     println!(" target : {}", target);
     println!(" keys   : {} configured", key_count);
+
+    if let Some(ref r) = cfg.routing {
+        if let Some(ref models) = r.models {
+            if !models.is_empty() {
+                let strategy = r.strategy.as_deref().unwrap_or("round_robin");
+                let threshold = r.spike_threshold_ms.unwrap_or(3000.0);
+                println!(" routing: {} strategy, {} models, spike>{:.0}ms", strategy, models.len(), threshold);
+            }
+        }
+    }
+
+    if !state.racing_models.is_empty() {
+        println!(" racing : {} models, max_parallel={}, timeout={}ms, strategy={}",
+            state.racing_models.len(), state.racing_max_parallel, state.racing_timeout_ms, state.racing_strategy);
+    }
+
     println!(" routes : POST /v1/chat/completions  GET /v1/models  GET /health  GET /stats");
 
     let listener = tokio::net::TcpListener::bind(&listen)
@@ -113,6 +132,8 @@ async fn main() {
             eprintln!("cannot bind to {}: {}", listen, e);
             std::process::exit(1);
         });
+
+    std::fs::write("/tmp/nimaproxy.pid", std::process::id().to_string()).ok();
 
     axum::serve(listener, app)
         .await

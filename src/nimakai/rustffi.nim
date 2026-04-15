@@ -4,7 +4,7 @@
 import std/[json, strutils]
 import ./types
 
-const rustLib = "libnimrust_ping.dylib"
+const rustLib = "libnimrust_ping." & (when defined(linux): "so" else: "dylib")
 
 proc rust_ping_batch(models_csv: cstring, api_key: cstring,
                      timeout: cuint): cstring {.cdecl, dynlib: rustLib, importc.}

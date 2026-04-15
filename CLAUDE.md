@@ -1,6 +1,6 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.9.2. 80-model catalog with tier labels, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.9.3. 80-model catalog with tier labels, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
@@ -48,7 +48,7 @@ nimaproxy/
     model_router.rs       — Latency-aware routing
     proxy.rs              — HTTP handlers
   tests/
-    integration.rs       — 12 tests
+    integration.rs       — 18 tests
     e2e_live.rs           — 6 live API tests
     stress_test.rs         — 25-turn live stress test
 ```
@@ -110,6 +110,16 @@ target = "https://integrate.api.nvidia.com"
 [[keys]]
 key = "nvapi-YOUR_KEY_HERE"
 label = "production"
+
+[routing]
+strategy = "latency_aware"
+spike_threshold_ms = 3000
+models = [
+  "nvidia/meta/llama-3.3-70b-instruct",
+  "nvidia/qwen/qwen2.5-coder-32b-instruct",
+  "nvidia/moonshotai/kimi-k2-instruct",
+  "nvidia/mistralai/devstral-2-123b-instruct-2512",
+]
 
 [racing]
 enabled = true

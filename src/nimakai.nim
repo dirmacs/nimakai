@@ -1,13 +1,13 @@
 ## nimakai — NVIDIA NIM model latency benchmarker
 ## https://github.com/dirmacs/nimakai
 
-import std/[os, strformat, strutils, times, options, json]
+import std/[os, strformat, strutils, times, options, json, sequtils]
 import std/posix
 import posix/termios as term_mod
 import malebolgia
 import nimakai/[types, ping, catalog, display, config, history, metrics,
                 opencode, recommend, rechistory, sync, watch, discovery, cli,
-                rustffi]
+                rustffi, proxyffi]
 
 # --- Terminal raw mode for interactive sorting ---
 
@@ -396,6 +396,93 @@ proc runCheck(cfg: Config, cat: seq[ModelMeta]) =
   if degraded and cfg.failIfDegraded:
     quit(1)
 
+proc runProxy(cfg: Config) =
+  case cfg.proxyAction
+  of paStart:
+    if cfg.proxyConfigPath.len == 0:
+      stderr.writeLine "\e[31mError: --proxy-config <path> required for proxy start\e[0m"
+      quit(1)
+    if not fileExists(cfg.proxyConfigPath):
+      stderr.writeLine &"\e[31mError: config file not found: {cfg.proxyConfigPath}\e[0m"
+      quit(1)
+    let port = if cfg.proxyPort > 0: cfg.proxyPort else: 0
+    let ret = proxyStart(cfg.proxyConfigPath, port)
+    if ret == 0:
+      let portStr = if cfg.proxyPort > 0: $cfg.proxyPort else: "config default"
+      stdout.writeLine &"nimaproxy started (config: {cfg.proxyConfigPath}, port: {portStr})"
+    else:
+      stderr.writeLine &"\e[31mError: proxy_start returned {ret} (already running? bad config?)\e[0m"
+      quit(1)
+
+  of paStop:
+    let ret = proxyStop()
+    if ret == 0:
+      stdout.writeLine "nimaproxy stopped"
+    else:
+      stderr.writeLine "\e[33mNote: nimaproxy was not running\e[0m"
+
+  of paStatus:
+    let healthOpt = proxyHealth()
+    let statsOpt = proxyStats()
+    if cfg.jsonOutput:
+      var j = newJObject()
+      if healthOpt.isSome:
+        let h = healthOpt.get
+        j["health"] = %*{
+          "status": h.status,
+          "active_keys": h.activeKeys,
+          "routing_enabled": h.routingEnabled,
+          "racing_enabled": h.racingEnabled,
+        }
+      if statsOpt.isSome:
+        let s = statsOpt.get
+        j["stats"] = %*{
+          "models": s.models.mapIt(%*{
+            "model": it.model,
+            "avg_ms": it.avgMs,
+            "p95_ms": it.p95Ms,
+            "total": it.total,
+            "success": it.success,
+            "success_rate": it.successRate,
+            "degraded": it.degraded,
+          }),
+          "keys": s.keys.mapIt(%*{
+            "label": it.label,
+            "key_hint": it.keyHint,
+            "active": it.active,
+            "cooldown_secs_remaining": it.cooldownSecsRemaining,
+          }),
+          "racing_models": s.racingModels,
+        }
+      echo $j
+    else:
+      if healthOpt.isNone:
+        stdout.writeLine "\e[33mnimaproxy is not running\e[0m"
+        return
+      let h = healthOpt.get
+      echo ""
+      echo &"\e[1m  nimaproxy status\e[0m"
+      echo &"  status           : \e[92m{h.status}\e[0m"
+      echo &"  active keys      : {h.activeKeys}"
+      echo &"  routing enabled  : {h.routingEnabled}"
+      echo &"  racing enabled   : {h.racingEnabled}"
+      if statsOpt.isSome:
+        let s = statsOpt.get
+        echo ""
+        if s.models.len > 0:
+          echo &"  \e[1mmodel latency stats ({s.models.len} tracked)\e[0m"
+          for m in s.models:
+            let deg = if m.degraded: &" \e[31m[DEGRADED]\e[0m" else: ""
+            let avg = if m.avgMs > 0: &"{m.avgMs:.0f}ms avg" else: "no samples"
+            echo &"    {m.model:<50} {avg:>15}{deg}"
+        if s.keys.len > 0:
+          echo ""
+          echo &"  \e[1mkey pool ({s.keys.len} keys)\e[0m"
+          for k in s.keys:
+            let act = if k.active: "\e[92mactive\e[0m" else: &"\e[33mcooldown {k.cooldownSecsRemaining}s\e[0m"
+            echo &"    {k.label:<15} {act:>20}  hint={k.keyHint}"
+      echo ""
+
 proc main() =
   let cfg = parseArgs()
   let cat = loadCatalog()
@@ -448,6 +535,10 @@ proc main() =
       echo discoveryToJson(discovered, cat)
     else:
       printDiscovery(discovered, cat)
+    return
+
+  of smProxy:
+    runProxy(cfg)
     return
 
   of smBenchmark:
