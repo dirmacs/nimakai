@@ -699,11 +699,13 @@ dependencies = [
 
 [[package]]
 name = "nimaproxy"
-version = "0.1.0"
+version = "0.9.3"
 dependencies = [
  "axum",
  "bytes",
  "futures",
+ "libc",
+ "once_cell",
  "reqwest",
  "serde",
  "serde_json",

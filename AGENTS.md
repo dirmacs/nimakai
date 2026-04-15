@@ -1,6 +1,6 @@
 # Nimakai — Agent Context
 
-Nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.9.1. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+Nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.9.3. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
 **Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory).
 
@@ -14,7 +14,7 @@ src/
   ping.nim      — HTTP ping: timed GET to NIM health endpoint, parse resp.code.int
   metrics.nim   — Ring buffer (last 100 samples), P50/P95/P99, jitter (stddev),
                   stability score 0–100 = composite of P95 + jitter + spike rate + uptime
-  catalog.nim   — 46-model catalog: model IDs, tier labels (S+ down to C), context windows
+  catalog.nim   — 80-model catalog: model IDs, tier labels (S+ down to C), context windows
   display.nim   — ncurses-style terminal table: live refresh, ANSI colors per health state
   config.nim    — Load nim.cfg, parse --profile flag, profile variable overrides
   recommend.nim — Score-based recommendation: given task type → best available model
@@ -41,7 +41,7 @@ nimaproxy/
     model_router.rs        Latency-aware model selection + unit tests
     proxy.rs               HTTP handlers
   tests/
-    integration.rs         12 integration tests
+    integration.rs         18 integration tests
     e2e_live.rs            6 E2E tests with real NVIDIA API (z-ai/glm4.7 model)
     stress_test.rs         25-turn live stress test (key rotation + racing validation)
 
@@ -56,6 +56,28 @@ enabled = true
 models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
 max_parallel = 3
 timeout_ms = 8000
+strategy = "complete"
+```
+
+## Model Routing (V2)
+
+When `model=auto` is sent, nimaproxy picks the best model from the configured list using real-time latency stats. Two strategies:
+
+- **`round_robin`**: cycles through models in order, ignores latency data
+- **`latency_aware`** (default): prefers fastest non-degraded model by avg TTFC
+
+Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skipped until they recover. Untried models (< 3 samples) get priority.
+
+```toml
+[routing]
+strategy = "latency_aware"
+spike_threshold_ms = 3000
+models = [
+  "nvidia/meta/llama-3.3-70b-instruct",
+  "nvidia/qwen/qwen2.5-coder-32b-instruct",
+  "nvidia/moonshotai/kimi-k2-instruct",
+  "nvidia/mistralai/devstral-2-123b-instruct-2512",
+]
 ```
 
 Available racing models: z-ai/glm4.7, qwen/qwen3.5-397b-a17b, mistralai/devstral-2-123b-instruct-2512, moonshotai/kimi-k2-instruct, minimaxai/minimax-m2.7

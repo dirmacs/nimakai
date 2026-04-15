@@ -81,6 +81,9 @@ nimakai discover           Compare API models against catalog
 nimakai history            Show historical benchmark data
 nimakai trends             Show latency trend analysis (improving/degrading/stable)
 nimakai opencode           Show models from opencode.json + OMO routing
+nimakai proxy start        Start nimaproxy daemon (FFI integration)
+nimakai proxy stop         Stop nimaproxy daemon
+nimakai proxy status       Show nimaproxy live stats
 ```
 
 ## Recommendation Engine
@@ -120,6 +123,32 @@ Each OMO category is scored using weighted criteria:
 | `U` | Sort by uptime % |
 | `1-9` | Toggle favorite on Nth model |
 | `Q` | Quit |
+
+## Proxy Commands (FFI Integration)
+
+nimakai v0.10.0 includes FFI integration with nimaproxy, allowing you to start/stop/query the Rust key-rotation proxy directly from the Nim CLI:
+
+```bash
+# Start the proxy daemon
+nimakai proxy start --proxy-config /path/to/nimaproxy.toml --proxy-port 8080
+
+# Check live status
+nimakai proxy status
+
+# Stop the daemon
+nimakai proxy stop
+```
+
+**Requirements:**
+- `libnimaproxy.so` must be in the same directory as nimakai binary, or `LD_LIBRARY_PATH` must be set
+- nimaproxy config file with API keys (see nimaproxy section below)
+
+**Status output shows:**
+- Overall health status
+- Active key count
+- Routing and racing configuration
+- Per-key status (active/cooldown, key hint)
+- Per-model latency stats (avg, P95, success rate, degradation)
 
 ## Options
 
@@ -267,6 +296,20 @@ cp nimaproxy.toml.example nimaproxy.toml
 - Latency-aware model routing (`"model": "auto"`)
 - Per-model stats tracking (TTFC, success rate, degradation detection)
 - `x-key-label` response header: tracks which key was used for rotation debugging
+
+**Model Routing (V2):**
+```toml
+[routing]
+strategy = "latency_aware"
+spike_threshold_ms = 3000
+models = [
+  "nvidia/meta/llama-3.3-70b-instruct",
+  "nvidia/qwen/qwen2.5-coder-32b-instruct",
+  "nvidia/moonshotai/kimi-k2-instruct",
+  "nvidia/mistralai/devstral-2-123b-instruct-2512",
+]
+```
+When a request arrives with `"model": "auto"`, the proxy picks the best model from this list. Untried models (< 3 samples) get priority. Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skipped.
 
 **Model Racing (Speculative Execution):**
 ```toml
