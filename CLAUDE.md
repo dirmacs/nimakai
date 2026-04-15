@@ -15,6 +15,10 @@ nimble build && ./nimakai
 
 ## Architecture
 
+Two binaries in this repo:
+
+### nimakai (Nim)
+
 Single Nim binary with modules in `src/`:
 
 ```
@@ -28,6 +32,24 @@ src/
   recommend.nim — oh-my-opencode model routing recommendation engine
   discovery.nim — Live model discovery vs. catalog diff (discover subcommand)
   history.nim   — Latency history storage and trend display
+```
+
+### nimaproxy (Rust)
+
+Rust proxy in `nimaproxy/` subdirectory:
+
+```
+nimaproxy/
+  src/
+    lib.rs                 — AppState, exports
+    config.rs             — TOML config parsing
+    key_pool.rs           — Key rotation, rate-limit tracking
+    model_stats.rs        — Per-model latency tracking
+    model_router.rs       — Latency-aware routing
+    proxy.rs              — HTTP handlers
+  tests/
+    integration.rs       — 12 tests
+    e2e_live.rs           — 6 live API tests
 ```
 
 ## Key Rules
@@ -68,11 +90,31 @@ Standalone Rust binary in `nimaproxy/`. Exposes OpenAI-compatible API on localho
 
 ```bash
 cargo build --release --manifest-path=nimaproxy/Cargo.toml
-./nimaproxy/target/release/nimaproxy --config nimaproxy.toml
-# or: nimble proxy
+
+# Copy and edit config
+cp nimaproxy/nimaproxy.toml.example nimaproxy/nimaproxy.toml
+# Edit nimaproxy.toml with your NVIDIA API keys
+
+# Run
+./nimaproxy/target/release/nimaproxy --config nimaproxy/nimaproxy.toml
 ```
 
 Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /health`, `GET /stats`
+
+**Config example:**
+```toml
+[[keys]]
+key = "nvapi-YOUR_KEY_HERE"
+label = "production"
+
+[routing]
+strategy = "latency_aware"
+spike_threshold_ms = 3000
+models = [
+  "nvidia/llama-3.3-70b-instruct",
+  "mistralai/devstral-2-123b-instruct-2512",
+]
+```
 
 ## Git Author
 
