@@ -77,11 +77,21 @@ async fn main() {
         _ => (None, ModelStatsStore::new(3000.0)),
     };
 
+    let racing_models = cfg.racing_models();
+    let racing_max_parallel = cfg.racing_max_parallel();
+    let racing_timeout_ms = cfg.racing_timeout_ms();
+    let racing_strategy = cfg.racing_strategy();
+    let keys = cfg.keys;
+
     let state = Arc::new(AppState::new(
-        cfg.keys,
+        keys,
         target.clone(),
         router,
         model_stats,
+        racing_models,
+        racing_max_parallel,
+        racing_timeout_ms,
+        racing_strategy,
     ));
 
     let app = Router::new()

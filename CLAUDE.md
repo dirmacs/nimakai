@@ -114,6 +114,12 @@ models = [
   "nvidia/llama-3.3-70b-instruct",
   "mistralai/devstral-2-123b-instruct-2512",
 ]
+
+[racing]
+enabled = true
+models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
+max_parallel = 3
+timeout_ms = 8000
 ```
 
 ## Git Author

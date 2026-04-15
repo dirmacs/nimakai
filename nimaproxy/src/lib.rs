@@ -9,7 +9,6 @@ pub use model_router::{ModelRouter, Strategy};
 pub use model_stats::ModelStatsStore;
 pub use config::{Config, KeyEntry, RoutingConfig, load as config_load};
 
-use std::sync::Arc;
 use reqwest::Client;
 
 pub struct AppState {
@@ -18,6 +17,10 @@ pub struct AppState {
     pub target: String,
     pub router: Option<ModelRouter>,
     pub model_stats: ModelStatsStore,
+    pub racing_models: Vec<String>,
+    pub racing_max_parallel: usize,
+    pub racing_timeout_ms: u64,
+    pub racing_strategy: String,
 }
 
 impl AppState {
@@ -26,6 +29,10 @@ impl AppState {
         target: String,
         router: Option<ModelRouter>,
         model_stats: ModelStatsStore,
+        racing_models: Vec<String>,
+        racing_max_parallel: usize,
+        racing_timeout_ms: u64,
+        racing_strategy: String,
     ) -> Self {
         let client = Client::builder()
             .use_rustls_tls()
@@ -40,6 +47,10 @@ impl AppState {
             target,
             router,
             model_stats,
+            racing_models,
+            racing_max_parallel,
+            racing_timeout_ms,
+            racing_strategy,
         }
     }
 }
