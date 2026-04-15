@@ -32,3 +32,13 @@ nimbledeps/
 
 # nimaproxy secrets
 nimaproxy.toml
+
+# Build artifacts
+/target/
+nimaproxy/target/
+rustping/target/
+**/*.rs.bk
+
+# Racing configs (contain API keys)
+/nimaproxy_racing.toml
+/nimaproxy.toml.test
