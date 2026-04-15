@@ -202,7 +202,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .collect();
 
     let body = serde_json::json!({
-        "status": if active > 0 { "ok" } else { "degraded" },
+        "status": if active > 0 { "UP" } else { "DEGRADED" },
         "keys_total": total,
         "keys_active": active,
         "keys": keys_json,
