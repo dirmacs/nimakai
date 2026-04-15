@@ -123,6 +123,10 @@ fn test_integration_app_state_creation() {
         "https://api.example.com".to_string(),
         Some(router),
         stats,
+        vec![],
+        3,
+        8000,
+        "complete".to_string(),
     ));
 
     assert_eq!(state.pool.len(), 1);

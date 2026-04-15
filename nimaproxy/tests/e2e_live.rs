@@ -27,6 +27,10 @@ fn make_state() -> Arc<AppState> {
         NVIDIA_API_BASE.to_string(),
         None,
         ModelStatsStore::new(3000.0),
+        vec![],
+        3,
+        8000,
+        "complete".to_string(),
     ))
 }
 
