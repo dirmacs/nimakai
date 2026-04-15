@@ -7,6 +7,7 @@ pub struct Config {
     pub target: Option<String>,
     pub keys: Vec<KeyEntry>,
     pub routing: Option<RoutingConfig>,
+    pub racing: Option<RacingConfig>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -26,6 +27,24 @@ pub struct RoutingConfig {
     pub spike_threshold_ms: Option<f64>,
 }
 
+/// Racing config for speculative execution.
+///
+/// When enabled, fires N parallel requests to N models and returns the first response.
+/// This is "model racing" — trades N×token budget for min(P50 latency).
+#[derive(Deserialize, Clone, Debug)]
+pub struct RacingConfig {
+    /// Enable speculative execution (default: false)
+    pub enabled: Option<bool>,
+    /// List of models to race. Must have 2+ models.
+    pub models: Option<Vec<String>>,
+    /// Max parallel requests (default: 3, max: 5)
+    pub max_parallel: Option<usize>,
+    /// Timeout per request in ms (default: 8000ms)
+    pub timeout_ms: Option<u64>,
+    /// Strategy: "first_token" (return on first SSE token) or "complete" (default)
+    pub strategy: Option<String>,
+}
+
 impl Config {
     pub fn listen_addr(&self) -> String {
         self.listen
@@ -37,6 +56,43 @@ impl Config {
         self.target
             .clone()
             .unwrap_or_else(|| "https://integrate.api.nvidia.com".to_string())
+    }
+
+    pub fn racing_enabled(&self) -> bool {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.enabled)
+            .unwrap_or(false)
+    }
+
+    pub fn racing_models(&self) -> Vec<String> {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.models.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn racing_max_parallel(&self) -> usize {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.max_parallel)
+            .unwrap_or(3)
+            .min(5)
+            .max(2)
+    }
+
+    pub fn racing_timeout_ms(&self) -> u64 {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.timeout_ms)
+            .unwrap_or(8000)
+    }
+
+    pub fn racing_strategy(&self) -> String {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.strategy.clone())
+            .unwrap_or_else(|| "complete".to_string())
     }
 }
 

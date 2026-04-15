@@ -10,6 +10,7 @@ use axum::{
 use bytes::Bytes;
 use futures::TryStreamExt;
 use serde_json::Value;
+use tokio::time::timeout;
 
 use crate::AppState;
 
@@ -19,12 +20,19 @@ const MAX_RETRIES: usize = 8;
 ///
 /// V1: injects key, retries on 429, streams SSE byte-for-byte.
 /// V2: resolves `"model": "auto"` via router, records TTFC to model_stats.
+/// V3: racing — fires N parallel requests to N models, returns first response.
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     _headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    // --- V2: resolve model and possibly rewrite body ---
+    // Check for racing mode
+    let racing_models = state.racing_models.clone();
+    if !racing_models.is_empty() && racing_models.len() >= 2 {
+        return race_models(state, body, &racing_models).await;
+    }
+
+    // Standard single-model proxy
     let (model_id, body) = resolve_model(body, &state);
 
     let n = state.pool.len().min(MAX_RETRIES).max(1);
@@ -229,4 +237,115 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         body.to_string(),
     )
+}
+
+async fn race_models(
+    state: Arc<AppState>,
+    body: Bytes,
+    models: &[String],
+) -> Response {
+    let timeout_ms = state.racing_timeout_ms;
+    let max_parallel = state.racing_max_parallel.min(models.len());
+    let models_to_race: Vec<String> = models.iter().take(max_parallel).cloned().collect();
+
+    if models_to_race.len() < 2 {
+        return (StatusCode::BAD_REQUEST, "racing requires at least 2 models").into_response();
+    }
+
+    let mut handles = Vec::new();
+
+    for model_id in &models_to_race {
+        let mut json: Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        json["model"] = Value::String(model_id.clone());
+        let req_body = match serde_json::to_vec(&json) {
+            Ok(b) => Bytes::from(b),
+            Err(_) => continue,
+        };
+
+        let target = state.target.clone();
+        let client = state.client.clone();
+        let state_clone = state.clone();
+        let model_id_clone = model_id.clone();
+        let timeout_val = timeout_ms;
+
+        let handle = tokio::spawn(async move {
+            let Some((key, _)) = state_clone.pool.next_key() else {
+                return Err(format!("no keys"));
+            };
+
+            let t0 = Instant::now();
+            let result = timeout(
+                std::time::Duration::from_millis(timeout_val),
+                client
+                    .post(format!("{}/v1/chat/completions", target))
+                    .header("Authorization", format!("Bearer {}", key))
+                    .header("Content-Type", "application/json")
+                    .body(req_body)
+                    .send(),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(resp)) => {
+                    let latency = t0.elapsed().as_millis() as f64;
+                    state_clone.model_stats.record(&model_id_clone, latency, true);
+
+                    let status = resp.status();
+                    let content_type = resp
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("application/json")
+                        .to_string();
+
+                    let stream = resp
+                        .bytes_stream()
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                    let body = Body::from_stream(stream);
+
+                    let mut response = Response::new(body);
+                    *response.status_mut() = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                    response.headers_mut().insert(
+                        "content-type",
+                        HeaderValue::from_str(&content_type)
+                            .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                    );
+                    Ok::<Response, String>(response)
+                }
+                Ok(Err(e)) => {
+                    state_clone.model_stats.record(&model_id_clone, timeout_val as f64, false);
+                    Err(e.to_string())
+                }
+                Err(_) => {
+                    state_clone.model_stats.record(&model_id_clone, timeout_val as f64, false);
+                    Err("timeout".to_string())
+                }
+            }
+        });
+
+        handles.push((model_id.clone(), handle));
+    }
+
+    if handles.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no valid models to race").into_response();
+    }
+
+    for (model_id, handle) in handles {
+        match handle.await {
+            Ok(Ok(response)) => return response,
+            Ok(Err(e)) => {
+                eprintln!("[racing] {} failed: {}", model_id, e);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[racing] {} panicked: {}", model_id, e);
+                continue;
+            }
+        }
+    }
+
+    (StatusCode::BAD_GATEWAY, "all racing models failed").into_response()
 }

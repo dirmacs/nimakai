@@ -49,3 +49,19 @@ label = "key4"
 #     "nvidia/moonshotai/kimi-k2-instruct",
 #     "nvidia/mistralai/devstral-2-123b-instruct-2512",
 #   ]
+
+# ── V3: Model Racing (Speculative Execution) ────────────────────
+# Fire N parallel requests to N models, return first response.
+# Trades N×token budget for min(P50 latency).
+# WARNING: This burns N requests per logical call!
+#
+# [racing]
+# enabled = true
+# models = [
+#   "nvidia/z-ai/glm4.7",
+#   "nvidia/qwen/qwen3.5-397b-a17b",
+#   "nvidia/mistralai/devstral-2-123b-instruct-2512",
+# ]
+# max_parallel = 3
+# timeout_ms = 8000
+# strategy = "complete"
