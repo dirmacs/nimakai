@@ -1,0 +1,51 @@
+# nimaproxy — NVIDIA NIM Key-Rotation Proxy
+# ================================================================
+# Copy this to nimaproxy.toml and fill in your keys.
+# Then run: ./nimaproxy --config ./nimaproxy.toml
+#
+# All fields are optional except [[keys]] — at least one key is required.
+
+# Local address to bind. Defaults to 127.0.0.1:8080.
+# listen = "127.0.0.1:8080"
+
+# Upstream NVIDIA NIM target. Defaults to https://integrate.api.nvidia.com.
+# target = "https://integrate.api.nvidia.com"
+
+# ── API Keys ────────────────────────────────────────────────────────────────
+# Each key's RPM budget (40 RPM) pools together via round-robin rotation.
+# On 429, the proxy cools down the rate-limited key and retries with the next.
+# Any number of keys can be added. Keys rotate in order.
+
+[[keys]]
+key = "nvapi-YOUR_FIRST_KEY_HERE"
+label = "key1"  # optional — shown in /health and logs
+
+[[keys]]
+key = "nvapi-YOUR_SECOND_KEY_HERE"
+label = "key2"
+
+[[keys]]
+key = "nvapi-YOUR_THIRD_KEY_HERE"
+label = "key3"
+
+[[keys]]
+key = "nvapi-YOUR_FOURTH_KEY_HERE"
+label = "key4"
+
+# ── V2: Latency-Aware Model Routing (optional) ──────────────────────────────
+# When a request arrives with `"model": "auto"`, the proxy picks the fastest
+# non-degraded model from this list using real-time TTFC stats.
+#
+# Untried models (< 3 samples) get priority. Degraded models (≥3 consecutive
+# failures or avg TTFC > spike_threshold_ms) are skipped until they recover.
+#
+# [routing]
+#   strategy          = "latency_aware"   # or "round_robin" (default)
+#   spike_threshold_ms = 3000             # ms — above this avg marks degraded
+#
+#   models = [
+#     "nvidia/meta/llama-3.3-70b-instruct",
+#     "nvidia/qwen/qwen2.5-coder-32b-instruct",
+#     "nvidia/moonshotai/kimi-k2-instruct",
+#     "nvidia/mistralai/devstral-2-123b-instruct-2512",
+#   ]
