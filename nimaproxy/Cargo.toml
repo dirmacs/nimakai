@@ -1,0 +1,35 @@
+[package]
+name = "nimaproxy"
+version = "0.1.0"
+edition = "2021"
+description = "NVIDIA NIM key-rotation proxy — OpenAI-compatible, SSE streaming passthrough"
+
+[[bin]]
+name = "nimaproxy"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+bytes = "1"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
