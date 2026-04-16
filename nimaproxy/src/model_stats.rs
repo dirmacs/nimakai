@@ -177,24 +177,26 @@ impl ModelStatsStore {
     pub fn racing_candidates(&self, candidates: &[String], max: usize) -> Vec<String> {
         let map = self.inner.lock().unwrap();
         let threshold = self.spike_threshold_ms;
-        let mut ranked: Vec<(&String, f64)> = Vec::new();
+        let mut ranked: Vec<(&String, Option<f64>)> = Vec::new();
         for m in candidates {
             if let Some(e) = map.get(m) {
-                if e.ring_len == 0 {
-                    continue;
-                }
                 if e.consecutive_failures >= 20 {
                     continue;
                 }
-                if e.is_degraded(threshold) {
+                if e.ring_len >= 3 && e.is_degraded(threshold) {
                     continue;
                 }
-                if let Some(avg) = e.avg_ms() {
-                    ranked.push((m, avg));
-                }
+                ranked.push((m, e.avg_ms()));
+            } else {
+                ranked.push((m, None));
             }
         }
-        ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.sort_by(|a, b| match (a.1, b.1) {
+            (Some(av), Some(bv)) => av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
         ranked
             .into_iter()
             .take(max)
