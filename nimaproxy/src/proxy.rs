@@ -277,15 +277,51 @@ async fn race_models(
 ) -> Response {
     let timeout_ms = state.racing_timeout_ms;
     let max_parallel = state.racing_max_parallel.min(models.len());
-    let models_to_race: Vec<String> = models.iter().take(max_parallel).cloned().collect();
 
-    if models_to_race.len() < 2 {
+    if max_parallel < 2 {
         return (StatusCode::BAD_REQUEST, "racing requires at least 2 models").into_response();
+    }
+
+    // Rotate model selection: grab cursor, pick models starting from it,
+    // wrap around, then advance cursor. This forces cycling so no single
+    // model can dominate — critical for breaking inference loops where a model
+    // gets stuck and keeps getting picked.
+    let cursor = {
+        let c = state.racing_cursor.lock().unwrap();
+        *c
+    };
+    let n = models.len();
+    let models_to_race: Vec<String> = (0..max_parallel)
+        .map(|i| models[(cursor + i) % n].clone())
+        .collect();
+    {
+        let mut c = state.racing_cursor.lock().unwrap();
+        *c = (cursor + max_parallel) % n;
+    }
+
+    // Pre-allocate one key per racing model BEFORE spawning any tasks.
+    // This eliminates race conditions where concurrent tokio::spawn calls
+    // all grab the same key, causing spurious 429 rate-limits.
+    let racing_keys: Vec<(String, usize, Option<String>)> = models_to_race
+        .iter()
+        .filter_map(|_| {
+            state.pool.next_key().map(|(key, idx)| {
+                (key.clone(), idx, state.pool.get_key_label(idx))
+            })
+        })
+        .collect();
+
+    // If we don't have enough keys for all models, fail fast
+    if racing_keys.len() < models_to_race.len() {
+        eprintln!("[racing] not enough keys: {} models, {} keys",
+            models_to_race.len(), racing_keys.len());
     }
 
     let mut handles = Vec::new();
 
-    for model_id in &models_to_race {
+    for (model_id, (key, key_idx, key_label)) in
+        models_to_race.iter().zip(racing_keys.into_iter())
+    {
         let mut json: Value = match serde_json::from_slice(&body) {
             Ok(v) => v,
             Err(_) => continue,
@@ -303,10 +339,7 @@ async fn race_models(
         let timeout_val = timeout_ms;
 
         let handle = tokio::spawn(async move {
-            let Some((key, key_idx)) = state_clone.pool.next_key() else {
-                return Err(format!("no keys"));
-            };
-            let key_label = state_clone.pool.get_key_label(key_idx);
+            let (key, _key_idx, key_label) = (key, key_idx, key_label);
 
             let t0 = Instant::now();
             let result = timeout(
