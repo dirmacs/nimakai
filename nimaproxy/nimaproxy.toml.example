@@ -18,7 +18,7 @@
 
 [[keys]]
 key = "nvapi-YOUR_FIRST_KEY_HERE"
-label = "key1"  # optional — shown in /health and logs
+label = "key1"
 
 [[keys]]
 key = "nvapi-YOUR_SECOND_KEY_HERE"
@@ -32,40 +32,42 @@ label = "key3"
 key = "nvapi-YOUR_FOURTH_KEY_HERE"
 label = "key4"
 
-# ── V2: Latency-Aware Model Routing (optional) ──────────────────────────────
+# ── Latency-Aware Model Routing ──────────────────────────────────────────────
 # When a request arrives with `"model": "auto"`, the proxy picks the best
 # model from this list using real-time TTFC stats.
 #
 # Untried models (< 3 samples) get priority. Degraded models (≥3 consecutive
 # failures or avg TTFC > spike_threshold_ms) are skipped until they recover.
 #
-# Strategies:
-#   round_robin    — cycles through models in order (ignores latency data)
-#   latency_aware  — prefers fastest non-degraded model by avg TTFC (default)
-#
 # [routing]
-# strategy           = "latency_aware"   # or "round_robin"
-# spike_threshold_ms = 3000              # ms — above this avg marks degraded
+# strategy           = "latency_aware"
+# spike_threshold_ms = 3000
 #
 # models = [
-#   "nvidia/meta/llama-3.3-70b-instruct",
-#   "nvidia/qwen/qwen2.5-coder-32b-instruct",
-#   "nvidia/moonshotai/kimi-k2-instruct",
-#   "nvidia/mistralai/devstral-2-123b-instruct-2512",
+#   "moonshotai/kimi-k2-instruct",
+#   "qwen/qwen2.5-coder-32b-instruct",
+#   "mistralai/devstral-2-123b-instruct-2512",
+#   "meta/llama-3.3-70b-instruct",
 # ]
 
-# ── V3: Model Racing (Speculative Execution) ────────────────────
+# ── Model Racing (Speculative Execution) ──────────────────────────────────
 # Fire N parallel requests to N models, return first response.
 # Trades N×token budget for min(P50 latency).
-# WARNING: This burns N requests per logical call!
+# Dead models (≥20 consecutive failures, 0 samples, or degraded) are filtered
+# automatically. Keys are pre-allocated per task to avoid 429 collisions.
 #
 # [racing]
 # enabled = true
 # models = [
-#   "nvidia/z-ai/glm4.7",
-#   "nvidia/qwen/qwen3.5-397b-a17b",
-#   "nvidia/mistralai/devstral-2-123b-instruct-2512",
+#   "moonshotai/kimi-k2",
+#   "minimaxai/minimax-m2.5",
+#   "qwen/qwen3-next-80b-a3b-thinking",
+#   "stepfun-ai/step-3.5-flash",
+#   "qwen/qwen3.5-122b-a10b",
+#   "qwen/qwen3-coder-480b-a35b-instruct",
+#   "google/gemma-3-27b-it",
+#   "qwen/qwen2.5-coder-32b-instruct",
 # ]
-# max_parallel = 3
-# timeout_ms = 8000
+# max_parallel = 8
+# timeout_ms = 15000
 # strategy = "complete"

@@ -291,9 +291,18 @@ async fn race_models(
         *c
     };
     let n = models.len();
-    let models_to_race: Vec<String> = (0..max_parallel)
+
+    let candidates: Vec<String> = (0..n)
         .map(|i| models[(cursor + i) % n].clone())
         .collect();
+    let candidates_for_race = state.model_stats.racing_candidates(&candidates, max_parallel);
+
+    if candidates_for_race.len() < 2 {
+        eprintln!("[racing] not enough viable models after filtering (need ≥2)");
+        return (StatusCode::BAD_GATEWAY, "not enough viable racing models").into_response();
+    }
+
+    let models_to_race = candidates_for_race;
     {
         let mut c = state.racing_cursor.lock().unwrap();
         *c = (cursor + max_parallel) % n;

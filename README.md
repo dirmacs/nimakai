@@ -316,20 +316,20 @@ When a request arrives with `"model": "auto"`, the proxy picks the best model fr
 [racing]
 enabled = true
 models = [
-  "z-ai/glm4.7",
-  "minimaxai/minimax-m2.5",
   "moonshotai/kimi-k2",
-  "google/gemma-3-27b-it",
-  "deepseek-ai/deepseek-v3.1-terminus",
-  "nvidia/nemotron-3-super-120b-a12b",
+  "minimaxai/minimax-m2.5",
   "qwen/qwen3-next-80b-a3b-thinking",
   "stepfun-ai/step-3.5-flash",
+  "qwen/qwen3.5-122b-a10b",
+  "qwen/qwen3-coder-480b-a35b-instruct",
+  "google/gemma-3-27b-it",
+  "qwen/qwen2.5-coder-32b-instruct",
 ]
 max_parallel = 8
-timeout_ms = 8000
+timeout_ms = 15000
 strategy = "complete"
 ```
-Fires N parallel requests to N models, returns first response. Trades N×token budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429 rate-limit collisions. Models are selected in round-robin order via `racing_cursor` to prevent a single fast model from dominating and breaking inference loops.
+Fires N parallel requests to N models, returns first response. Trades N×token budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429 rate-limit collisions. Models are selected in round-robin order via `racing_cursor` to prevent a single fast model from dominating and breaking inference loops. Dead models (≥20 consecutive failures or 0 samples) are filtered out automatically.
 
 ## License
 
