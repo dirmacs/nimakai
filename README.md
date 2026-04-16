@@ -315,8 +315,14 @@ When a request arrives with `"model": "auto"`, the proxy picks the best model fr
 ```toml
 [racing]
 enabled = true
-models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
-max_parallel = 3
+models = [
+  "z-ai/glm4.7",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.5",
+  "minimaxai/minimax-m2.7",
+  "moonshotai/kimi-k2.5",
+]
+max_parallel = 5
 timeout_ms = 8000
 strategy = "complete"
 ```
