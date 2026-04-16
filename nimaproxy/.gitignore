@@ -8,3 +8,6 @@ nimaproxy.toml
 # Racing test config (has API keys)
 /nimaproxy_racing.toml
 /nimaproxy.toml.test
+
+# Test fixtures with real API keys
+tests/test_config.toml
