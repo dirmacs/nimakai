@@ -7,6 +7,9 @@ src/nimcache/
 *.so
 *.dylib
 
+# OMP temp directory
+.opencode/
+
 # Compiled test binaries
 tests/test_types
 tests/test_metrics

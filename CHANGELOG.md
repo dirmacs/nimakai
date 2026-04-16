@@ -2,6 +2,17 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.11.0] - 2026-04-16
+
+### Added (Racing Models Update)
+- Updated racing models to MiniMax M2.5, M2.7, and Kimi K2.5 (removed Mistral devstral due to OMP compatibility issues)
+- Racing config now uses: z-ai/glm4.7, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m2.5, minimaxai/minimax-m2.7, moonshotai/kimi-k2.5
+- max_parallel increased to 5 to utilize all racing models
+- OMP models.yml updated with matching model list
+
+### Fixed
+- Removed Mistral models from racing config due to "developer role" errors with oh-my-pi
+
 ## [0.10.0] - 2026-04-15
 
 ### Added (FFI Integration)
