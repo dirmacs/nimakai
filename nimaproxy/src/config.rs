@@ -37,7 +37,7 @@ pub struct RacingConfig {
     pub enabled: Option<bool>,
     /// List of models to race. Must have 2+ models.
     pub models: Option<Vec<String>>,
-    /// Max parallel requests (default: 3, max: 5)
+    /// Max parallel requests (default: 3, max: 8)
     pub max_parallel: Option<usize>,
     /// Timeout per request in ms (default: 8000ms)
     pub timeout_ms: Option<u64>,
@@ -77,7 +77,7 @@ impl Config {
             .as_ref()
             .and_then(|r| r.max_parallel)
             .unwrap_or(3)
-            .min(5)
+            .min(8)
             .max(2)
     }
 

@@ -3,7 +3,6 @@ use nimaproxy::key_pool::KeyPool;
 use nimaproxy::model_router::{ModelRouter, Strategy};
 use nimaproxy::model_stats::ModelStatsStore;
 use nimaproxy::AppState;
-use std::sync::Arc;
 
 fn make_key_pool() -> KeyPool {
     let keys = vec![
@@ -118,7 +117,7 @@ fn test_integration_app_state_creation() {
     let stats = make_stats();
     let router = make_router();
 
-    let state = Arc::new(AppState::new(
+    let state = AppState::new(
         keys,
         "https://api.example.com".to_string(),
         Some(router),
@@ -127,7 +126,7 @@ fn test_integration_app_state_creation() {
         3,
         8000,
         "complete".to_string(),
-    ));
+    );
 
     assert_eq!(state.pool.len(), 1);
     assert_eq!(state.target, "https://api.example.com");
@@ -270,7 +269,7 @@ fn test_integration_auto_routing_no_router() {
     let stats = make_stats();
 
     // No router configured
-    let state = Arc::new(AppState::new(
+    let state = AppState::new(
         keys,
         "https://api.example.com".to_string(),
         None,
@@ -279,7 +278,7 @@ fn test_integration_auto_routing_no_router() {
         3,
         8000,
         "complete".to_string(),
-    ));
+    );
 
     assert!(state.router.is_none());
 }
@@ -312,4 +311,230 @@ fn test_integration_auto_routing_with_multiple_healthy_models() {
     // Picks lowest avg — model-a
     let picked = router.pick(&stats);
     assert_eq!(picked, Some("model-a".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// Racing tests — key pre-allocation
+// ---------------------------------------------------------------------------
+
+fn make_pool_3keys() -> nimaproxy::key_pool::KeyPool {
+    let keys = vec![
+        nimaproxy::config::KeyEntry {
+            key: "key-a1".to_string(),
+            label: Some("k1".to_string()),
+        },
+        nimaproxy::config::KeyEntry {
+            key: "key-b2".to_string(),
+            label: Some("k2".to_string()),
+        },
+        nimaproxy::config::KeyEntry {
+            key: "key-c3".to_string(),
+            label: Some("k3".to_string()),
+        },
+    ];
+    nimaproxy::key_pool::KeyPool::new(keys)
+}
+
+fn make_pool_2keys() -> nimaproxy::key_pool::KeyPool {
+    let keys = vec![
+        nimaproxy::config::KeyEntry {
+            key: "key-x1".to_string(),
+            label: Some("x1".to_string()),
+        },
+        nimaproxy::config::KeyEntry {
+            key: "key-y2".to_string(),
+            label: Some("y2".to_string()),
+        },
+    ];
+    nimaproxy::key_pool::KeyPool::new(keys)
+}
+
+fn racing_keys(
+    pool: &nimaproxy::key_pool::KeyPool,
+    models: &[String],
+) -> Vec<(String, usize, Option<String>)> {
+    models
+        .iter()
+        .filter_map(|_| {
+            pool.next_key()
+                .map(|(key, idx)| (key.clone(), idx, pool.get_key_label(idx)))
+        })
+        .collect()
+}
+
+#[test]
+fn test_racing_preallocate_distributes_keys_to_models() {
+    let pool = make_pool_3keys();
+    let models = vec![
+        "model-1".to_string(),
+        "model-2".to_string(),
+        "model-3".to_string(),
+    ];
+
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(keys.len(), 3, "should get one key per model");
+    let indices: Vec<usize> = keys.iter().map(|(_, idx, _)| *idx).collect();
+    let unique: std::collections::HashSet<usize> = indices.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        3,
+        "each model should get a different key index"
+    );
+}
+
+#[test]
+fn test_racing_preallocate_insufficient_keys_uses_available() {
+    let pool = make_pool_2keys();
+    let models = vec![
+        "model-1".to_string(),
+        "model-2".to_string(),
+        "model-3".to_string(),
+    ];
+
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(
+        keys.len(),
+        3,
+        "key count is capped by model count, not pool size"
+    );
+}
+
+#[test]
+fn test_racing_preallocate_exact_match_keys_models() {
+    let pool = make_pool_3keys();
+    let models = vec![
+        "model-1".to_string(),
+        "model-2".to_string(),
+        "model-3".to_string(),
+    ];
+
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(keys.len(), 3);
+    let indices: Vec<usize> = keys.iter().map(|(_, idx, _)| *idx).collect();
+    assert!(
+        indices.contains(&0) && indices.contains(&1) && indices.contains(&2),
+        "all three keys should be used"
+    );
+}
+
+#[test]
+fn test_racing_preallocate_one_key_per_model_round_robin() {
+    let pool = make_pool_3keys();
+    let models = vec!["model-a".to_string(), "model-b".to_string()];
+
+    let keys1 = racing_keys(&pool, &models);
+    let keys2 = racing_keys(&pool, &models);
+
+    assert_eq!(keys1.len(), 2);
+    assert_eq!(keys2.len(), 2);
+
+    let idx1: Vec<usize> = keys1.iter().map(|(_, idx, _)| *idx).collect();
+    let idx2: Vec<usize> = keys2.iter().map(|(_, idx, _)| *idx).collect();
+
+    assert!(
+        idx1 != idx2,
+        "second call should use different keys (round-robin)"
+    );
+}
+
+#[test]
+fn test_racing_preallocate_with_cooldown_skips_cooldown_key() {
+    let pool = make_pool_3keys();
+
+    pool.mark_rate_limited(1, 60);
+
+    let models = vec!["m1".to_string(), "m2".to_string()];
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(keys.len(), 2);
+    let indices: Vec<usize> = keys.iter().map(|(_, idx, _)| *idx).collect();
+    assert!(!indices.contains(&1), "cooldown key 1 should be skipped");
+}
+
+#[test]
+fn test_racing_preallocate_all_cooldown_returns_empty() {
+    let pool = make_pool_3keys();
+
+    pool.mark_rate_limited(0, 60);
+    pool.mark_rate_limited(1, 60);
+    pool.mark_rate_limited(2, 60);
+
+    let models = vec!["m1".to_string()];
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(keys.len(), 0, "all keys in cooldown — nothing to allocate");
+}
+
+#[test]
+fn test_racing_preallocate_empty_models_returns_empty() {
+    let pool = make_pool_3keys();
+    let models: Vec<String> = vec![];
+
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(keys.len(), 0, "no models means no keys allocated");
+}
+
+#[test]
+fn test_racing_preallocate_key_labels_preserved() {
+    let pool = make_pool_3keys();
+    let models = vec!["m1".to_string()];
+
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(keys.len(), 1);
+    let (_, _, label) = &keys[0];
+    assert!(label.is_some());
+    let label = label.as_ref().unwrap();
+    assert!(label == "k1" || label == "k2" || label == "k3");
+}
+
+#[test]
+fn test_racing_preallocate_5models_3keys_gives_3() {
+    let pool = make_pool_3keys();
+    let models = vec![
+        "m1".to_string(),
+        "m2".to_string(),
+        "m3".to_string(),
+        "m4".to_string(),
+        "m5".to_string(),
+    ];
+
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(
+        keys.len(),
+        5,
+        "key count is capped by model count, pool cycles round-robin"
+    );
+}
+
+#[test]
+fn test_racing_preallocate_concurrent_calls_are_deterministic() {
+    let pool = make_pool_3keys();
+    let models = vec!["m1".to_string(), "m2".to_string(), "m3".to_string()];
+
+    let run1 = racing_keys(&pool, &models);
+    let run2 = racing_keys(&pool, &models);
+    let run3 = racing_keys(&pool, &models);
+
+    let idx1: Vec<usize> = run1.iter().map(|(_, idx, _)| *idx).collect();
+    let idx2: Vec<usize> = run2.iter().map(|(_, idx, _)| *idx).collect();
+    let idx3: Vec<usize> = run3.iter().map(|(_, idx, _)| *idx).collect();
+
+    assert_eq!(idx1, idx2, "round-robin should be deterministic");
+    assert_eq!(idx2, idx3, "round-robin should be deterministic");
+}
+
+#[test]
+fn test_racing_preallocate_max_parallel_capped_at_model_count() {
+    let pool = make_pool_3keys();
+    let models = vec!["m1".to_string()];
+
+    let keys = racing_keys(&pool, &models);
+
+    assert_eq!(keys.len(), 1, "only 1 model, only 1 key allocated");
 }
