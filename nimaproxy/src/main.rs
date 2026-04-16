@@ -4,7 +4,7 @@ use axum::{routing, Router};
 fn usage() -> ! {
     eprintln!("nimaproxy — NVIDIA NIM key-rotation proxy");
     eprintln!();
-    eprintln!("Usage: nimaproxy --config <path> [--port <port>]");
+    eprintln!("Usage: nimaproxy --config <path> [--port <port>] [--pid-file <path>]");
     eprintln!();
     eprintln!("Config file format (TOML):");
     eprintln!("  listen = \"127.0.0.1:8080\"  # optional");
@@ -20,6 +20,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut config_path: Option<String> = None;
     let mut port_override: Option<u16> = None;
+    let mut pid_file_override: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -35,10 +36,18 @@ async fn main() {
                     }
                 }
             }
+            "--pid-file" => {
+                i += 1;
+                pid_file_override = args.get(i).cloned();
+            }
             "--help" | "-h" => usage(),
             _ => {}
         }
         i += 1;
+    }
+
+    if let Some(ref pf) = pid_file_override {
+        std::env::set_var("NIMAPROXY_PID_FILE", pf);
     }
 
     let config_path = config_path.unwrap_or_else(|| "nimaproxy.toml".to_string());
@@ -135,11 +144,10 @@ async fn main() {
 
     // Extract port from listen address and write PID file with format: "PID:PORT"
     let port = listen.split(':').last().unwrap_or("8080");
-    std::fs::write(
-        "/tmp/nimaproxy.pid",
-        format!("{}:{}", std::process::id(), port),
-    )
-    .ok();
+    let pid_file = std::env::var("NIMAPROXY_PID_FILE")
+        .unwrap_or_else(|_| "/tmp/nimaproxy.pid".to_string());
+    std::fs::write(&pid_file, format!("{}:{}", std::process::id(), port))
+        .ok();
 
     axum::serve(listener, app)
         .await
