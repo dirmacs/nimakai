@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -10,9 +11,10 @@ pub struct KeyPool {
     cooldowns: Vec<Mutex<Option<Instant>>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyStatus {
     pub label: String,
-    pub key_hint: String, // last 4 chars only
+    pub key_hint: String,
     pub active: bool,
     pub cooldown_secs_remaining: u64,
 }
