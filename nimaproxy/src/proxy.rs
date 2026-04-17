@@ -27,8 +27,12 @@ pub fn validate_model_exists(model: &str, state: &AppState) -> Result<(), String
 
     // Check if model is in the available_models list (if non-empty)
     let available = state.available_models.lock().unwrap();
-    if !available.is_empty() && available.iter().any(|m| m == model) {
-        return Ok(());
+    if !available.is_empty() {
+        if available.iter().any(|m| m == model) {
+            return Ok(());
+        }
+        // available_models is set and model is not in it - reject
+        return Err(format!("model '{}' not found in available models", model));
     }
     drop(available);
 
