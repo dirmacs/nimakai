@@ -538,3 +538,93 @@ fn test_racing_preallocate_max_parallel_capped_at_model_count() {
 
     assert_eq!(keys.len(), 1, "only 1 model, only 1 key allocated");
 }
+
+#[test]
+fn test_model_validation_rejects_invalid_model() {
+    use nimaproxy::proxy::validate_model_exists;
+    use std::sync::Mutex;
+
+    let state = AppState::new(
+        vec![KeyEntry {
+            key: "test".to_string(),
+            label: Some("test".to_string()),
+        }],
+        "https://test.com".to_string(),
+        None,
+        ModelStatsStore::new(3000.0),
+        vec![],
+        8,
+        15000,
+        "round_robin".to_string(),
+    );
+
+    {
+        let mut available = state.available_models.lock().unwrap();
+        *available = vec![
+            "google/gemma-3-27b-it".to_string(),
+            "qwen/qwen2.5-coder-32b-instruct".to_string(),
+        ];
+    }
+
+    let result = validate_model_exists("google/gemma-3-27b-it", &state);
+    assert!(result.is_ok(), "valid model should pass");
+
+    let result = validate_model_exists("nvidia/invalid-model-xyz", &state);
+    assert!(result.is_err(), "invalid model should fail");
+    assert!(
+        result.unwrap_err().contains("not found"),
+        "error should mention 'not found'"
+    );
+}
+
+#[test]
+fn test_model_validation_allows_auto_and_empty() {
+    use nimaproxy::proxy::validate_model_exists;
+
+    let state = AppState::new(
+        vec![KeyEntry {
+            key: "test".to_string(),
+            label: Some("test".to_string()),
+        }],
+        "https://test.com".to_string(),
+        None,
+        ModelStatsStore::new(3000.0),
+        vec![],
+        8,
+        15000,
+        "round_robin".to_string(),
+    );
+
+    {
+        let mut available = state.available_models.lock().unwrap();
+        *available = vec!["some-model".to_string()];
+    }
+
+    let result = validate_model_exists("auto", &state);
+    assert!(result.is_ok(), "auto should always pass");
+
+    let result = validate_model_exists("", &state);
+    assert!(result.is_ok(), "empty should always pass");
+}
+
+#[test]
+fn test_model_validation_passes_when_no_cache() {
+    use nimaproxy::proxy::validate_model_exists;
+
+    let state = AppState::new(
+        vec![KeyEntry {
+            key: "test".to_string(),
+            label: Some("test".to_string()),
+        }],
+        "https://test.com".to_string(),
+        None,
+        ModelStatsStore::new(3000.0),
+        vec![],
+        8,
+        15000,
+        "round_robin".to_string(),
+    );
+
+    let result = validate_model_exists("any-model", &state);
+    assert!(result.is_ok(), "should pass when no cache available");
+}
