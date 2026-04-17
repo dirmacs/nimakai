@@ -35,6 +35,7 @@ fn make_state() -> Arc<AppState> {
         5,
         20000,
         "complete".to_string(),
+        std::collections::HashMap::new(),
     )
 }
 
@@ -56,6 +57,7 @@ fn make_state_no_racing() -> Arc<AppState> {
         3,
         5000,
         "complete".to_string(),
+        std::collections::HashMap::new(),
     )
 }
 

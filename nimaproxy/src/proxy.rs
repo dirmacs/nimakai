@@ -16,6 +16,66 @@ use crate::AppState;
 
 const MAX_RETRIES: usize = 8;
 
+fn count_repetitions(text: &str) -> u32 {
+    let text_lower = text.to_lowercase();
+    let words: Vec<&str> = text_lower.split_whitespace().collect();
+    if words.len() < 4 {
+        return 0;
+    }
+    
+    let mut repetitions = 0u32;
+    for window_size in 3..=6 {
+        if words.len() < window_size * 2 {
+            continue;
+        }
+        for i in 0..words.len() - window_size {
+            let slice = &words[i..i + window_size];
+            let pattern = slice.join(" ");
+            let mut count = 1;
+            for j in (i + window_size..).step_by(window_size).take_while(|&j| j + window_size <= words.len()) {
+                let next_slice = &words[j..j + window_size];
+                if next_slice.join(" ") == pattern {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            if count > 1 {
+                repetitions += count - 1;
+            }
+        }
+    }
+    repetitions.min(10)
+}
+
+fn extract_response_metrics(text: &str) -> (u32, u32, bool) {
+    let mut output_tokens = 0u32;
+    let repetition_count = count_repetitions(text);
+    let mut has_tool_call = false;
+    
+    if let Ok(json) = serde_json::from_str::<Value>(text) {
+        if let Some(usage) = json.get("usage").and_then(|u| u.get("completion_tokens")) {
+            if let Some(tokens) = usage.as_u64() {
+                output_tokens = tokens as u32;
+            }
+        }
+        
+        if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
+            for choice in choices {
+                if choice.get("message").and_then(|m| m.get("tool_calls")).is_some() {
+                    has_tool_call = true;
+                }
+            }
+        }
+    }
+    
+    if output_tokens == 0 {
+        output_tokens = (text.len() as u32) / 4;
+    }
+    
+    (output_tokens, repetition_count, has_tool_call)
+}
+
 /// Validate a model name for chat completion requests.
 /// Returns Ok(()) for valid models (including "auto" and empty).
 /// Returns Err with message for invalid models not in the available list.
@@ -62,14 +122,22 @@ pub async fn chat_completions(
     _headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    // Check for racing mode
-    let racing_models = state.racing_models.clone();
-    if !racing_models.is_empty() && racing_models.len() >= 2 {
+    // Extract original model BEFORE resolve_model modifies it
+    let original_model = {
+        if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+            v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string()
+        } else {
+            String::new()
+        }
+    };
+
+    let (model_id, body) = resolve_model(body, &state);
+
+    // Racing only triggers when the ORIGINAL request was model="auto"
+    if original_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2 {
+        let racing_models = state.racing_models.clone();
         return race_models(state, body, &racing_models).await;
     }
-
-    // Standard single-model proxy
-    let (model_id, body) = resolve_model(body, &state);
 
     let n = state.pool.len().min(MAX_RETRIES).max(1);
 
@@ -90,7 +158,11 @@ pub async fn chat_completions(
 
         match result {
             Err(e) => {
-                state.model_stats.record(&model_id, t0.elapsed().as_millis() as f64, false);
+                if let Some(label) = state.pool.get_key_label(idx) {
+                    state.model_stats.record_with_key(&model_id, &label, t0.elapsed().as_millis() as f64, false);
+                } else {
+                    state.model_stats.record(&model_id, t0.elapsed().as_millis() as f64, false);
+                }
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
             Ok(resp) => {
@@ -111,7 +183,6 @@ pub async fn chat_completions(
                 // Record TTFC (response headers received = first bytes available)
                 let ttfc_ms = t0.elapsed().as_millis() as f64;
                 let ok = status.is_success();
-                state.model_stats.record(&model_id, ttfc_ms, ok);
 
                 // Forward response — stream bytes directly (works for JSON + SSE)
                 let resp_status =
@@ -127,7 +198,32 @@ pub async fn chat_completions(
                 let stream = resp
                     .bytes_stream()
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-                let body = Body::from_stream(stream);
+                
+                let collected = match stream.try_collect::<Vec<Bytes>>().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                    }
+                };
+                
+                let full_body = collected.concat();
+                let (output_tokens, repetition_count, had_tool_call) = extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
+                
+                if output_tokens > 0 || repetition_count > 0 {
+                    if let Some(label) = state.pool.get_key_label(idx) {
+                        state.model_stats.record_with_circuit_breaker(&model_id, ttfc_ms, ok, output_tokens, repetition_count, had_tool_call);
+                    } else {
+                        state.model_stats.record_with_circuit_breaker(&model_id, ttfc_ms, ok, output_tokens, repetition_count, had_tool_call);
+                    }
+                } else {
+                    if let Some(label) = state.pool.get_key_label(idx) {
+                        state.model_stats.record_with_key(&model_id, &label, ttfc_ms, ok);
+                    } else {
+                        state.model_stats.record(&model_id, ttfc_ms, ok);
+                    }
+                }
+                
+                let body = Body::from(full_body);
 
                 let mut response = Response::new(body);
                 *response.status_mut() = resp_status;
@@ -176,6 +272,22 @@ fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
         if let Some(router) = &state.router {
             if let Some(picked) = router.pick(&state.model_stats) {
                 json["model"] = Value::String(picked.clone());
+                if let Some(params) = state.model_params.get(&picked) {
+                    if let Some(temp) = params.temperature {
+                        json["temperature"] = Value::from(temp);
+                    }
+                    if let Some(tp) = params.top_p {
+                        json["top_p"] = Value::from(tp);
+                    }
+                    if let Some(tk) = params.top_k {
+                        json["top_k"] = Value::from(tk);
+                    }
+                    if let Some(ctk) = &params.chat_template_kwargs {
+                        for (k, v) in ctk {
+                            json[k] = v.clone();
+                        }
+                    }
+                }
                 let rewritten = Bytes::from(json.to_string());
                 return (picked, rewritten);
             }
@@ -185,9 +297,27 @@ fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     let model_id = if requested.is_empty() {
         "unknown".to_string()
     } else {
-        requested
+        requested.clone()
     };
-    (model_id, body)
+
+    if let Some(params) = state.model_params.get(&requested) {
+        if let Some(temp) = params.temperature {
+            json["temperature"] = Value::from(temp);
+        }
+        if let Some(tp) = params.top_p {
+            json["top_p"] = Value::from(tp);
+        }
+        if let Some(tk) = params.top_k {
+            json["top_k"] = Value::from(tk);
+        }
+        if let Some(ctk) = &params.chat_template_kwargs {
+            for (k, v) in ctk {
+                json[k] = v.clone();
+            }
+        }
+    }
+
+    (model_id, Bytes::from(json.to_string()))
 }
 
 /// GET /v1/models — passthrough to NVIDIA.
@@ -344,34 +474,35 @@ async fn race_models(
         *c = (cursor + max_parallel) % n;
     }
 
-    // Pre-allocate one key per racing model BEFORE spawning any tasks.
-    // This eliminates race conditions where concurrent tokio::spawn calls
-    // all grab the same key, causing spurious 429 rate-limits.
-    let racing_keys: Vec<(String, usize, Option<String>)> = models_to_race
-        .iter()
-        .filter_map(|_| {
-            state.pool.next_key().map(|(key, idx)| {
-                (key.clone(), idx, state.pool.get_key_label(idx))
-            })
-        })
-        .collect();
-
-    // If we don't have enough keys for all models, fail fast
-    if racing_keys.len() < models_to_race.len() {
-        eprintln!("[racing] not enough keys: {} models, {} keys",
-            models_to_race.len(), racing_keys.len());
-    }
-
     let mut handles = Vec::new();
 
-    for (model_id, (key, key_idx, key_label)) in
-        models_to_race.iter().zip(racing_keys.into_iter())
-    {
+    for model_id in &models_to_race {
+        let timeout_val = state.model_stats.get_model_timeout(model_id, timeout_ms);
+
         let mut json: Value = match serde_json::from_slice(&body) {
             Ok(v) => v,
             Err(_) => continue,
         };
         json["model"] = Value::String(model_id.clone());
+
+        // Inject per-model hyperparameters - override client settings with proxy config
+        if let Some(params) = state.model_params.get(model_id) {
+            if let Some(temp) = params.temperature {
+                json["temperature"] = Value::from(temp);
+            }
+            if let Some(tp) = params.top_p {
+                json["top_p"] = Value::from(tp);
+            }
+            if let Some(tk) = params.top_k {
+                json["top_k"] = Value::from(tk);
+            }
+            if let Some(ctk) = &params.chat_template_kwargs {
+                for (k, v) in ctk {
+                    json[k] = v.clone();
+                }
+            }
+        }
+
         let req_body = match serde_json::to_vec(&json) {
             Ok(b) => Bytes::from(b),
             Err(_) => continue,
@@ -381,14 +512,22 @@ async fn race_models(
         let client = state.client.clone();
         let state_clone = state.clone();
         let model_id_clone = model_id.clone();
-        let timeout_val = timeout_ms;
+        let timeout_ms_for_model = timeout_val;
+
+        let key = state.pool.next_key();
+        if key.is_none() {
+            eprintln!("[racing] no keys available for {}", model_id);
+            continue;
+        }
+        let (key, key_idx) = key.unwrap();
+        let key_label = state.pool.get_key_label(key_idx);
 
         let handle = tokio::spawn(async move {
-            let (key, _key_idx, key_label) = (key, key_idx, key_label);
+            let key_label = key_label;
 
             let t0 = Instant::now();
             let result = timeout(
-                std::time::Duration::from_millis(timeout_val),
+                std::time::Duration::from_millis(timeout_ms_for_model),
                 client
                     .post(format!("{}/v1/chat/completions", target))
                     .header("Authorization", format!("Bearer {}", key))
@@ -401,7 +540,11 @@ async fn race_models(
             match result {
                 Ok(Ok(resp)) => {
                     let latency = t0.elapsed().as_millis() as f64;
-                    state_clone.model_stats.record(&model_id_clone, latency, true);
+                    if let Some(ref label) = key_label {
+                        state_clone.model_stats.record_with_key(&model_id_clone, label, latency, true);
+                    } else {
+                        state_clone.model_stats.record(&model_id_clone, latency, true);
+                    }
 
                     let status = resp.status();
                     let content_type = resp
@@ -433,11 +576,19 @@ async fn race_models(
                     Ok::<Response, String>(response)
                 }
                 Ok(Err(e)) => {
-                    state_clone.model_stats.record(&model_id_clone, timeout_val as f64, false);
+                    if let Some(ref label) = key_label {
+                        state_clone.model_stats.record_with_key(&model_id_clone, label, timeout_ms_for_model as f64, false);
+                    } else {
+                        state_clone.model_stats.record(&model_id_clone, timeout_ms_for_model as f64, false);
+                    }
                     Err(e.to_string())
                 }
                 Err(_) => {
-                    state_clone.model_stats.record(&model_id_clone, timeout_val as f64, false);
+                    if let Some(ref label) = key_label {
+                        state_clone.model_stats.record_with_key(&model_id_clone, label, timeout_ms_for_model as f64, false);
+                    } else {
+                        state_clone.model_stats.record(&model_id_clone, timeout_ms_for_model as f64, false);
+                    }
                     Err("timeout".to_string())
                 }
             }

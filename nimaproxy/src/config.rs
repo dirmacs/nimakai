@@ -1,6 +1,13 @@
 use serde::Deserialize;
 use std::fs;
 
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct CircuitBreakerConfig {
+    pub max_output_tokens: Option<u32>,
+    pub max_repetitions: Option<u32>,
+    pub max_consecutive_assistant_turns: Option<u32>,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct Config {
     pub listen: Option<String>,
@@ -8,6 +15,45 @@ pub struct Config {
     pub keys: Vec<KeyEntry>,
     pub routing: Option<RoutingConfig>,
     pub racing: Option<RacingConfig>,
+    pub model_params: Option<std::collections::HashMap<String, ModelParams>>,
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+}
+
+impl Config {
+    pub fn circuit_breaker_config(&self) -> crate::model_stats::CircuitBreakerConfig {
+        crate::model_stats::CircuitBreakerConfig {
+            max_output_tokens: self
+                .circuit_breaker
+                .as_ref()
+                .and_then(|c| c.max_output_tokens)
+                .unwrap_or(32000),
+            max_repetitions: self
+                .circuit_breaker
+                .as_ref()
+                .and_then(|c| c.max_repetitions)
+                .unwrap_or(5),
+            max_consecutive_assistant_turns: self
+                .circuit_breaker
+                .as_ref()
+                .and_then(|c| c.max_consecutive_assistant_turns)
+                .unwrap_or(10),
+        }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct ModelParams {
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<i32>,
+    pub max_tokens: Option<i32>,
+    pub chat_template_kwargs: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+impl ModelParams {
+    pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
+        self.chat_template_kwargs.as_ref()?.get(key)
+    }
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -122,6 +168,10 @@ impl Config {
             .and_then(|r| r.models.as_ref())
             .map(|m| !m.is_empty())
             .unwrap_or(false)
+    }
+
+    pub fn get_model_params(&self, model_id: &str) -> Option<&ModelParams> {
+        self.model_params.as_ref()?.get(model_id)
     }
 }
 
@@ -238,11 +288,134 @@ spike_threshold_ms = 5000.0
 
         let content = std::fs::read_to_string(file.path()).unwrap();
 
-        // Check the TOML parses at all
         let result: Result<Config, _> = toml::from_str(&content);
         assert!(result.is_ok(), "TOML should parse: {:?}", result.err());
 
         let config = result.unwrap();
         assert_eq!(config.keys.len(), 1);
+    }
+
+    #[test]
+    fn test_model_params_parsing() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[model_params."nvidia/llama"]
+temperature = 0.7
+top_p = 0.95
+top_k = 40
+
+[model_params."nvidia/coder"]
+temperature = 0.3
+top_p = 0.9
+max_tokens = 4096
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+
+        let llama_params = config.get_model_params("nvidia/llama");
+        assert!(llama_params.is_some());
+        let llama = llama_params.unwrap();
+        assert_eq!(llama.temperature, Some(0.7));
+        assert_eq!(llama.top_p, Some(0.95));
+        assert_eq!(llama.top_k, Some(40));
+
+        let coder_params = config.get_model_params("nvidia/coder");
+        assert!(coder_params.is_some());
+        let coder = coder_params.unwrap();
+        assert_eq!(coder.temperature, Some(0.3));
+        assert_eq!(coder.top_p, Some(0.9));
+        assert_eq!(coder.max_tokens, Some(4096));
+    }
+
+    #[test]
+    fn test_model_params_returns_none_for_unknown_model() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[model_params."known-model"]
+temperature = 0.5
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert!(config.get_model_params("unknown-model").is_none());
+    }
+
+    #[test]
+    fn test_model_params_returns_none_when_not_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert!(config.get_model_params("any-model").is_none());
+    }
+
+    #[test]
+    fn test_model_params_partial_config() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[model_params."fast-model"]
+temperature = 1.0
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        let params = config.get_model_params("fast-model").unwrap();
+        assert_eq!(params.temperature, Some(1.0));
+        assert_eq!(params.top_p, None);
+        assert_eq!(params.top_k, None);
+        assert_eq!(params.max_tokens, None);
+    }
+
+    #[test]
+    fn test_circuit_breaker_config_parsing() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[circuit_breaker]
+max_output_tokens = 16000
+max_repetitions = 3
+max_consecutive_assistant_turns = 5
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        let cb = config.circuit_breaker_config();
+
+        assert_eq!(cb.max_output_tokens, 16000);
+        assert_eq!(cb.max_repetitions, 3);
+        assert_eq!(cb.max_consecutive_assistant_turns, 5);
+    }
+
+    #[test]
+    fn test_circuit_breaker_config_uses_defaults() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        let cb = config.circuit_breaker_config();
+
+        assert_eq!(cb.max_output_tokens, 32000);
+        assert_eq!(cb.max_repetitions, 5);
+        assert_eq!(cb.max_consecutive_assistant_turns, 10);
     }
 }

@@ -126,6 +126,7 @@ fn test_integration_app_state_creation() {
         3,
         8000,
         "complete".to_string(),
+        std::collections::HashMap::new(),
     );
 
     assert_eq!(state.pool.len(), 1);
@@ -278,6 +279,7 @@ fn test_integration_auto_routing_no_router() {
         3,
         8000,
         "complete".to_string(),
+        std::collections::HashMap::new(),
     );
 
     assert!(state.router.is_none());
@@ -556,6 +558,7 @@ fn test_model_validation_rejects_invalid_model() {
         8,
         15000,
         "round_robin".to_string(),
+        std::collections::HashMap::new(),
     );
 
     {
@@ -593,6 +596,7 @@ fn test_model_validation_allows_auto_and_empty() {
         8,
         15000,
         "round_robin".to_string(),
+        std::collections::HashMap::new(),
     );
 
     {
@@ -623,6 +627,7 @@ fn test_model_validation_passes_when_no_cache() {
         8,
         15000,
         "round_robin".to_string(),
+        std::collections::HashMap::new(),
     );
 
     let result = validate_model_exists("any-model", &state);
