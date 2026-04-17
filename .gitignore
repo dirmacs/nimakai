@@ -33,6 +33,9 @@ nimbledeps/
 # Secrets
 .env
 
+# nimaproxy binary (compiled)
+nimaproxy-bin
+
 # nimaproxy secrets
 nimaproxy.toml
 
