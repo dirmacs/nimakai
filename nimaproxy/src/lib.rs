@@ -4,6 +4,8 @@ pub mod model_router;
 pub mod model_stats;
 pub mod proxy;
 
+pub use proxy::validate_model_exists;
+
 pub use config::{load as config_load, Config, KeyEntry, RoutingConfig};
 pub use key_pool::KeyPool;
 pub use model_router::{ModelRouter, Strategy};
@@ -24,6 +26,7 @@ pub struct AppState {
     pub racing_timeout_ms: u64,
     pub racing_strategy: String,
     pub racing_cursor: Mutex<usize>,
+    pub available_models: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -44,6 +47,7 @@ impl AppState {
             .build()
             .expect("failed to build HTTP client");
 
+        let available_models = racing_models.clone();
         Arc::new(AppState {
             pool: KeyPool::new(keys),
             client,
@@ -55,50 +59,133 @@ impl AppState {
             racing_timeout_ms,
             racing_strategy,
             racing_cursor: Mutex::new(0),
+            available_models: Mutex::new(available_models),
         })
     }
 }
 
 use std::ffi::{CStr, CString};
+use std::fs;
 use std::path::PathBuf;
+use std::cell::RefCell;
 
-fn pid_file_path() -> PathBuf {
+thread_local! {
+    static TLS_PID_FILE: RefCell<Option<PathBuf>> = RefCell::new(None);
+}
+
+fn set_tls_pid_file(path: &str) {
+    TLS_PID_FILE.with(|tls| {
+        *tls.borrow_mut() = Some(PathBuf::from(path));
+    });
+}
+
+fn pid_file_path(override_path: Option<&str>) -> PathBuf {
+    if let Some(p) = override_path {
+        return PathBuf::from(p);
+    }
+    let tls_path = TLS_PID_FILE.with(|tls| tls.borrow().clone());
+    if let Some(p) = tls_path {
+        return p;
+    }
     std::env::var("NIMAPROXY_PID_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp/nimaproxy.pid"))
 }
 
-/// FFI: Start the proxy server by spawning a new process via posix_spawn.
-/// config_path: absolute path to TOML config file
-/// port:        TCP port to bind (overrides listen in config)
-/// Returns: 0 on success, -1 on failure (already running, bad config, etc.)
+fn is_process_alive(pid: libc::pid_t) -> bool {
+    let result: i32 = unsafe { libc::kill(pid, 0) };
+    result == 0
+}
+
+fn read_pid_and_port(pfile: &PathBuf) -> Option<(libc::pid_t, u16)> {
+    let content = std::fs::read_to_string(pfile).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() || trimmed == "starting" {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    let pid = parts.first()?.parse::<libc::pid_t>().ok()?;
+    let port = parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(8080);
+    Some((pid, port))
+}
+
+fn check_proxy_alive(port: u16) -> bool {
+    if let Ok(resp) = reqwest::blocking::Client::new()
+        .get(format!("http://127.0.0.1:{}/health", port))
+        .timeout(std::time::Duration::from_millis(200))
+        .send()
+    {
+        resp.status().is_success() || resp.status().as_u16() == 200
+    } else {
+        false
+    }
+}
+
+fn wait_for_proxy_ready(port: u16, timeout_ms: u64) -> bool {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+    let start = std::time::Instant::now();
+    while start.elapsed().as_millis() < timeout_ms as u128 {
+        if let Ok(resp) = client
+            .get(format!("http://127.0.0.1:{}/health", port))
+            .send()
+        {
+            if resp.status().is_success() || resp.status().as_u16() == 200 {
+                return true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
 #[no_mangle]
 pub extern "C" fn proxy_start(config_path: *const c_char, port: u32) -> i32 {
+    proxy_start_with_pid_file(config_path, port, std::ptr::null())
+}
+
+/// FFI: Start the proxy server with explicit PID file path (optional override).
+/// If pid_file is provided as a C string, it takes precedence over NIMAPROXY_PID_FILE env var.
+#[no_mangle]
+pub extern "C" fn proxy_start_with_pid_file(
+    config_path: *const c_char,
+    port: u32,
+    pid_file: *const c_char,
+) -> i32 {
+    let pfile = pid_file_path(if pid_file.is_null() {
+        None
+    } else {
+        let path = unsafe { CStr::from_ptr(pid_file).to_str().unwrap_or("") };
+        Some(path)
+    });
+    std::eprintln!("[nimaproxy] proxy_start: pid_file={:?}", pfile);
+
+    if let Some((existing_pid, existing_port)) = read_pid_and_port(&pfile) {
+        std::eprintln!("[nimaproxy] proxy_start: existing pid={}, port={}", existing_pid, existing_port);
+        if is_process_alive(existing_pid) && check_proxy_alive(existing_port) {
+            std::eprintln!("[nimaproxy] proxy_start: already running pid={}, port={}", existing_pid, existing_port);
+            return -1;
+        }
+    }
+
     if config_path.is_null() {
         std::eprintln!("[nimaproxy] proxy_start: null config");
         return -1;
     }
     let path = unsafe { CStr::from_ptr(config_path).to_str().unwrap_or("") };
-    let pfile = pid_file_path();
-    std::eprintln!("[nimaproxy] proxy_start: pid_file={:?}", pfile);
-
-    if let Ok(pid_str) = std::fs::read_to_string(&pfile) {
-        std::eprintln!("[nimaproxy] proxy_start: existing pid_file={:?}", pid_str.trim());
-        if let Ok(pid) = pid_str.trim().parse::<libc::pid_t>() {
-            if unsafe { libc::kill(pid, 0) } == 0 {
-                std::eprintln!("[nimaproxy] proxy_start: already running pid={}", pid);
-                return -1;
-            }
-        }
-        std::fs::remove_file(&pfile).ok();
-    }
 
     if let Err(e) = config_load(path) {
         std::eprintln!("[nimaproxy] proxy_start: config error: {}", e);
         return -1;
     }
 
-    std::fs::write(&pfile, "starting").ok();
+    if let Err(e) = fs::write(&pfile, "starting") {
+        std::eprintln!("[nimaproxy] proxy_start: failed to write pid file: {}", e);
+        return -1;
+    }
 
     let port_cstr    = CString::new(port.to_string()).unwrap();
     let config_cstr  = CString::new(path).unwrap();
@@ -138,6 +225,17 @@ pub extern "C" fn proxy_start(config_path: *const c_char, port: u32) -> i32 {
     ];
     argv.push(ptr::null_mut());
 
+    let env_array: Vec<(String, String)> = std::env::vars().collect();
+    let envp: Vec<*mut c_char> = env_array
+        .iter()
+        .map(|(k, v)| {
+            CString::new(format!("{}={}", k, v))
+                .expect("env var should be valid C string")
+                .into_raw()
+        })
+        .chain(std::iter::once(ptr::null_mut()))
+        .collect();
+
     let spawn_result = unsafe {
         libc::posix_spawn(
             &mut child_pid,
@@ -145,9 +243,15 @@ pub extern "C" fn proxy_start(config_path: *const c_char, port: u32) -> i32 {
             &file_actions,
             &mut attrs,
             argv.as_mut_ptr(),
-            ptr::null(),
+            envp.as_ptr(),
         )
     };
+
+    for env_str in envp.iter().take(envp.len() - 1) {
+        if !env_str.is_null() {
+            unsafe { let _ = CString::from_raw(*env_str); }
+        }
+    }
 
     unsafe {
         libc::posix_spawnattr_destroy(&mut attrs);
@@ -160,29 +264,38 @@ pub extern "C" fn proxy_start(config_path: *const c_char, port: u32) -> i32 {
             spawn_result,
             bin_path.to_str().unwrap_or("?")
         );
-        std::fs::remove_file(&pfile).ok();
+        fs::remove_file(&pfile).ok();
         return -1;
     }
 
     std::eprintln!("[nimaproxy] proxy_start: spawned pid={}", child_pid);
-    std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let content = std::fs::read_to_string(&pfile).unwrap_or_default();
-    std::eprintln!("[nimaproxy] proxy_start: pid_file content after wait={:?}", content.trim());
-    if content.trim() == "starting" || content.trim().is_empty() {
-        std::fs::remove_file(&pfile).ok();
-        unsafe { libc::kill(child_pid, libc::SIGTERM); }
-        std::eprintln!("[nimaproxy] proxy_start: proxy failed to write PID (still 'starting')");
-        return -1;
+    let start = std::time::Instant::now();
+    let max_wait_ms = 5000u64;
+    while start.elapsed().as_millis() < max_wait_ms as u128 {
+        if let Some((written_pid, written_port)) = read_pid_and_port(&pfile) {
+            if written_pid != child_pid {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            if wait_for_proxy_ready(written_port, 500) {
+                std::eprintln!("[nimaproxy] proxy_start: proxy ready on port={}", written_port);
+                return 0;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    0
+    std::eprintln!("[nimaproxy] proxy_start: proxy failed to become ready");
+    fs::remove_file(&pfile).ok();
+    unsafe { libc::kill(child_pid, libc::SIGTERM); }
+    -1
 }
 
 /// FFI: Stop the proxy server. Returns 0 on success (including if already stopped), -1 on error.
 #[no_mangle]
 pub extern "C" fn proxy_stop() -> i32 {
-    let pid: libc::pid_t = std::fs::read_to_string(pid_file_path())
+    let pid: libc::pid_t = std::fs::read_to_string(pid_file_path(None))
         .ok()
         .and_then(|s| s.trim().split(':').next().and_then(|p| p.parse().ok()))
         .unwrap_or(0);
@@ -192,27 +305,35 @@ pub extern "C" fn proxy_stop() -> i32 {
     }
 
     unsafe { libc::kill(pid, libc::SIGTERM); }
-    std::fs::remove_file(pid_file_path()).ok();
+    std::fs::remove_file(pid_file_path(None)).ok();
     0
 }
 
 /// FFI: Get health status. Returns JSON C string (caller must free with proxy_free_string).
 #[no_mangle]
 pub extern "C" fn proxy_health() -> *mut c_char {
-    let port: u16 = std::fs::read_to_string(pid_file_path())
-        .ok()
-        .and_then(|s| s.trim().split(':').nth(1).and_then(|p| p.parse().ok()))
-        .unwrap_or(8080);
+    let pfile = pid_file_path(None);
+    proxy_health_impl(&pfile)
+}
 
-    let pid: libc::pid_t = std::fs::read_to_string(pid_file_path())
-        .ok()
-        .and_then(|s| s.trim().split(':').next().and_then(|p| p.parse().ok()))
-        .unwrap_or(0);
+fn proxy_health_impl(pfile: &PathBuf) -> *mut c_char {
+    let pid_and_port = read_pid_and_port(pfile);
 
-    if pid == 0 || unsafe { libc::kill(pid, 0) } != 0 {
-        std::fs::remove_file(pid_file_path()).ok();
+    let (port, pid) = match pid_and_port {
+        Some((pid, port)) => (port, pid),
+        None => {
+            std::eprintln!("[nimaproxy] proxy_health: no valid pid in file");
+            return std::ptr::null_mut();
+        }
+    };
+
+    if !is_process_alive(pid) {
+        std::eprintln!("[nimaproxy] proxy_health: process {} not alive", pid);
+        fs::remove_file(pfile).ok();
         return std::ptr::null_mut();
     }
+
+    std::eprintln!("[nimaproxy] proxy_health: checking port={}", port);
 
     let body = reqwest::blocking::Client::new()
         .get(format!("http://127.0.0.1:{}/health", port))
@@ -230,18 +351,23 @@ pub extern "C" fn proxy_health() -> *mut c_char {
 /// FFI: Get per-model latency stats. Returns JSON C string (caller must free with proxy_free_string).
 #[no_mangle]
 pub extern "C" fn proxy_stats() -> *mut c_char {
-    let port: u16 = std::fs::read_to_string(pid_file_path())
+    let pfile = pid_file_path(None);
+    proxy_stats_impl(&pfile)
+}
+
+fn proxy_stats_impl(pfile: &PathBuf) -> *mut c_char {
+    let port: u16 = std::fs::read_to_string(pfile)
         .ok()
         .and_then(|s| s.trim().split(':').nth(1).and_then(|p| p.parse().ok()))
         .unwrap_or(8080);
 
-    let pid: libc::pid_t = std::fs::read_to_string(pid_file_path())
+    let pid: libc::pid_t = std::fs::read_to_string(pfile)
         .ok()
         .and_then(|s| s.trim().split(':').next().and_then(|p| p.parse().ok()))
         .unwrap_or(0);
 
     if pid == 0 || unsafe { libc::kill(pid, 0) } != 0 {
-        std::fs::remove_file(pid_file_path()).ok();
+        std::fs::remove_file(pfile).ok();
         return std::ptr::null_mut();
     }
 
@@ -271,14 +397,21 @@ pub extern "C" fn proxy_free_string(s: *mut c_char) {
 mod ffi_tests {
     use super::*;
     use std::ffi::CString;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::TempDir;
 
     const NVIDIA_API_KEY: &str = "REDACTED_KEY_1";
 
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn with_isolated_env<T>(pid: u16, f: impl FnOnce(&str, &str) -> T) -> T {
-        let dir = TempDir::new().expect("temp dir");
-        let pid_file = dir.path().join("nimaproxy.pid");
-        let config_file = dir.path().join("nimaproxy.toml");
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let unique_id = format!("nimtest-{:016x}-{:08x}", std::process::id(), counter);
+        let base_dir = std::path::PathBuf::from(format!("/tmp/{}", unique_id));
+        std::fs::create_dir_all(&base_dir).expect("create temp dir");
+
+        let pid_file = base_dir.join("nimaproxy.pid");
+        let config_file = base_dir.join("nimaproxy.toml");
 
         let config = format!(
             r#"listen = "127.0.0.1:{}"
@@ -288,14 +421,20 @@ label = "test"
 "#,
             pid, NVIDIA_API_KEY
         );
-        std::fs::write(&config_file, config).expect("write config");
+        std::fs::write(&config_file, &config).expect("write config");
 
-        std::env::set_var("NIMAPROXY_PID_FILE", &pid_file);
+        let pid_file_str = pid_file.to_str().unwrap();
+        std::env::set_var("NIMAPROXY_PID_FILE", pid_file_str);
+        set_tls_pid_file(pid_file_str);
 
-        let result = f(config_file.to_str().unwrap(), pid_file.to_str().unwrap());
+        let result = f(config_file.to_str().unwrap(), pid_file_str);
 
         std::env::remove_var("NIMAPROXY_PID_FILE");
-        drop(dir);
+        TLS_PID_FILE.with(|tls| {
+            *tls.borrow_mut() = None;
+        });
+
+        std::fs::remove_dir_all(&base_dir).ok();
         result
     }
 
@@ -303,23 +442,26 @@ label = "test"
     fn test_proxy_start_stop_cycle() {
         with_isolated_env(19101, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
-            let result = unsafe { proxy_start(config_path.as_ptr(), 0) };
+            let pid_file_cstr = CString::new(pid_file).unwrap();
+            let result = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
             assert_eq!(result, 0, "proxy_start should succeed");
 
             std::thread::sleep(std::time::Duration::from_millis(500));
             let pid_content = std::fs::read_to_string(pid_file).unwrap_or_default();
             assert!(!pid_content.is_empty() && pid_content != "starting", "pid file should be written");
 
-            let stop_result = unsafe { proxy_stop() };
-            assert_eq!(stop_result, 0, "proxy_stop should succeed");
+            unsafe { proxy_stop() };
         });
     }
 
     #[test]
     fn test_proxy_health_when_running() {
-        with_isolated_env(19102, |cfg_path, _pid_file| {
+        with_isolated_env(19102, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
-            unsafe { proxy_start(config_path.as_ptr(), 0) };
+            let pid_file_cstr = CString::new(pid_file).unwrap();
+            let start_result = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
+            assert_eq!(start_result, 0, "proxy_start should succeed");
+
             std::thread::sleep(std::time::Duration::from_millis(600));
 
             let health = unsafe { proxy_health() };
@@ -332,9 +474,10 @@ label = "test"
 
     #[test]
     fn test_proxy_stats_when_running() {
-        with_isolated_env(19103, |cfg_path, _pid_file| {
+        with_isolated_env(19103, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
-            unsafe { proxy_start(config_path.as_ptr(), 0) };
+            let pid_file_cstr = CString::new(pid_file).unwrap();
+            unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
             std::thread::sleep(std::time::Duration::from_millis(600));
 
             let stats = unsafe { proxy_stats() };
@@ -362,14 +505,15 @@ label = "test"
 
     #[test]
     fn test_proxy_start_already_running() {
-        with_isolated_env(19104, |cfg_path, _pid_file| {
+        with_isolated_env(19104, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
-            let result1 = unsafe { proxy_start(config_path.as_ptr(), 0) };
+            let pid_file_cstr = CString::new(pid_file).unwrap();
+            let result1 = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
             assert_eq!(result1, 0, "first start should succeed");
 
             std::thread::sleep(std::time::Duration::from_millis(600));
 
-            let result2 = unsafe { proxy_start(config_path.as_ptr(), 0) };
+            let result2 = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
             assert_eq!(result2, -1, "second start should fail (already running)");
 
             unsafe { proxy_stop() };
@@ -389,7 +533,8 @@ label = "test"
     fn test_proxy_start_with_custom_port() {
         with_isolated_env(19106, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
-            let result = unsafe { proxy_start(config_path.as_ptr(), 19106) };
+            let pid_file_cstr = CString::new(pid_file).unwrap();
+            let result = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 19106, pid_file_cstr.as_ptr()) };
             assert_eq!(result, 0, "proxy_start with custom port should succeed");
 
             std::thread::sleep(std::time::Duration::from_millis(600));

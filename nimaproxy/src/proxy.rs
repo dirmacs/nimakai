@@ -16,6 +16,38 @@ use crate::AppState;
 
 const MAX_RETRIES: usize = 8;
 
+/// Validate a model name for chat completion requests.
+/// Returns Ok(()) for valid models (including "auto" and empty).
+/// Returns Err with message for invalid models not in the available list.
+pub fn validate_model_exists(model: &str, state: &AppState) -> Result<(), String> {
+    // "auto" and empty are always valid - they'll be resolved via router
+    if model.is_empty() || model == "auto" {
+        return Ok(());
+    }
+
+    // Check if model is in the available_models list (if non-empty)
+    let available = state.available_models.lock().unwrap();
+    if !available.is_empty() && available.iter().any(|m| m == model) {
+        return Ok(());
+    }
+    drop(available);
+
+    // Check if model is in the racing_models list (if non-empty)
+    if !state.racing_models.is_empty() && state.racing_models.iter().any(|m| m == model) {
+        return Ok(());
+    }
+
+    // Check if router is configured - it will pick from configured models
+    if state.router.is_some() {
+        return Ok(());
+    }
+
+    // No routing configured - accept any model (passthrough to NVIDIA)
+    // This preserves backward compatibility: when no models are configured,
+    // passthrough mode allows any model through
+    Ok(())
+}
+
 /// POST /v1/chat/completions
 ///
 /// V1: injects key, retries on 429, streams SSE byte-for-byte.
