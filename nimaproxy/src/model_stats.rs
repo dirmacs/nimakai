@@ -3,8 +3,27 @@ use std::sync::Mutex;
 
 const RING_SIZE: usize = 100;
 
-/// Per-model latency ring buffer. Uses TTFC (time-to-first-chunk) measured at
-/// the proxy layer — the most meaningful latency signal for agentic coding.
+/// Configuration for circuit breakers that detect problematic model behavior
+#[derive(Clone, Debug)]
+pub struct CircuitBreakerConfig {
+    /// Max output tokens before triggering degradation (0 = disabled)
+    pub max_output_tokens: u32,
+    /// Max repeated n-gram count before triggering degradation (0 = disabled)
+    pub max_repetitions: u32,
+    /// Max consecutive assistant turns without tool calls (0 = disabled)
+    pub max_consecutive_assistant_turns: u32,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            max_output_tokens: 32000,            // ~32K tokens, warn at high output
+            max_repetitions: 5,                  // 5+ repeated n-grams triggers degradation
+            max_consecutive_assistant_turns: 10, // 10 turns without tools = circuit break
+        }
+    }
+}
+
 struct ModelEntry {
     ring: [f64; RING_SIZE],
     ring_pos: usize,
@@ -13,6 +32,33 @@ struct ModelEntry {
     pub success: u64,
     pub consecutive_failures: u32,
     pub last_ms: f64,
+    pub output_token_count: u32,
+    pub repetition_count: u32,
+    pub consecutive_assistant_turns: u32,
+}
+
+struct KeyFailureTracker {
+    failures: HashMap<String, u32>,
+}
+
+impl KeyFailureTracker {
+    fn new() -> Self {
+        Self {
+            failures: HashMap::new(),
+        }
+    }
+
+    fn record_failure(&mut self, key_label: &str) {
+        *self.failures.entry(key_label.to_string()).or_insert(0) += 1;
+    }
+
+    fn record_success(&mut self, key_label: &str) {
+        self.failures.insert(key_label.to_string(), 0);
+    }
+
+    fn all_keys_failed(&self) -> bool {
+        self.failures.values().all(|&f| f >= 3)
+    }
 }
 
 impl ModelEntry {
@@ -25,6 +71,9 @@ impl ModelEntry {
             success: 0,
             consecutive_failures: 0,
             last_ms: 0.0,
+            output_token_count: 0,
+            repetition_count: 0,
+            consecutive_assistant_turns: 0,
         }
     }
 
@@ -64,7 +113,16 @@ impl ModelEntry {
         (self.success as f64 / self.total as f64) * 100.0
     }
 
-    pub fn is_degraded(&self, spike_threshold_ms: f64) -> bool {
+    /// Calculate dynamic timeout for this model based on historical P95.
+    /// Returns timeout_ms with buffer: p95 + max(2000ms, p95 * 0.5), capped at max_timeout.
+    pub fn dynamic_timeout_ms(&self, max_timeout_ms: u64) -> u64 {
+        let p95 = self.p95_ms().unwrap_or(5000.0);
+        let buffer = (p95 * 0.5).max(2000.0);
+        let timeout = (p95 + buffer).min(max_timeout_ms as f64) as u64;
+        timeout.max(1000) // minimum 1s timeout
+    }
+
+    pub fn is_degraded(&self, spike_threshold_ms: f64, cb_config: &CircuitBreakerConfig) -> bool {
         if self.consecutive_failures >= 3 {
             return true;
         }
@@ -73,13 +131,26 @@ impl ModelEntry {
                 return true;
             }
         }
+        if cb_config.max_output_tokens > 0 && self.output_token_count > cb_config.max_output_tokens
+        {
+            return true;
+        }
+        if cb_config.max_repetitions > 0 && self.repetition_count >= cb_config.max_repetitions {
+            return true;
+        }
+        if cb_config.max_consecutive_assistant_turns > 0
+            && self.consecutive_assistant_turns >= cb_config.max_consecutive_assistant_turns
+        {
+            return true;
+        }
         false
     }
 }
 
-/// Snapshot exported to /stats endpoint.
+/// Snapshot exported to /stats endpoint - per model+key combination.
 pub struct ModelSnapshot {
     pub id: String,
+    pub key_label: Option<String>,
     pub avg_ms: Option<f64>,
     pub p95_ms: Option<f64>,
     pub total: u64,
@@ -91,20 +162,33 @@ pub struct ModelSnapshot {
 }
 
 /// Thread-safe store of per-model stats. Shared across request handlers.
+/// Also tracks per-key failure counts to detect when ALL keys are failing
+/// for a given model (different keys can have different outcomes).
 pub struct ModelStatsStore {
     inner: Mutex<HashMap<String, ModelEntry>>,
     pub spike_threshold_ms: f64,
+    key_failures: Mutex<HashMap<String, KeyFailureTracker>>,
+    circuit_breaker: CircuitBreakerConfig,
 }
 
 impl ModelStatsStore {
     pub fn new(spike_threshold_ms: f64) -> Self {
+        Self::with_circuit_breaker(spike_threshold_ms, CircuitBreakerConfig::default())
+    }
+
+    pub fn with_circuit_breaker(spike_threshold_ms: f64, cb_config: CircuitBreakerConfig) -> Self {
         ModelStatsStore {
             inner: Mutex::new(HashMap::new()),
             spike_threshold_ms,
+            key_failures: Mutex::new(HashMap::new()),
+            circuit_breaker: cb_config,
         }
     }
 
-    /// Record a completed request. `ms` is TTFC measured at the proxy.
+    pub fn circuit_breaker_config(&self) -> CircuitBreakerConfig {
+        self.circuit_breaker.clone()
+    }
+
     pub fn record(&self, model_id: &str, ms: f64, ok: bool) {
         let mut map = self.inner.lock().unwrap();
         let entry = map
@@ -119,6 +203,59 @@ impl ModelStatsStore {
         } else {
             entry.consecutive_failures += 1;
         }
+    }
+
+    pub fn record_with_circuit_breaker(
+        &self,
+        model_id: &str,
+        ms: f64,
+        ok: bool,
+        output_tokens: u32,
+        repetition_count: u32,
+        had_tool_call: bool,
+    ) {
+        let mut map = self.inner.lock().unwrap();
+        let entry = map
+            .entry(model_id.to_string())
+            .or_insert_with(ModelEntry::new);
+        entry.total += 1;
+        entry.last_ms = ms;
+
+        if ok {
+            entry.success += 1;
+            entry.consecutive_failures = 0;
+            entry.push(ms);
+            entry.output_token_count = output_tokens;
+            entry.repetition_count = repetition_count;
+            if had_tool_call {
+                entry.consecutive_assistant_turns = 0;
+            } else {
+                entry.consecutive_assistant_turns += 1;
+            }
+        } else {
+            entry.consecutive_failures += 1;
+        }
+    }
+
+    pub fn record_with_key(&self, model_id: &str, key_label: &str, ms: f64, ok: bool) {
+        self.record(model_id, ms, ok);
+        let mut key_map = self.key_failures.lock().unwrap();
+        let tracker = key_map
+            .entry(model_id.to_string())
+            .or_insert_with(KeyFailureTracker::new);
+        if ok {
+            tracker.record_success(key_label);
+        } else {
+            tracker.record_failure(key_label);
+        }
+    }
+
+    pub fn all_keys_failing_for_model(&self, model_id: &str) -> bool {
+        let key_map = self.key_failures.lock().unwrap();
+        key_map
+            .get(model_id)
+            .map(|t| t.all_keys_failed())
+            .unwrap_or(false)
     }
 
     /// Pick the best model from `candidates` for the next request.
@@ -145,7 +282,7 @@ impl ModelStatsStore {
                 Some(e) => {
                     if e.total == 0 || e.ring_len < 3 {
                         untried.push(m);
-                    } else if e.is_degraded(threshold) {
+                    } else if e.is_degraded(threshold, &self.circuit_breaker) {
                         degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
                     } else {
                         ok.push((m, e.avg_ms().unwrap_or(f64::MAX)));
@@ -177,13 +314,19 @@ impl ModelStatsStore {
     pub fn racing_candidates(&self, candidates: &[String], max: usize) -> Vec<String> {
         let map = self.inner.lock().unwrap();
         let threshold = self.spike_threshold_ms;
+        let key_failures = self.key_failures.lock().unwrap();
         let mut ranked: Vec<(&String, Option<f64>)> = Vec::new();
         for m in candidates {
+            let tracker = key_failures.get(m);
+            let all_keys_failed = tracker.map(|t| t.all_keys_failed()).unwrap_or(false);
+            if all_keys_failed {
+                continue;
+            }
             if let Some(e) = map.get(m) {
-                if e.consecutive_failures >= 20 {
+                if e.consecutive_failures >= 20 && all_keys_failed {
                     continue;
                 }
-                if e.ring_len >= 3 && e.is_degraded(threshold) {
+                if e.ring_len >= 3 && e.is_degraded(threshold, &self.circuit_breaker) {
                     continue;
                 }
                 ranked.push((m, e.avg_ms()));
@@ -212,6 +355,7 @@ impl ModelStatsStore {
             .iter()
             .map(|(id, e)| ModelSnapshot {
                 id: id.clone(),
+                key_label: None,
                 avg_ms: e.avg_ms(),
                 p95_ms: e.p95_ms(),
                 total: e.total,
@@ -219,11 +363,34 @@ impl ModelStatsStore {
                 success_rate: e.success_rate(),
                 sample_count: e.ring_len,
                 consecutive_failures: e.consecutive_failures,
-                degraded: e.is_degraded(threshold),
+                degraded: e.is_degraded(threshold, &self.circuit_breaker),
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
+    }
+
+    pub fn get_key_failure_summary(&self) -> Vec<(String, Vec<(String, u32)>)> {
+        let key_map = self.key_failures.lock().unwrap();
+        key_map
+            .iter()
+            .map(|(model, tracker)| {
+                let failures: Vec<(String, u32)> = tracker
+                    .failures
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                (model.clone(), failures)
+            })
+            .collect()
+    }
+
+    pub fn get_model_timeout(&self, model_id: &str, max_timeout_ms: u64) -> u64 {
+        let map = self.inner.lock().unwrap();
+        match map.get(model_id) {
+            Some(e) => e.dynamic_timeout_ms(max_timeout_ms),
+            None => max_timeout_ms,
+        }
     }
 }
 
@@ -305,19 +472,21 @@ mod tests {
     fn test_is_degraded_consecutive_failures() {
         let mut entry = ModelEntry::new();
         entry.consecutive_failures = 3;
+        let cb = CircuitBreakerConfig::default();
 
-        assert!(entry.is_degraded(3000.0));
+        assert!(entry.is_degraded(3000.0, &cb));
     }
 
     #[test]
     fn test_is_degraded_high_latency() {
         let mut entry = ModelEntry::new();
-        entry.consecutive_failures = 1; // not enough for failure degradation
+        entry.consecutive_failures = 1;
         entry.push(5000.0);
         entry.push(5000.0);
         entry.push(5000.0);
+        let cb = CircuitBreakerConfig::default();
 
-        assert!(entry.is_degraded(3000.0));
+        assert!(entry.is_degraded(3000.0, &cb));
     }
 
     #[test]
@@ -326,8 +495,63 @@ mod tests {
         entry.push(500.0);
         entry.push(600.0);
         entry.push(550.0);
+        let cb = CircuitBreakerConfig::default();
 
-        assert!(!entry.is_degraded(3000.0));
+        assert!(!entry.is_degraded(3000.0, &cb));
+    }
+
+    #[test]
+    fn test_is_degraded_token_threshold() {
+        let mut entry = ModelEntry::new();
+        entry.output_token_count = 35000;
+        let cb = CircuitBreakerConfig {
+            max_output_tokens: 32000,
+            max_repetitions: 0,
+            max_consecutive_assistant_turns: 0,
+        };
+
+        assert!(entry.is_degraded(3000.0, &cb));
+    }
+
+    #[test]
+    fn test_is_degraded_repetition_threshold() {
+        let mut entry = ModelEntry::new();
+        entry.repetition_count = 7;
+        let cb = CircuitBreakerConfig {
+            max_output_tokens: 0,
+            max_repetitions: 5,
+            max_consecutive_assistant_turns: 0,
+        };
+
+        assert!(entry.is_degraded(3000.0, &cb));
+    }
+
+    #[test]
+    fn test_is_degraded_consecutive_turns_threshold() {
+        let mut entry = ModelEntry::new();
+        entry.consecutive_assistant_turns = 12;
+        let cb = CircuitBreakerConfig {
+            max_output_tokens: 0,
+            max_repetitions: 0,
+            max_consecutive_assistant_turns: 10,
+        };
+
+        assert!(entry.is_degraded(3000.0, &cb));
+    }
+
+    #[test]
+    fn test_circuit_breaker_disabled() {
+        let mut entry = ModelEntry::new();
+        entry.output_token_count = 35000;
+        entry.repetition_count = 7;
+        entry.consecutive_assistant_turns = 12;
+        let cb = CircuitBreakerConfig {
+            max_output_tokens: 0,
+            max_repetitions: 0,
+            max_consecutive_assistant_turns: 0,
+        };
+
+        assert!(!entry.is_degraded(3000.0, &cb));
     }
 
     #[test]
@@ -425,5 +649,185 @@ mod tests {
         assert_eq!(snap.total, 3);
         assert_eq!(snap.success, 3);
         assert!(snap.sample_count > 0);
+    }
+
+    #[test]
+    fn test_record_with_circuit_breaker_tracks_tokens() {
+        let store = ModelStatsStore::new(3000.0);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 15000, 2, true);
+
+        let snap = &store.snapshot()[0];
+        assert_eq!(snap.degraded, false);
+    }
+
+    #[test]
+    fn test_record_with_circuit_breaker_degrades_on_high_tokens() {
+        let cb_config = CircuitBreakerConfig {
+            max_output_tokens: 10000,
+            ..Default::default()
+        };
+        let store = ModelStatsStore::with_circuit_breaker(3000.0, cb_config);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 15000, 2, true);
+
+        let snap = &store.snapshot()[0];
+        assert!(
+            snap.degraded,
+            "Model should be degraded when output tokens exceed threshold"
+        );
+    }
+
+    #[test]
+    fn test_record_with_circuit_breaker_degrades_on_repetitions() {
+        let cb_config = CircuitBreakerConfig {
+            max_output_tokens: 0,
+            max_repetitions: 3,
+            max_consecutive_assistant_turns: 0,
+        };
+        let store = ModelStatsStore::with_circuit_breaker(3000.0, cb_config);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 500, 5, true);
+
+        let snap = &store.snapshot()[0];
+        assert!(
+            snap.degraded,
+            "Model should be degraded when repetition count exceeds threshold"
+        );
+    }
+
+    #[test]
+    fn test_record_with_circuit_breaker_degrades_on_no_tool_calls() {
+        let cb_config = CircuitBreakerConfig {
+            max_output_tokens: 0,
+            max_repetitions: 0,
+            max_consecutive_assistant_turns: 3,
+        };
+        let store = ModelStatsStore::with_circuit_breaker(3000.0, cb_config);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 500, 0, false);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 500, 0, false);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 500, 0, false);
+
+        let snap = &store.snapshot()[0];
+        assert!(
+            snap.degraded,
+            "Model should be degraded after max consecutive assistant turns without tool calls"
+        );
+    }
+
+    #[test]
+    fn test_record_with_circuit_breaker_resets_on_tool_call() {
+        let cb_config = CircuitBreakerConfig {
+            max_output_tokens: 0,
+            max_repetitions: 0,
+            max_consecutive_assistant_turns: 3,
+        };
+        let store = ModelStatsStore::with_circuit_breaker(3000.0, cb_config);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 500, 0, false);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 500, 0, false);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 500, 0, true);
+
+        let snap = &store.snapshot()[0];
+        assert!(
+            !snap.degraded,
+            "Model should NOT be degraded after tool call resets counter"
+        );
+    }
+
+    #[test]
+    fn test_best_model_skips_circuit_breaker_degraded() {
+        let cb_config = CircuitBreakerConfig {
+            max_output_tokens: 1000,
+            ..Default::default()
+        };
+        let store = ModelStatsStore::with_circuit_breaker(3000.0, cb_config);
+
+        store.record_with_circuit_breaker("model-a", 500.0, true, 1500, 0, true);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 1500, 0, true);
+        store.record_with_circuit_breaker("model-a", 500.0, true, 1500, 0, true);
+        store.record_with_circuit_breaker("model-b", 500.0, true, 500, 0, true);
+        store.record_with_circuit_breaker("model-b", 500.0, true, 500, 0, true);
+        store.record_with_circuit_breaker("model-b", 500.0, true, 500, 0, true);
+
+        let candidates = vec!["model-a".to_string(), "model-b".to_string()];
+        let best = store.best_model(&candidates).unwrap();
+        assert_eq!(best, "model-b");
+    }
+
+    #[test]
+    fn test_record_with_key_tracks_per_key_failures() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-b", 500.0, true);
+
+        assert!(!store.all_keys_failing_for_model("model-a"));
+    }
+
+    #[test]
+    fn test_all_keys_failing_when_all_keys_have_3_failures() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-b", 500.0, false);
+        store.record_with_key("model-a", "key-b", 500.0, false);
+        store.record_with_key("model-a", "key-b", 500.0, false);
+
+        assert!(store.all_keys_failing_for_model("model-a"));
+    }
+
+    #[test]
+    fn test_all_keys_failing_returns_false_for_unknown_model() {
+        let store = ModelStatsStore::new(3000.0);
+        assert!(!store.all_keys_failing_for_model("unknown-model"));
+    }
+
+    #[test]
+    fn test_record_with_key_updates_consecutive_failures() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-a", 500.0, false);
+
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].consecutive_failures, 2);
+
+        store.record_with_key("model-a", "key-a", 500.0, true);
+        let snap = store.snapshot();
+        assert_eq!(snap[0].consecutive_failures, 0);
+    }
+
+    #[test]
+    fn test_record_with_key_success_increments_success_count() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record_with_key("model-a", "key-a", 500.0, true);
+        store.record_with_key("model-a", "key-a", 500.0, true);
+        store.record_with_key("model-a", "key-a", 500.0, false);
+
+        let snap = store.snapshot();
+        assert_eq!(snap[0].success, 2);
+        assert_eq!(snap[0].total, 3);
+    }
+
+    #[test]
+    fn test_racing_candidates_skips_all_keys_failed() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-a", 500.0, false);
+        store.record_with_key("model-a", "key-b", 500.0, false);
+        store.record_with_key("model-a", "key-b", 500.0, false);
+        store.record_with_key("model-a", "key-b", 500.0, false);
+        store.record_with_key("model-b", "key-a", 500.0, true);
+
+        let candidates = vec!["model-a".to_string(), "model-b".to_string()];
+        let viable = store.racing_candidates(&candidates, 2);
+
+        assert!(viable.contains(&"model-b".to_string()));
+        assert!(!viable.contains(&"model-a".to_string()));
     }
 }
