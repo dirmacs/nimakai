@@ -127,6 +127,7 @@ async fn main() {
     let racing_timeout_ms = cfg.racing_timeout_ms();
     let racing_strategy = cfg.racing_strategy();
     let keys = cfg.keys;
+    let model_params = cfg.model_params.unwrap_or_default();
 
     let state = AppState::new(
         keys,
@@ -137,6 +138,7 @@ async fn main() {
         racing_max_parallel,
         racing_timeout_ms,
         racing_strategy,
+        model_params,
     );
 
     let app = Router::new()

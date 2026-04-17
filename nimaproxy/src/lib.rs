@@ -6,11 +6,12 @@ pub mod proxy;
 
 pub use proxy::validate_model_exists;
 
-pub use config::{load as config_load, Config, KeyEntry, RoutingConfig};
+pub use config::{load as config_load, Config, KeyEntry, ModelParams, RoutingConfig};
 pub use key_pool::KeyPool;
 pub use model_router::{ModelRouter, Strategy};
 pub use model_stats::{ModelStatsStore, ModelSnapshot};
 use reqwest::Client;
+use std::collections::HashMap;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::{Arc, Mutex};
@@ -27,6 +28,7 @@ pub struct AppState {
     pub racing_strategy: String,
     pub racing_cursor: Mutex<usize>,
     pub available_models: Mutex<Vec<String>>,
+    pub model_params: HashMap<String, ModelParams>,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
         racing_max_parallel: usize,
         racing_timeout_ms: u64,
         racing_strategy: String,
+        model_params: HashMap<String, ModelParams>,
     ) -> Arc<Self> {
         let client = Client::builder()
             .use_rustls_tls()
@@ -60,6 +63,7 @@ impl AppState {
             racing_strategy,
             racing_cursor: Mutex::new(0),
             available_models: Mutex::new(available_models),
+            model_params,
         })
     }
 }
