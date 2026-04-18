@@ -1,5 +1,5 @@
 use axum::response::IntoResponse;
-use nimaproxy::config::KeyEntry;
+use nimaproxy::config::{KeyEntry, ModelCompat};
 use nimaproxy::model_stats::ModelStatsStore;
 use nimaproxy::AppState;
 use std::sync::Arc;
@@ -36,6 +36,7 @@ fn make_state() -> Arc<AppState> {
         20000,
         "complete".to_string(),
         std::collections::HashMap::new(),
+        ModelCompat::default(),
     )
 }
 
@@ -58,6 +59,7 @@ fn make_state_no_racing() -> Arc<AppState> {
         5000,
         "complete".to_string(),
         std::collections::HashMap::new(),
+        ModelCompat::default(),
     )
 }
 

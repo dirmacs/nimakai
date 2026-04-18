@@ -128,6 +128,7 @@ async fn main() {
     let racing_strategy = cfg.racing_strategy();
     let keys = cfg.keys;
     let model_params = cfg.model_params.unwrap_or_default();
+    let model_compat = cfg.model_compat.unwrap_or_default();
 
     let state = AppState::new(
         keys,
@@ -139,6 +140,7 @@ async fn main() {
         racing_timeout_ms,
         racing_strategy,
         model_params,
+        model_compat,
     );
 
     let app = Router::new()
