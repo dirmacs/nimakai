@@ -2,6 +2,31 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.11.0] - 2026-04-18
+
+### Added (Developer Role Transformation)
+- Added `[model_compat]` configuration section to nimaproxy.toml
+- Automatic transformation of `developer` role to `user` for unsupported models
+- Automatic transformation of `tool` role to `assistant` for unsupported models
+- Configuration via `supports_developer_role` and `supports_tool_messages` lists
+- Fixes 400 "Unknown message role: developer" errors in OMP integration
+
+### Fixed
+- Fixed OMP auto model routing through nimaproxy (was failing with 400 errors)
+- All 14 racing models now properly handle OpenAI-style developer role messages
+- Role transformation applied before sending requests to NVIDIA NIM API
+
+### Testing
+- Tested all 14 configured models with OMP CLI
+- 6 models working with 100% success rate (Mistral, GLM4.7, Nemotron)
+- 8 models timeout (expected, within 30s racing timeout)
+- 0 models with 400 developer role errors (previously all failed)
+
+### Changed
+- Removed nimaproxy-bin binary from git tree (added to .gitignore)
+- Cleaned up backup files (proxy.rs.backup, proxy.rs.backup2)
+- Removed session-opencode-nimaproxy.md from repository
+
 ## [0.11.0] - 2026-04-16
 
 ### Added (Racing Models Update)
