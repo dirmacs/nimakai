@@ -207,6 +207,7 @@ pub async fn chat_completions(
                 };
                 
                 let full_body = collected.concat();
+                eprintln!("DEBUG: NVIDIA API response - status={}, body={}", status, std::str::from_utf8(&full_body).unwrap_or("<invalid utf8>"));
                 let (output_tokens, repetition_count, had_tool_call) = extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
                 
                 if output_tokens > 0 || repetition_count > 0 {
@@ -258,9 +259,151 @@ pub async fn chat_completions(
     (StatusCode::TOO_MANY_REQUESTS, "all keys exhausted after retries").into_response()
 }
 
+/// Sanitize tool_calls and tools to remove entries with empty names.
+/// NVIDIA NIM (via Azure OpenAI validation) rejects empty function names with:
+/// "Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64"
+fn sanitize_tool_calls(json: &mut Value) {
+    // Sanitize tool_calls in messages
+    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages.iter_mut() {
+            if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                // Filter out tool_calls with empty names
+                tool_calls.retain(|tc| {
+                    if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                        !name.is_empty()
+                    } else {
+                        // Keep if no name field (shouldn't happen but be safe)
+                        true
+                    }
+                });
+                // If all tool_calls were removed, remove the tool_calls field entirely
+                if tool_calls.is_empty() {
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.remove("tool_calls");
+                    }
+                }
+            }
+        }
+    }
+
+    // Sanitize tools array (tool definitions)
+    if let Some(tools) = json.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        // Filter out tools with empty function names
+        tools.retain(|tool| {
+            if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                !name.is_empty()
+            } else {
+                // Keep if no name field (shouldn't happen but be safe)
+                true
+            }
+        });
+        // If all tools were removed, remove the tools field entirely
+        if tools.is_empty() {
+            if let Some(obj) = json.as_object_mut() {
+                obj.remove("tools");
+            }
+        }
+    }
+}
+
+/// Transform unsupported roles in messages:
+/// - "developer" → "user" (NVIDIA NIM doesn't support developer role)
+/// - "tool" → "assistant" (NVIDIA NIM doesn't support tool role)
+fn transform_message_roles(json: &mut Value, model_id: &str, state: &AppState) {
+    let transform_developer = state.model_compat.should_transform_developer_role(model_id);
+    let transform_tool = state.model_compat.should_transform_tool_messages(model_id);
+
+    if !transform_developer && !transform_tool {
+        return;
+    }
+
+    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
+
+            if transform_developer && role == "developer" {
+                if let Some(v) = msg.get_mut("role") {
+                    *v = Value::String("user".to_string());
+                }
+            } else if transform_tool && role == "tool" {
+                if let Some(v) = msg.get_mut("role") {
+                    *v = Value::String("assistant".to_string());
+                }
+            }
+        }
+    }
+}
+/// Check if the conversation has tool messages or tool calls (indicating a tool call flow).
+/// This requires special handling for Mistral models on NVIDIA NIM.
+fn has_tool_messages(json: &Value) -> bool {
+  eprintln!("DEBUG: has_tool_messages called, json keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+  if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
+    eprintln!("DEBUG: Found {} messages", messages.len());
+    for (i, msg) in messages.iter().enumerate() {
+      if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+        eprintln!("DEBUG: Message {}: role={}", i, role);
+      }
+    }
+    let has_tool_role = messages.iter().any(|msg| {
+      msg.get("role").and_then(|r| r.as_str()) == Some("tool")
+    });
+    let has_tool_calls = messages.iter().any(|msg| {
+      msg.get("tool_calls").is_some()
+    });
+    let has_tool = has_tool_role || has_tool_calls;
+    eprintln!("DEBUG: has_tool_messages result: {} (tool_role={}, tool_calls={})", has_tool, has_tool_role, has_tool_calls);
+    return has_tool;
+  }
+  eprintln!("DEBUG: No messages array found");
+  false
+}
+
+/// Check if a model is a Mistral model (requires special tool calling handling).
+fn is_mistral_model(model_id: &str) -> bool {
+    model_id.contains("mistral") || model_id.contains("devstral")
+}
+
+/// Check if the last message in the conversation is from the assistant.
+fn is_last_message_from_assistant(json: &Value) -> bool {
+  if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
+    if let Some(last) = messages.last() {
+      if let Some(role) = last.get("role").and_then(|r| r.as_str()) {
+        eprintln!("DEBUG: is_last_message_from_assistant - last role={}", role);
+        return role == "assistant";
+      }
+    }
+  }
+  eprintln!("DEBUG: is_last_message_from_assistant - no messages or no role");
+  false
+}
+
+/// Inject Mistral-specific parameters for tool calling continuation.
+/// When tool messages are present in the conversation,
+/// Mistral models require add_generation_prompt=false.
+/// continue_final_message=true is only needed when the last message is from the assistant
+/// (i.e., when we want to continue a partial assistant response).
+fn inject_mistral_tool_params(json: &mut Value, model_id: &str) {
+  let is_mistral = is_mistral_model(model_id);
+  let has_tools = has_tool_messages(json);
+  let last_from_assistant = is_last_message_from_assistant(json);
+  eprintln!("DEBUG: inject_mistral_tool_params called - model_id={}, is_mistral={}, has_tools={}, last_from_assistant={}", model_id, is_mistral, has_tools, last_from_assistant);
+  if is_mistral && has_tools {
+    eprintln!("DEBUG: Injecting Mistral parameters - add_generation_prompt=false");
+    json["add_generation_prompt"] = Value::Bool(false);
+    // Only inject continue_final_message if last message is from assistant
+    if last_from_assistant {
+      eprintln!("DEBUG: Injecting continue_final_message=true (last message is from assistant)");
+      json["continue_final_message"] = Value::Bool(true);
+    } else {
+      eprintln!("DEBUG: NOT injecting continue_final_message (last message is not from assistant)");
+    }
+  }
+}
+
+
 /// Resolve the model field, optionally rewriting the body for "auto" routing.
 /// Returns (model_id_string, possibly_rewritten_body).
-fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
+pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     let mut json: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => return ("unknown".to_string(), body),
@@ -282,23 +425,42 @@ fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
                     if let Some(tk) = params.top_k {
                         json["top_k"] = Value::from(tk);
                     }
+                    if let Some(fp) = params.frequency_penalty {
+                        json["frequency_penalty"] = Value::from(fp);
+                    }
+                    if let Some(pp) = params.presence_penalty {
+                        json["presence_penalty"] = Value::from(pp);
+                    }
+                    if let Some(max_tokens) = params.max_tokens {
+                        json["max_tokens"] = Value::from(max_tokens);
+                    }
+                    if let Some(reasoning_effort) = &params.reasoning_effort {
+                        json["reasoning_effort"] = Value::String(reasoning_effort.clone());
+                    }
+                    if let Some(seed) = params.seed {
+                        json["seed"] = Value::from(seed);
+                    }
                     if let Some(ctk) = &params.chat_template_kwargs {
                         for (k, v) in ctk {
                             json[k] = v.clone();
                         }
                     }
                 }
-                let rewritten = Bytes::from(json.to_string());
-                return (picked, rewritten);
             }
         }
     }
 
-    let model_id = if requested.is_empty() {
-        "unknown".to_string()
-    } else {
-        requested.clone()
-    };
+    // Use the actual model ID from JSON after potential rewrite (for "auto" routing)
+    let model_id = json["model"].as_str().unwrap_or("unknown").to_string();
+
+    // Inject Mistral-specific parameters BEFORE message transformations
+    // so has_tool_messages() can detect tool messages in the original JSON
+    inject_mistral_tool_params(&mut json, &model_id);
+
+    // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
+    sanitize_tool_calls(&mut json);
+
+    transform_message_roles(&mut json, &model_id, state);
 
     if let Some(params) = state.model_params.get(&requested) {
         if let Some(temp) = params.temperature {
@@ -310,13 +472,32 @@ fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
         if let Some(tk) = params.top_k {
             json["top_k"] = Value::from(tk);
         }
+        if let Some(fp) = params.frequency_penalty {
+            json["frequency_penalty"] = Value::from(fp);
+        }
+        if let Some(pp) = params.presence_penalty {
+            json["presence_penalty"] = Value::from(pp);
+        }
+        if let Some(max_tokens) = params.max_tokens {
+            json["max_tokens"] = Value::from(max_tokens);
+        }
+        if let Some(reasoning_effort) = &params.reasoning_effort {
+            json["reasoning_effort"] = Value::String(reasoning_effort.clone());
+        }
+        if let Some(seed) = params.seed {
+            json["seed"] = Value::from(seed);
+        }
         if let Some(ctk) = &params.chat_template_kwargs {
             for (k, v) in ctk {
-                json[k] = v.clone();
+                // Preserve Mistral-specific parameters that were injected
+                if k != "add_generation_prompt" && k != "continue_final_message" {
+                    json[k] = v.clone();
+                }
             }
         }
     }
 
+    eprintln!("DEBUG: Sending to NVIDIA API - model_id={}, json={}", model_id, json);
     (model_id, Bytes::from(json.to_string()))
 }
 
@@ -479,13 +660,22 @@ async fn race_models(
     for model_id in &models_to_race {
         let timeout_val = state.model_stats.get_model_timeout(model_id, timeout_ms);
 
-        let mut json: Value = match serde_json::from_slice(&body) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        json["model"] = Value::String(model_id.clone());
+  let mut json: Value = match serde_json::from_slice(&body) {
+    Ok(v) => v,
+    Err(_) => continue,
+  };
+  json["model"] = Value::String(model_id.clone());
 
-        // Inject per-model hyperparameters - override client settings with proxy config
+  // Transform message roles for models that don't support developer/tool roles
+  transform_message_roles(&mut json, model_id, &state);
+
+            // Inject Mistral-specific parameters for tool calling continuation
+            inject_mistral_tool_params(&mut json, model_id);
+
+            // Sanitize tool_calls to remove entries with empty names
+            sanitize_tool_calls(&mut json);
+
+            // Inject per-model hyperparameters - override client settings with proxy config
         if let Some(params) = state.model_params.get(model_id) {
             if let Some(temp) = params.temperature {
                 json["temperature"] = Value::from(temp);
@@ -495,6 +685,21 @@ async fn race_models(
             }
             if let Some(tk) = params.top_k {
                 json["top_k"] = Value::from(tk);
+            }
+            if let Some(fp) = params.frequency_penalty {
+                json["frequency_penalty"] = Value::from(fp);
+            }
+            if let Some(pp) = params.presence_penalty {
+                json["presence_penalty"] = Value::from(pp);
+            }
+            if let Some(max_tokens) = params.max_tokens {
+                json["max_tokens"] = Value::from(max_tokens);
+            }
+            if let Some(reasoning_effort) = &params.reasoning_effort {
+                json["reasoning_effort"] = Value::String(reasoning_effort.clone());
+            }
+            if let Some(seed) = params.seed {
+                json["seed"] = Value::from(seed);
             }
             if let Some(ctk) = &params.chat_template_kwargs {
                 for (k, v) in ctk {

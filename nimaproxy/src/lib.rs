@@ -29,6 +29,7 @@ pub struct AppState {
     pub racing_cursor: Mutex<usize>,
     pub available_models: Mutex<Vec<String>>,
     pub model_params: HashMap<String, ModelParams>,
+    pub model_compat: config::ModelCompat,
 }
 
 impl AppState {
@@ -42,6 +43,7 @@ impl AppState {
         racing_timeout_ms: u64,
         racing_strategy: String,
         model_params: HashMap<String, ModelParams>,
+        model_compat: config::ModelCompat,
     ) -> Arc<Self> {
         let client = Client::builder()
             .use_rustls_tls()
@@ -64,6 +66,7 @@ impl AppState {
             racing_cursor: Mutex::new(0),
             available_models: Mutex::new(available_models),
             model_params,
+            model_compat,
         })
     }
 }
