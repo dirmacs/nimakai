@@ -331,6 +331,20 @@ strategy = "complete"
 ```
 Fires N parallel requests to N models, returns first response. Trades N×token budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429 rate-limit collisions. Models are selected in round-robin order via `racing_cursor` to prevent a single fast model from dominating and breaking inference loops. Dead models (≥20 consecutive failures or 0 samples) are filtered out automatically.
 
+**Model Compatibility (Developer Role Transformation):**
+```toml
+[model_compat]
+# Models that support the 'developer' role (don't need transformation)
+# All models NOT in this list will have 'developer' role transformed to 'user'
+supports_developer_role = []
+
+# Models that support tool messages (don't need transformation)
+# All models NOT in this list will have 'tool' role transformed to 'assistant'
+supports_tool_messages = []
+```
+
+Transforms OpenAI-style `developer` and `tool` roles to `user` and `assistant` for models that don't support them. This fixes 400 "Unknown message role" errors when using OMP or other agents that send developer role messages. By default, all models have roles transformed (empty lists = transform all).
+
 ## License
 
 MIT
