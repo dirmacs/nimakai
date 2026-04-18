@@ -1,8 +1,9 @@
-use nimaproxy::config::KeyEntry;
+use nimaproxy::config::{KeyEntry, ModelCompat};
 use nimaproxy::key_pool::KeyPool;
 use nimaproxy::model_router::{ModelRouter, Strategy};
 use nimaproxy::model_stats::ModelStatsStore;
 use nimaproxy::AppState;
+use serde_json::json;
 
 fn make_key_pool() -> KeyPool {
     let keys = vec![
@@ -127,6 +128,7 @@ fn test_integration_app_state_creation() {
         8000,
         "complete".to_string(),
         std::collections::HashMap::new(),
+        ModelCompat::default(),
     );
 
     assert_eq!(state.pool.len(), 1);
@@ -280,8 +282,8 @@ fn test_integration_auto_routing_no_router() {
         8000,
         "complete".to_string(),
         std::collections::HashMap::new(),
+        ModelCompat::default(),
     );
-
     assert!(state.router.is_none());
 }
 
@@ -559,6 +561,7 @@ fn test_model_validation_rejects_invalid_model() {
         15000,
         "round_robin".to_string(),
         std::collections::HashMap::new(),
+        ModelCompat::default(),
     );
 
     {
@@ -597,6 +600,7 @@ fn test_model_validation_allows_auto_and_empty() {
         15000,
         "round_robin".to_string(),
         std::collections::HashMap::new(),
+        ModelCompat::default(),
     );
 
     {
@@ -628,8 +632,200 @@ fn test_model_validation_passes_when_no_cache() {
         15000,
         "round_robin".to_string(),
         std::collections::HashMap::new(),
+        ModelCompat::default(),
     );
 
     let result = validate_model_exists("any-model", &state);
     assert!(result.is_ok(), "should pass when no cache available");
+}
+
+#[test]
+fn test_role_transformation_developer_to_user() {
+    use nimaproxy::config::ModelCompat;
+
+    let mut compat = ModelCompat::default();
+    compat.supports_developer_role = Some(vec!["blocked-model".to_string()]);
+
+    let state = AppState::new(
+        vec![KeyEntry {
+            key: "test".to_string(),
+            label: Some("test".to_string()),
+        }],
+        "https://test.com".to_string(),
+        None,
+        ModelStatsStore::new(3000.0),
+        vec![],
+        3,
+        8000,
+        "complete".to_string(),
+        std::collections::HashMap::new(),
+        compat,
+    );
+
+    let request_body = json!({
+        "model": "blocked-model",
+        "messages": [
+            {"role": "developer", "content": "You are a helpful assistant"}
+        ]
+    });
+
+    let body_bytes = serde_json::to_vec(&request_body).unwrap();
+    let (_model_id, result) =
+        nimaproxy::proxy::resolve_model(bytes::Bytes::from(body_bytes), &state);
+
+    let result_str = std::str::from_utf8(&result).unwrap();
+    let transformed: serde_json::Value = serde_json::from_str(result_str).unwrap();
+
+    let role = transformed["messages"][0]["role"].as_str().unwrap();
+    assert_eq!(
+        role, "user",
+        "developer role should be transformed to user for model in list"
+    );
+}
+
+#[test]
+fn test_role_transformation_tool_to_assistant() {
+    use nimaproxy::config::ModelCompat;
+
+    let mut compat = ModelCompat::default();
+    compat.supports_tool_messages = Some(vec!["allowed-model".to_string()]);
+
+    let state = AppState::new(
+        vec![KeyEntry {
+            key: "test".to_string(),
+            label: Some("test".to_string()),
+        }],
+        "https://test.com".to_string(),
+        None,
+        ModelStatsStore::new(3000.0),
+        vec![],
+        3,
+        8000,
+        "complete".to_string(),
+        std::collections::HashMap::new(),
+        compat,
+    );
+
+    let request_body = json!({
+        "model": "allowed-model",
+        "messages": [
+            {"role": "tool", "content": "Tool result", "tool_call_id": "call_123"}
+        ]
+    });
+
+    let body_bytes = serde_json::to_vec(&request_body).unwrap();
+    let (_model_id, result) =
+        nimaproxy::proxy::resolve_model(bytes::Bytes::from(body_bytes), &state);
+
+    let result_str = std::str::from_utf8(&result).unwrap();
+    let transformed: serde_json::Value = serde_json::from_str(result_str).unwrap();
+
+    let role = transformed["messages"][0]["role"].as_str().unwrap();
+    assert_eq!(
+        role, "assistant",
+        "tool role should be transformed to assistant for model in list"
+    );
+}
+
+#[test]
+fn test_role_transformation_no_change_for_allowed_model() {
+    use nimaproxy::config::ModelCompat;
+
+    let mut compat = ModelCompat::default();
+    compat.supports_developer_role = Some(vec!["allowed-model".to_string()]);
+
+    let state = AppState::new(
+        vec![KeyEntry {
+            key: "test".to_string(),
+            label: Some("test".to_string()),
+        }],
+        "https://test.com".to_string(),
+        None,
+        ModelStatsStore::new(3000.0),
+        vec![],
+        3,
+        8000,
+        "complete".to_string(),
+        std::collections::HashMap::new(),
+        compat,
+    );
+
+    let request_body = json!({
+        "model": "allowed-model",
+        "messages": [
+            {"role": "developer", "content": "You are a helpful assistant"}
+        ]
+    });
+
+    let body_bytes = serde_json::to_vec(&request_body).unwrap();
+    let (_model_id, result) =
+        nimaproxy::proxy::resolve_model(bytes::Bytes::from(body_bytes), &state);
+
+    let result_str = std::str::from_utf8(&result).unwrap();
+    let transformed: serde_json::Value = serde_json::from_str(result_str).unwrap();
+
+    let role = transformed["messages"][0]["role"].as_str().unwrap();
+    assert_eq!(
+        role, "user",
+        "developer role should be transformed to user for model in list"
+    );
+}
+
+#[test]
+fn test_role_transformation_all_mistral_models() {
+    // This test verifies transformation happens for models IN supports_developer_role.
+    // In production config, the 10 Mistral models are in the list (they need transformation).
+    // All other models should NOT be transformed.
+    // This test uses a model NOT in the list, so it should NOT transform.
+    let mut compat = ModelCompat::default();
+    compat.supports_developer_role = Some(vec!["mistralai/mistral-small-4-119b-2603".to_string()]); // Only one in transform-list
+
+    let state = AppState::new(
+        vec![KeyEntry {
+            key: "test".to_string(),
+            label: Some("test".to_string()),
+        }],
+        "https://test.com".to_string(),
+        None,
+        ModelStatsStore::new(3000.0),
+        vec![],
+        3,
+        8000,
+        "complete".to_string(),
+        std::collections::HashMap::new(),
+        compat,
+    );
+
+    // mistral-large is NOT in the allow-list, so should get transformed
+    let model = "mistralai/mistral-large-3-675b-instruct-2512";
+    let request_body = json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are helpful"},
+            {"role": "developer", "content": "Explain something"},
+            {"role": "user", "content": "Hello"}
+        ]
+    });
+
+    let body_bytes = serde_json::to_vec(&request_body).unwrap();
+    let (_model_id, result) =
+        nimaproxy::proxy::resolve_model(bytes::Bytes::from(body_bytes), &state);
+
+    let result_str = std::str::from_utf8(&result).unwrap();
+    let transformed: serde_json::Value = serde_json::from_str(result_str).unwrap();
+
+    let roles: Vec<&str> = transformed["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(roles[0], "system");
+    assert_eq!(
+        roles[1], "developer",
+        "developer should NOT be transformed for {} (not in list)",
+        model
+    );
+    assert_eq!(roles[2], "user");
 }

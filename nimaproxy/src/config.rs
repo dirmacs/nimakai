@@ -2,6 +2,32 @@ use serde::Deserialize;
 use std::fs;
 
 #[derive(Deserialize, Clone, Debug, Default)]
+pub struct ModelCompat {
+    pub supports_developer_role: Option<Vec<String>>,
+    pub supports_tool_messages: Option<Vec<String>>,
+}
+
+impl ModelCompat {
+    pub fn should_transform_developer_role(&self, model_id: &str) -> bool {
+        if let Some(models) = &self.supports_developer_role {
+            return models.iter().any(|m| m == model_id);
+        }
+        false
+    }
+
+    pub fn should_transform_tool_messages(&self, model_id: &str) -> bool {
+        // If model is in supports_tool_messages list, it supports tool messages
+        // and should NOT be transformed. Return false for these models.
+        if let Some(models) = &self.supports_tool_messages {
+            if models.iter().any(|m| m == model_id) {
+                return false; // Model supports tool messages, don't transform
+            }
+        }
+        true // Model not in list, transform tool messages
+    }
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
 pub struct CircuitBreakerConfig {
     pub max_output_tokens: Option<u32>,
     pub max_repetitions: Option<u32>,
@@ -16,6 +42,7 @@ pub struct Config {
     pub routing: Option<RoutingConfig>,
     pub racing: Option<RacingConfig>,
     pub model_params: Option<std::collections::HashMap<String, ModelParams>>,
+    pub model_compat: Option<ModelCompat>,
     pub circuit_breaker: Option<CircuitBreakerConfig>,
 }
 
@@ -47,6 +74,12 @@ pub struct ModelParams {
     pub top_p: Option<f64>,
     pub top_k: Option<i32>,
     pub max_tokens: Option<i32>,
+    /// Penalty for frequency of repeated tokens (reduces repetition)
+    pub frequency_penalty: Option<f64>,
+    pub presence_penalty: Option<f64>,
+    pub min_p: Option<f64>,
+    pub reasoning_effort: Option<String>,
+    pub seed: Option<i32>,
     pub chat_template_kwargs: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
@@ -172,6 +205,20 @@ impl Config {
 
     pub fn get_model_params(&self, model_id: &str) -> Option<&ModelParams> {
         self.model_params.as_ref()?.get(model_id)
+    }
+
+    pub fn should_transform_developer_role(&self, model_id: &str) -> bool {
+        self.model_compat
+            .as_ref()
+            .map(|c| c.should_transform_developer_role(model_id))
+            .unwrap_or(false)
+    }
+
+    pub fn should_transform_tool_messages(&self, model_id: &str) -> bool {
+        self.model_compat
+            .as_ref()
+            .map(|c| c.should_transform_tool_messages(model_id))
+            .unwrap_or(false)
     }
 }
 
@@ -417,5 +464,61 @@ key = "test"
         assert_eq!(cb.max_output_tokens, 32000);
         assert_eq!(cb.max_repetitions, 5);
         assert_eq!(cb.max_consecutive_assistant_turns, 10);
+    }
+
+    #[test]
+    fn test_model_compat_parsing() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[model_compat]
+supports_developer_role = ["mistralai/model1", "mistralai/model2"]
+supports_tool_messages = ["mistralai/model1"]
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+
+        assert!(config.model_compat.is_some());
+        let compat = config.model_compat.as_ref().unwrap();
+
+        assert!(compat.should_transform_developer_role("mistralai/model1"));
+        assert!(compat.should_transform_developer_role("mistralai/model2"));
+        assert!(!compat.should_transform_developer_role("unknown-model"));
+        assert!(!compat.should_transform_developer_role("qwen/qwen3.5-122b-a10b"));
+
+        assert!(compat.should_transform_tool_messages("mistralai/model1"));
+        assert!(!compat.should_transform_tool_messages("mistralai/model2"));
+        assert!(!compat.should_transform_tool_messages("unknown-model"));
+    }
+
+    #[test]
+    fn test_model_compat_empty_returns_false() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+
+        assert!(!config.should_transform_developer_role("any-model"));
+        assert!(!config.should_transform_tool_messages("any-model"));
+    }
+
+    #[test]
+    fn test_transform_role_helper_logic() {
+        let compat = ModelCompat {
+            supports_developer_role: Some(vec!["allowed-model".to_string()]),
+            supports_tool_messages: Some(vec!["allowed-model".to_string()]),
+        };
+
+        assert!(compat.should_transform_developer_role("allowed-model"));
+        assert!(compat.should_transform_tool_messages("allowed-model"));
+        assert!(!compat.should_transform_developer_role("blocked-model"));
+        assert!(!compat.should_transform_tool_messages("blocked-model"));
     }
 }
