@@ -145,7 +145,7 @@ impl Config {
         self.racing
             .as_ref()
             .and_then(|r| r.enabled)
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     pub fn racing_models(&self) -> Vec<String> {
@@ -205,7 +205,7 @@ pub fn racing_max_parallel(&self) -> usize {
             .as_ref()
             .and_then(|r| r.models.as_ref())
             .map(|m| !m.is_empty())
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     pub fn get_model_params(&self, model_id: &str) -> Option<&ModelParams> {
@@ -216,14 +216,14 @@ pub fn racing_max_parallel(&self) -> usize {
         self.model_compat
             .as_ref()
             .map(|c| c.should_transform_developer_role(model_id))
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     pub fn should_transform_tool_messages(&self, model_id: &str) -> bool {
         self.model_compat
             .as_ref()
             .map(|c| c.should_transform_tool_messages(model_id))
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 }
 
@@ -489,14 +489,14 @@ supports_tool_messages = ["mistralai/model1"]
         assert!(config.model_compat.is_some());
         let compat = config.model_compat.as_ref().unwrap();
 
-        assert!(compat.should_transform_developer_role("mistralai/model1"));
-        assert!(compat.should_transform_developer_role("mistralai/model2"));
-        assert!(!compat.should_transform_developer_role("unknown-model"));
-        assert!(!compat.should_transform_developer_role("qwen/qwen3.5-122b-a10b"));
+        assert!(!compat.should_transform_developer_role("mistralai/model1"));
+        assert!(!compat.should_transform_developer_role("mistralai/model2"));
+        assert!(compat.should_transform_developer_role("unknown-model"));
+        assert!(compat.should_transform_developer_role("qwen/qwen3.5-122b-a10b"));
 
-        assert!(compat.should_transform_tool_messages("mistralai/model1"));
-        assert!(!compat.should_transform_tool_messages("mistralai/model2"));
-        assert!(!compat.should_transform_tool_messages("unknown-model"));
+        assert!(!compat.should_transform_tool_messages("mistralai/model1"));
+        assert!(compat.should_transform_tool_messages("mistralai/model2"));
+        assert!(compat.should_transform_tool_messages("unknown-model"));
     }
 
     #[test]
@@ -510,8 +510,8 @@ key = "test"
 
         let config = load(file.path().to_str().unwrap()).unwrap();
 
-        assert!(!config.should_transform_developer_role("any-model"));
-        assert!(!config.should_transform_tool_messages("any-model"));
+        assert!(config.should_transform_developer_role("any-model"));
+        assert!(config.should_transform_tool_messages("any-model"));
     }
 
     #[test]
@@ -521,9 +521,9 @@ key = "test"
             supports_tool_messages: Some(vec!["allowed-model".to_string()]),
         };
 
-        assert!(compat.should_transform_developer_role("allowed-model"));
-        assert!(compat.should_transform_tool_messages("allowed-model"));
-        assert!(!compat.should_transform_developer_role("blocked-model"));
-        assert!(!compat.should_transform_tool_messages("blocked-model"));
+        assert!(!compat.should_transform_developer_role("allowed-model"));
+        assert!(!compat.should_transform_tool_messages("allowed-model"));
+        assert!(compat.should_transform_developer_role("blocked-model"));
+        assert!(compat.should_transform_tool_messages("blocked-model"));
     }
 }

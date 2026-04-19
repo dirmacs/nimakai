@@ -131,3 +131,98 @@ pub extern "C" fn rust_free_string(s: *mut c_char) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ping_result_serialization() {
+        let result = PingResult {
+            model: "test-model".to_string(),
+            status_code: 200,
+            latency_ms: 150.5,
+            error: String::new(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("test-model"));
+        assert!(json.contains("200"));
+        assert!(json.contains("150.5"));
+    }
+
+    #[test]
+    fn test_batch_result_serialization() {
+        let batch = BatchResult {
+            results: vec![
+                PingResult {
+                    model: "model1".to_string(),
+                    status_code: 200,
+                    latency_ms: 100.0,
+                    error: String::new(),
+                },
+                PingResult {
+                    model: "model2".to_string(),
+                    status_code: 500,
+                    latency_ms: 200.0,
+                    error: "timeout".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&batch).unwrap();
+        assert!(json.contains("model1"));
+        assert!(json.contains("model2"));
+        assert!(json.contains("timeout"));
+    }
+
+    #[test]
+    fn test_rust_free_string() {
+        let original = CString::new("test").unwrap();
+        let ptr = original.into_raw();
+        // Should not panic
+        rust_free_string(ptr);
+    }
+
+    #[test]
+    fn test_rust_free_string_null_pointer() {
+        // Should not panic with null pointer
+        rust_free_string(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_ping_result_with_error() {
+        let result = PingResult {
+            model: "failed-model".to_string(),
+            status_code: 0,
+            latency_ms: 0.0,
+            error: "connection refused".to_string(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("connection refused"));
+        assert!(json.contains("0"));
+    }
+
+    #[test]
+    fn test_batch_result_empty() {
+        let batch: BatchResult = BatchResult {
+            results: vec![],
+        };
+        let json = serde_json::to_string(&batch).unwrap();
+        assert!(json.contains("results"));
+        assert!(json.contains("[]"));
+    }
+
+    #[test]
+    fn test_ping_result_all_fields() {
+        let result = PingResult {
+            model: "nvidia/llama".to_string(),
+            status_code: 429,
+            latency_ms: 5000.0,
+            error: "rate limited".to_string(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("nvidia/llama"));
+        assert!(json.contains("429"));
+        assert!(json.contains("5000"));
+        assert!(json.contains("rate limited"));
+    }
+}
