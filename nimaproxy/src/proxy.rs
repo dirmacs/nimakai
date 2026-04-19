@@ -377,27 +377,28 @@ fn is_last_message_from_assistant(json: &Value) -> bool {
   false
 }
 
-/// Inject Mistral-specific parameters for tool calling continuation.
-/// When tool messages are present in the conversation,
-/// Mistral models require add_generation_prompt=false.
-/// continue_final_message=true is only needed when the last message is from the assistant
-/// (i.e., when we want to continue a partial assistant response).
+/// Inject parameters for tool calling and conversation continuation.
+/// When the last message is from the assistant, we must set:
+/// - add_generation_prompt=false (tells API we're continuing, not starting new)
+/// - continue_final_message=true (tells API to continue from assistant's partial response)
+/// This applies to ALL models on NVIDIA NIM, not just Mistral.
 fn inject_mistral_tool_params(json: &mut Value, model_id: &str) {
-  let is_mistral = is_mistral_model(model_id);
-  let has_tools = has_tool_messages(json);
-  let last_from_assistant = is_last_message_from_assistant(json);
-  eprintln!("DEBUG: inject_mistral_tool_params called - model_id={}, is_mistral={}, has_tools={}, last_from_assistant={}", model_id, is_mistral, has_tools, last_from_assistant);
-  if is_mistral && has_tools {
-    eprintln!("DEBUG: Injecting Mistral parameters - add_generation_prompt=false");
-    json["add_generation_prompt"] = Value::Bool(false);
-    // Only inject continue_final_message if last message is from assistant
+    let is_mistral = is_mistral_model(model_id);
+    let has_tools = has_tool_messages(json);
+    let last_from_assistant = is_last_message_from_assistant(json);
+    eprintln!("DEBUG: inject_mistral_tool_params called - model_id={}, is_mistral={}, has_tools={}, last_from_assistant={}", model_id, is_mistral, has_tools, last_from_assistant);
+    
+    // Always set add_generation_prompt=false when last message is from assistant
+    // This prevents the "Cannot set add_generation_prompt to True when last message is from assistant" error
     if last_from_assistant {
-      eprintln!("DEBUG: Injecting continue_final_message=true (last message is from assistant)");
-      json["continue_final_message"] = Value::Bool(true);
-    } else {
-      eprintln!("DEBUG: NOT injecting continue_final_message (last message is not from assistant)");
+        eprintln!("DEBUG: Last message is from assistant - setting add_generation_prompt=false, continue_final_message=true");
+        json["add_generation_prompt"] = Value::Bool(false);
+        json["continue_final_message"] = Value::Bool(true);
+    } else if is_mistral && has_tools {
+        // Mistral-specific: tool messages without assistant continuation
+        eprintln!("DEBUG: Injecting Mistral parameters - add_generation_prompt=false");
+        json["add_generation_prompt"] = Value::Bool(false);
     }
-  }
 }
 
 
