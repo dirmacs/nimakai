@@ -312,8 +312,11 @@ fn sanitize_tool_calls(json: &mut Value) {
 fn transform_message_roles(json: &mut Value, model_id: &str, state: &AppState) {
     let transform_developer = state.model_compat.should_transform_developer_role(model_id);
     let transform_tool = state.model_compat.should_transform_tool_messages(model_id);
+    
+    eprintln!("DEBUG: transform_message_roles - model_id={}, transform_developer={}, transform_tool={}", model_id, transform_developer, transform_tool);
 
     if !transform_developer && !transform_tool {
+        eprintln!("DEBUG: No transformation needed, returning early");
         return;
     }
 
