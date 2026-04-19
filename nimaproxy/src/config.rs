@@ -116,7 +116,7 @@ pub struct RacingConfig {
     pub enabled: Option<bool>,
     /// List of models to race. Must have 2+ models.
     pub models: Option<Vec<String>>,
-    /// Max parallel requests (default: 3, max: 8)
+/// Max parallel requests (default: 3, no upper cap - config value is trusted)
     pub max_parallel: Option<usize>,
     /// Timeout per request in ms (default: 8000ms)
     pub timeout_ms: Option<u64>,
@@ -151,12 +151,13 @@ impl Config {
             .unwrap_or_default()
     }
 
-    pub fn racing_max_parallel(&self) -> usize {
+pub fn racing_max_parallel(&self) -> usize {
+        // Config value or default (3), with minimum of 2
+        // No upper cap - config value is trusted
         self.racing
             .as_ref()
             .and_then(|r| r.max_parallel)
             .unwrap_or(3)
-            .min(8)
             .max(2)
     }
 
