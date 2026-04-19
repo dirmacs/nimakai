@@ -1,6 +1,6 @@
 [package]
 name = "nimaproxy"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "NVIDIA NIM key-rotation proxy — OpenAI-compatible, SSE streaming passthrough"
 
