@@ -9,10 +9,14 @@ pub struct ModelCompat {
 
 impl ModelCompat {
     pub fn should_transform_developer_role(&self, model_id: &str) -> bool {
+        // If list is None (not configured) or empty, transform ALL models
+        // If list has entries, only transform models NOT in the list
         if let Some(models) = &self.supports_developer_role {
-            return models.iter().any(|m| m == model_id);
+            // List exists: transform if model is NOT in the list
+            return !models.iter().any(|m| m == model_id);
         }
-        false
+        // No config: transform all models (default behavior)
+        true
     }
 
     pub fn should_transform_tool_messages(&self, model_id: &str) -> bool {
