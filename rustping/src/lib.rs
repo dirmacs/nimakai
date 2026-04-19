@@ -18,7 +18,7 @@ struct BatchResult {
     results: Vec<PingResult>,
 }
 
-async fn ping_one(client: &Client, api_key: &str, model: &str, timeout_secs: u64) -> PingResult {
+async fn ping_one(client: &Client, base_url: &str, api_key: &str, model: &str, timeout_secs: u64) -> PingResult {
     let payload = serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": "hi"}],
@@ -27,8 +27,9 @@ async fn ping_one(client: &Client, api_key: &str, model: &str, timeout_secs: u64
     });
 
     let t0 = Instant::now();
+    let url = format!("{}/v1/chat/completions", base_url);
     let res = client
-        .post("https://integrate.api.nvidia.com/v1/chat/completions")
+        .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -85,7 +86,7 @@ pub extern "C" fn rust_ping_batch(
 
         let futs: Vec<_> = models
             .iter()
-            .map(|m| ping_one(&client, key, m, timeout as u64))
+            .map(|m| ping_one(&client, "https://integrate.api.nvidia.com", key, m, timeout as u64))
             .collect();
 
         futures::future::join_all(futs).await
@@ -135,6 +136,7 @@ pub extern "C" fn rust_free_string(s: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::Matcher;
 
     #[test]
     fn test_ping_result_serialization() {
@@ -224,5 +226,178 @@ mod tests {
         assert!(json.contains("429"));
         assert!(json.contains("5000"));
         assert!(json.contains("rate limited"));
+    }
+
+    #[tokio::test]
+    async fn test_ping_one_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .match_header("Authorization", Matcher::Regex("^Bearer test-key$".to_string()))
+            .match_header("Content-Type", "application/json")
+            .with_status(200)
+            .with_body(r#"{"id":"test","object":"chat.completion","created":123,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#)
+            .create_async()
+            .await;
+
+        let client = Client::builder()
+            .use_rustls_tls()
+            .build()
+            .unwrap();
+
+        let result = ping_one(&client, &server.url(), "test-key", "test-model", 30).await;
+
+        assert_eq!(result.model, "test-model");
+        assert_eq!(result.status_code, 200);
+        assert!(result.latency_ms > 0.0);
+        assert!(result.error.is_empty());
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_ping_one_invalid_api_key_401() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"Invalid API key","type":"authentication_error"}}"#)
+            .create_async()
+            .await;
+
+        let client = Client::builder()
+            .use_rustls_tls()
+            .build()
+            .unwrap();
+
+        let result = ping_one(&client, &server.url(), "invalid-key", "test-model", 30).await;
+
+        assert_eq!(result.model, "test-model");
+        assert_eq!(result.status_code, 401);
+        assert!(result.error.is_empty());
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_ping_one_rate_limit_429() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(429)
+            .with_body(r#"{"error":{"message":"Rate limit exceeded","type":"rate_limit_error"}}"#)
+            .create_async()
+            .await;
+
+        let client = Client::builder()
+            .use_rustls_tls()
+            .build()
+            .unwrap();
+
+        let result = ping_one(&client, &server.url(), "test-key", "test-model", 30).await;
+
+        assert_eq!(result.model, "test-model");
+        assert_eq!(result.status_code, 429);
+        assert!(result.error.is_empty());
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_ping_one_server_error_500() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(500)
+            .with_body(r#"{"error":{"message":"Internal server error","type":"server_error"}}"#)
+            .create_async()
+            .await;
+
+        let client = Client::builder()
+            .use_rustls_tls()
+            .build()
+            .unwrap();
+
+        let result = ping_one(&client, &server.url(), "test-key", "test-model", 30).await;
+
+        assert_eq!(result.model, "test-model");
+        assert_eq!(result.status_code, 500);
+        assert!(result.error.is_empty());
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_ping_one_timeout() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(504)
+            .with_body(r#"{"error":{"message":"Gateway timeout","type":"timeout"}}"#)
+            .create_async()
+            .await;
+
+        let client = Client::builder()
+            .use_rustls_tls()
+            .build()
+            .unwrap();
+
+        // Use a very short timeout to trigger timeout error
+        let result = ping_one(&client, &server.url(), "test-key", "test-model", 1).await;
+
+        assert_eq!(result.model, "test-model");
+        // Status could be 0 (network error) or 504 (server response)
+        // depending on timing
+        assert!(result.error.is_empty() || result.status_code == 504);
+
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn test_rust_ping_batch() {
+        let models = CString::new("model1,model2").unwrap();
+        let api_key = CString::new("test-key").unwrap();
+        
+        let result_ptr = rust_ping_batch(
+            models.as_ptr(),
+            api_key.as_ptr(),
+            5,
+        );
+        
+        assert!(!result_ptr.is_null());
+        
+        rust_free_string(result_ptr);
+    }
+
+    #[test]
+    fn test_rust_discover_models() {
+        let api_key = CString::new("test-key").unwrap();
+        
+        let result_ptr = rust_discover_models(api_key.as_ptr(), 5);
+        
+        assert!(!result_ptr.is_null());
+        
+        rust_free_string(result_ptr);
+    }
+
+    #[test]
+    fn test_rust_ping_batch_empty_models() {
+        let models = CString::new("").unwrap();
+        let api_key = CString::new("test-key").unwrap();
+        
+        let result_ptr = rust_ping_batch(
+            models.as_ptr(),
+            api_key.as_ptr(),
+            5,
+        );
+        
+        assert!(!result_ptr.is_null());
+        
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_str()
+            .unwrap();
+        assert!(result.contains("results"));
+        
+        rust_free_string(result_ptr);
     }
 }

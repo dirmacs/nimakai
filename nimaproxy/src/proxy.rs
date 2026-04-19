@@ -866,3 +866,481 @@ async fn race_models(
 
     (StatusCode::BAD_GATEWAY, "all racing models failed").into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use crate::{config::ModelCompat, key_pool::KeyPool, model_stats::ModelStatsStore};
+
+    fn create_test_app_state() -> AppState {
+        AppState {
+            pool: KeyPool::new(vec![]),
+            client: reqwest::Client::new(),
+            target: "https://test.api.nvidia.com".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 8000,
+            racing_strategy: "complete".to_string(),
+            racing_cursor: std::sync::Mutex::new(0),
+            available_models: std::sync::Mutex::new(vec![]),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        }
+    }
+
+    // ============ validate_model_exists tests ============
+
+    #[test]
+    fn test_validate_model_exists_empty_model() {
+        let state = create_test_app_state();
+        assert!(validate_model_exists("", &state).is_ok());
+    }
+
+    #[test]
+    fn test_validate_model_exists_auto_model() {
+        let state = create_test_app_state();
+        assert!(validate_model_exists("auto", &state).is_ok());
+    }
+
+    #[test]
+    fn test_validate_model_exists_in_available_models() {
+        let state = create_test_app_state();
+        state.available_models.lock().unwrap().push("openai/gpt-4".to_string());
+        assert!(validate_model_exists("openai/gpt-4", &state).is_ok());
+    }
+
+    #[test]
+    fn test_validate_model_exists_not_in_available_models() {
+        let state = create_test_app_state();
+        state.available_models.lock().unwrap().push("openai/gpt-4".to_string());
+        let result = validate_model_exists("anthropic/claude", &state);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_validate_model_exists_in_racing_models() {
+        let mut state = create_test_app_state();
+        state.racing_models = vec!["mistralai/mistral-large".to_string()];
+        assert!(validate_model_exists("mistralai/mistral-large", &state).is_ok());
+    }
+
+    #[test]
+    fn test_validate_model_exists_with_router() {
+        use crate::model_router::{ModelRouter, Strategy};
+        
+        let mut state = create_test_app_state();
+        state.router = Some(ModelRouter::new(vec!["model1".to_string(), "model2".to_string()], Strategy::RoundRobin));
+        assert!(validate_model_exists("any-model", &state).is_ok());
+    }
+
+    #[test]
+    fn test_validate_model_exists_passthrough_mode() {
+        let state = create_test_app_state();
+        assert!(validate_model_exists("some-random-model", &state).is_ok());
+    }
+
+    // ============ count_repetitions tests ============
+
+    #[test]
+    fn test_count_repetitions_empty_string() {
+        assert_eq!(count_repetitions(""), 0);
+    }
+
+    #[test]
+    fn test_count_repetitions_short_text() {
+        assert_eq!(count_repetitions("hello world"), 0);
+        assert_eq!(count_repetitions("one two three"), 0);
+    }
+
+    #[test]
+    fn test_count_repetitions_no_repetition() {
+        let text = "The quick brown fox jumps over the lazy dog";
+        assert_eq!(count_repetitions(text), 0);
+    }
+
+    #[test]
+    fn test_count_repetitions_simple_repetition() {
+        // Need at least 6 words for a 3-word pattern to repeat
+        // "hello world test" repeated twice
+        let text = "hello world test hello world test";
+        assert!(count_repetitions(text) > 0);
+    }
+
+    #[test]
+    fn test_count_repetitions_three_word_pattern() {
+        let text = "the cat sat the cat sat the cat sat";
+        assert!(count_repetitions(text) > 0);
+    }
+
+    #[test]
+    fn test_count_repetitions_case_insensitive() {
+        // Case should not matter - "Hello World Test" repeated
+        let text = "Hello World Test HELLO WORLD TEST";
+        assert!(count_repetitions(text) > 0);
+    }
+
+    #[test]
+    fn test_count_repetitions_max_cap() {
+        let mut repeated = String::new();
+        for i in 0..15 {
+            if i > 0 { repeated.push(' '); }
+            repeated.push_str("repeat this");
+        }
+        assert!(count_repetitions(&repeated) <= 10);
+    }
+
+    // ============ extract_response_metrics tests ============
+
+    #[test]
+    fn test_extract_response_metrics_empty_string() {
+        let (tokens, reps, tool) = extract_response_metrics("");
+        assert_eq!(tokens, 0);
+        assert_eq!(reps, 0);
+        assert_eq!(tool, false);
+    }
+
+    #[test]
+    fn test_extract_response_metrics_invalid_json() {
+        let (tokens, reps, tool) = extract_response_metrics("Hello, this is a test response");
+        assert!(tokens > 0);
+        assert_eq!(tool, false);
+    }
+
+    #[test]
+    fn test_extract_response_metrics_with_usage() {
+        let json = r#"{"usage": {"completion_tokens": 42}, "choices": []}"#;
+        let (tokens, reps, tool) = extract_response_metrics(json);
+        assert_eq!(tokens, 42);
+        assert_eq!(reps, 0);
+        assert_eq!(tool, false);
+    }
+
+    #[test]
+    fn test_extract_response_metrics_with_tool_call() {
+        let json = r#"{"usage": {"completion_tokens": 10}, "choices": [{"message": {"tool_calls": [{"id": "1"}]}}]}"#;
+        let (tokens, reps, tool) = extract_response_metrics(json);
+        assert_eq!(tokens, 10);
+        assert_eq!(tool, true);
+    }
+
+    #[test]
+    fn test_extract_response_metrics_without_tool_call() {
+        let json = r#"{"usage": {"completion_tokens": 10}, "choices": [{"message": {"content": "Hello"}}]}"#;
+        let (tokens, reps, tool) = extract_response_metrics(json);
+        assert_eq!(tokens, 10);
+        assert_eq!(tool, false);
+    }
+
+    #[test]
+    fn test_extract_response_metrics_no_usage_field() {
+        let json = r#"{"choices": [{"message": {"content": "Hello"}}]}"#;
+        let (tokens, reps, tool) = extract_response_metrics(json);
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_extract_response_metrics_repetition_in_json() {
+        // Test that extract_response_metrics returns all three values correctly
+        // This verifies the function signature and basic parsing works
+        let json = r#"{"usage": {"completion_tokens": 5}, "choices": []}"#;
+        let (tokens, reps, tool) = extract_response_metrics(json);
+        assert_eq!(tokens, 5);
+        assert_eq!(tool, false);
+    }
+
+    #[test]
+    fn test_extract_response_metrics_multiple_choices() {
+        let json = r#"{"usage": {"completion_tokens": 20}, "choices": [{"message": {"content": "A"}}, {"message": {"tool_calls": [{"id": "1"}]}}]}"#;
+        let (tokens, reps, tool) = extract_response_metrics(json);
+        assert_eq!(tokens, 20);
+        assert_eq!(tool, true);
+    }
+
+    // ============ inject_minimax_system_message tests ============
+
+    #[test]
+    fn test_inject_minimax_system_message_adds_to_empty_messages() {
+        let mut json = json!({
+            "model": "minimaxai/minimax-01",
+            "messages": []
+        });
+        inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
+        
+        assert_eq!(json["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert!(json["messages"][0]["content"].as_str().unwrap().contains("When using tools, output JSON"));
+    }
+
+    #[test]
+    fn test_inject_minimax_system_message_prepends_to_existing_system() {
+        let mut json = json!({
+            "model": "minimaxai/minimax-01",
+            "messages": [
+                {"role": "system", "content": "Original system message"}
+            ]
+        });
+        inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
+        
+        let content = json["messages"][0]["content"].as_str().unwrap();
+        assert!(content.contains("Original system message"));
+        assert!(content.contains("When using tools, output JSON"));
+    }
+
+    #[test]
+    fn test_inject_minimax_system_message_prepends_to_non_system_first_message() {
+        let mut json = json!({
+            "model": "minimaxai/minimax-01",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+        inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
+        
+        assert_eq!(json["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert_eq!(json["messages"][1]["role"], "user");
+        assert!(json["messages"][0]["content"].as_str().unwrap().contains("When using tools, output JSON"));
+    }
+
+    #[test]
+    fn test_inject_minimax_system_message_only_for_minimax_models() {
+        let mut json_gpt = json!({
+            "model": "openai/gpt-4",
+            "messages": []
+        });
+        inject_minimax_system_message(&mut json_gpt, "openai/gpt-4");
+        assert_eq!(json_gpt["messages"].as_array().unwrap().len(), 0);
+
+        let mut json_mistral = json!({
+            "model": "mistralai/mistral-large",
+            "messages": []
+        });
+        inject_minimax_system_message(&mut json_mistral, "mistralai/mistral-large");
+        assert_eq!(json_mistral["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_inject_minimax_system_message_empty_model_string() {
+        let mut json = json!({
+            "model": "",
+            "messages": []
+        });
+        inject_minimax_system_message(&mut json, "");
+        assert_eq!(json["messages"].as_array().unwrap().len(), 0);
+    }
+
+    // ============ inject_mistral_tool_params tests ============
+
+    #[test]
+    fn test_inject_mistral_tool_params_adds_generation_prompt_for_tool_messages() {
+        let mut json = json!({
+            "model": "mistralai/mistral-large",
+            "messages": [
+                {"role": "user", "content": "Weather?"},
+                {"role": "tool", "content": "Sunny"}
+            ]
+        });
+        inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
+        
+        assert_eq!(json["add_generation_prompt"], json!(false));
+    }
+
+    #[test]
+    fn test_inject_mistral_tool_params_continues_final_message_from_assistant() {
+        let mut json = json!({
+            "model": "mistralai/mistral-large",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"}
+            ]
+        });
+        inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
+        
+        assert_eq!(json["continue_final_message"], json!(true));
+    }
+
+    #[test]
+    fn test_inject_mistral_tool_params_only_for_mistral_models() {
+        let mut json_gpt = json!({
+            "model": "openai/gpt-4",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"}
+            ]
+        });
+        inject_mistral_tool_params(&mut json_gpt, "openai/gpt-4");
+        
+        assert!(!json_gpt.as_object().unwrap().contains_key("add_generation_prompt"));
+        assert!(!json_gpt.as_object().unwrap().contains_key("continue_final_message"));
+    }
+
+    #[test]
+    fn test_inject_mistral_tool_params_no_tool_messages_no_injection() {
+        let mut json = json!({
+            "model": "mistralai/mistral-large",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"}
+            ]
+        });
+        inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
+        
+        assert!(!json.as_object().unwrap().contains_key("add_generation_prompt"));
+        assert_eq!(json["continue_final_message"], json!(true));
+    }
+
+    #[test]
+    fn test_inject_mistral_tool_params_empty_messages() {
+        let mut json = json!({
+            "model": "mistralai/mistral-large",
+            "messages": []
+        });
+        inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
+        
+        assert!(!json.as_object().unwrap().contains_key("add_generation_prompt"));
+        assert!(!json.as_object().unwrap().contains_key("continue_final_message"));
+    }
+
+    // ============ sanitize_tool_calls tests ============
+
+    #[test]
+    fn test_sanitize_tool_calls_removes_empty_named_tool_calls() {
+        let mut json = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_1", "function": {"name": "get_weather", "arguments": "{}"}},
+                        {"id": "call_2", "function": {"name": "", "arguments": "{}"}},
+                        {"id": "call_3", "function": {"name": "get_time", "arguments": "{}"}}
+                    ]
+                }
+            ]
+        });
+        sanitize_tool_calls(&mut json);
+        
+        let tool_calls = json["messages"][0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
+        assert_eq!(tool_calls[1]["function"]["name"], "get_time");
+    }
+
+    #[test]
+    fn test_sanitize_tool_calls_removes_empty_tools_array() {
+        let mut json = json!({
+            "tools": [
+                {"function": {"name": "valid_tool", "description": "A tool"}},
+                {"function": {"name": "", "description": "Empty name tool"}}
+            ],
+            "messages": []
+        });
+        sanitize_tool_calls(&mut json);
+        
+        let tools = json["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "valid_tool");
+    }
+
+    #[test]
+    fn test_sanitize_tool_calls_removes_all_empty_tool_calls() {
+        let mut json = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_1", "function": {"name": "", "arguments": "{}"}}
+                    ]
+                }
+            ]
+        });
+        sanitize_tool_calls(&mut json);
+        
+        assert!(!json["messages"][0].as_object().unwrap().contains_key("tool_calls"));
+    }
+
+    #[test]
+    fn test_sanitize_tool_calls_removes_all_empty_tools() {
+        let mut json = json!({
+            "tools": [
+                {"function": {"name": "", "description": "Empty"}}
+            ],
+            "messages": []
+        });
+        sanitize_tool_calls(&mut json);
+        
+        assert!(!json.as_object().unwrap().contains_key("tools"));
+    }
+
+    #[test]
+    fn test_sanitize_tool_calls_keeps_valid_tool_calls() {
+        let mut json = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call_1", "function": {"name": "get_weather", "arguments": "{}"}}
+                    ]
+                }
+            ]
+        });
+        sanitize_tool_calls(&mut json);
+        
+        let tool_calls = json["messages"][0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
+    }
+
+    #[test]
+    fn test_sanitize_tool_calls_no_messages_field() {
+        let mut json = json!({
+            "model": "test"
+        });
+        sanitize_tool_calls(&mut json);
+        assert!(!json.as_object().unwrap().contains_key("tool_calls"));
+    }
+
+    #[test]
+    fn test_sanitize_tool_calls_empty_messages_array() {
+        let mut json = json!({
+            "messages": []
+        });
+        sanitize_tool_calls(&mut json);
+        assert_eq!(json["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_sanitize_tool_calls_message_without_tool_calls() {
+        let mut json = json!({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"}
+            ]
+        });
+        sanitize_tool_calls(&mut json);
+        assert_eq!(json["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_sanitize_tool_calls_mixed_valid_and_empty_tools() {
+        let mut json = json!({
+            "tools": [
+                {"function": {"name": "tool1", "description": "First"}},
+                {"function": {"name": "", "description": "Empty"}},
+                {"function": {"name": "tool2", "description": "Second"}},
+                {"function": {"name": "", "description": "Another empty"}}
+            ],
+            "messages": []
+        });
+        sanitize_tool_calls(&mut json);
+        
+        let tools = json["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["function"]["name"], "tool1");
+        assert_eq!(tools[1]["function"]["name"], "tool2");
+    }
+}
