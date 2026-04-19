@@ -424,18 +424,19 @@ fn inject_mistral_tool_params(json: &mut Value, model_id: &str) {
     let is_mistral = is_mistral_model(model_id);
     let has_tools = has_tool_messages(json);
     let last_from_assistant = is_last_message_from_assistant(json);
-    eprintln!("DEBUG: inject_mistral_tool_params called - model_id={}, is_mistral={}, has_tools={}, last_from_assistant={}", model_id, is_mistral, has_tools, last_from_assistant);
-    
-    // Always set add_generation_prompt=false when last message is from assistant
-    // This prevents the "Cannot set add_generation_prompt to True when last message is from assistant" error
+    eprintln!("DEBUG: inject_mistral_tool_params - model_id={}, is_mistral={}, has_tools={}, last_from_assistant={}", model_id, is_mistral, has_tools, last_from_assistant);
+
+    // Only inject Mistral-specific parameters for Mistral models
+    // These params are rejected by NVIDIA for non-Mistral models
+    if is_mistral {
+        if has_tools {
+            eprintln!("DEBUG: Injecting Mistral tool params");
+        json["add_generation_prompt"] = Value::Bool(false);
+    }
     if last_from_assistant {
-        eprintln!("DEBUG: Last message is from assistant - setting add_generation_prompt=false, continue_final_message=true");
-        json["add_generation_prompt"] = Value::Bool(false);
+            eprintln!("DEBUG: Injecting Mistral continuation");
         json["continue_final_message"] = Value::Bool(true);
-    } else if is_mistral && has_tools {
-        // Mistral-specific: tool messages without assistant continuation
-        eprintln!("DEBUG: Injecting Mistral parameters - add_generation_prompt=false");
-        json["add_generation_prompt"] = Value::Bool(false);
+}
     }
 }
 
