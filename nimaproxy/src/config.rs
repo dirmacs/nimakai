@@ -874,4 +874,27 @@ max_consecutive_assistant_turns = 3
         assert_eq!(cb.max_repetitions, 2);
         assert_eq!(cb.max_consecutive_assistant_turns, 3);
     }
+
+    // Test 21: ModelParams::get with missing key
+    #[test]
+    fn test_model_params_get_missing_key() {
+        let params = ModelParams {
+            chat_template_kwargs: Some({
+                let mut map = std::collections::HashMap::new();
+                map.insert("existing_key".to_string(), serde_json::json!("value"));
+                map
+            }),
+            ..Default::default()
+        };
+
+        // Should return Some for existing key
+        assert!(params.get("existing_key").is_some());
+
+        // Should return None for missing key
+        assert!(params.get("missing_key").is_none());
+
+        // Should return None when chat_template_kwargs is None
+        let params_no_kwargs = ModelParams::default();
+        assert!(params_no_kwargs.get("any_key").is_none());
+    }
 }
