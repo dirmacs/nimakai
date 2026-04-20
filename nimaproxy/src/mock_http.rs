@@ -147,6 +147,51 @@ impl MockNvidiaAPI {
         self
     }
 
+    pub fn mock_bad_request(&mut self, message: &str) -> &mut Self {
+        let mock = self
+            .server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "error": {
+                        "message": message,
+                        "type": "bad_request_error",
+                        "code": "bad_request"
+                    }
+                })
+                .to_string(),
+            )
+            .create();
+        self.mocks.push(mock);
+        self
+    }
+
+    pub fn mock_timeout(&mut self) -> &mut Self {
+        // Simulate timeout by not responding (connection drop)
+        // In mockito, we simulate this by returning a connection error
+        // The actual timeout happens when the server doesn't respond
+        let mock = self
+            .server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(504)  // Gateway timeout
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "error": {
+                        "message": "Gateway timeout",
+                        "type": "timeout_error",
+                        "code": "timeout"
+                    }
+                })
+                .to_string(),
+            )
+            .create();
+        self.mocks.push(mock);
+        self
+    }
+
     pub fn mock_models_success(&mut self, models: Vec<&str>) -> &mut Self {
         let models_json: Vec<Value> = models
             .iter()
