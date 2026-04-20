@@ -2368,7 +2368,177 @@ fn test_resolve_model_auto_model_selection() {
     
         // When all keys are rate limited, should get 429
         assert_eq!(response.status(), 429);
-    }
+}
+// ============ Targeted coverage tests for uncovered lines ============
+
+#[test]
+fn test_count_repetitions_exactly_three_words() {
+    assert_eq!(count_repetitions("one two three"), 0);
+}
+
+#[test]
+fn test_count_repetitions_six_words_repeating() {
+    let result = count_repetitions("one two three one two three");
+    assert!(result > 0);
+}
+
+#[test]
+fn test_extract_response_metrics_empty_usage() {
+    let json = r#"{"usage": {}, "choices": []}"#;
+    let (tokens, reps, tool) = extract_response_metrics(json);
+    assert!(tokens > 0);
+    assert_eq!(reps, 0);
+    assert_eq!(tool, false);
+}
+
+#[test]
+fn test_extract_response_metrics_non_numeric_tokens() {
+    let json = r#"{"usage": {"completion_tokens": "not_a_number"}, "choices": []}"#;
+    let (tokens, reps, tool) = extract_response_metrics(json);
+    assert!(tokens > 0);
+}
+
+#[test]
+fn test_validate_model_exists_in_racing_models_list() {
+    let mut state = create_test_app_state();
+    state.racing_models = vec!["test-model".to_string()];
+    assert!(validate_model_exists("test-model", &state).is_ok());
+}
+
+#[test]
+fn test_transform_message_roles_no_transformation_needed() {
+    let state = create_test_app_state();
+    let mut json = json!({
+        "messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"}
+        ]
+    });
+    transform_message_roles(&mut json, "openai/gpt-4", &state);
+    assert_eq!(json["messages"][0]["role"], "user");
+    assert_eq!(json["messages"][1]["role"], "assistant");
+}
+
+#[test]
+fn test_transform_message_roles_transforms_tool_role() {
+    let state = create_test_app_state();
+    let mut json = json!({
+        "messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "tool", "content": "Result"}
+        ]
+    });
+    transform_message_roles(&mut json, "openai/gpt-4", &state);
+    assert_eq!(json["messages"][1]["role"], "assistant");
+}
+
+#[test]
+fn test_resolve_model_injects_top_k() {
+    use std::collections::HashMap;
+    use crate::ModelParams;
+
+    let mut state = create_test_app_state();
+    let mut model_params = HashMap::new();
+    model_params.insert("test-model".to_string(), ModelParams {
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        top_k: Some(50),
+        frequency_penalty: None,
+        presence_penalty: None,
+        min_p: None,
+        reasoning_effort: None,
+        seed: None,
+        chat_template_kwargs: None,
+    });
+    state.model_params = model_params;
+
+    let body = Bytes::from(r#"{"model": "test-model", "messages": []}"#);
+    let (_, new_body) = resolve_model(body, &state);
+    let parsed: Value = serde_json::from_slice(&new_body).unwrap();
+    assert_eq!(parsed["top_k"], 50);
+}
+
+#[test]
+fn test_resolve_model_injects_frequency_penalty() {
+    use std::collections::HashMap;
+    use crate::ModelParams;
+
+    let mut state = create_test_app_state();
+    let mut model_params = HashMap::new();
+    model_params.insert("test-model".to_string(), ModelParams {
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: Some(0.5),
+        presence_penalty: None,
+        min_p: None,
+        reasoning_effort: None,
+        seed: None,
+        chat_template_kwargs: None,
+    });
+    state.model_params = model_params;
+
+    let body = Bytes::from(r#"{"model": "test-model", "messages": []}"#);
+    let (_, new_body) = resolve_model(body, &state);
+    let parsed: Value = serde_json::from_slice(&new_body).unwrap();
+    assert_eq!(parsed["frequency_penalty"], 0.5);
+}
+
+#[test]
+fn test_resolve_model_injects_presence_penalty() {
+    use std::collections::HashMap;
+    use crate::ModelParams;
+
+    let mut state = create_test_app_state();
+    let mut model_params = HashMap::new();
+    model_params.insert("test-model".to_string(), ModelParams {
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: Some(0.3),
+        min_p: None,
+        reasoning_effort: None,
+        seed: None,
+        chat_template_kwargs: None,
+    });
+    state.model_params = model_params;
+
+    let body = Bytes::from(r#"{"model": "test-model", "messages": []}"#);
+    let (_, new_body) = resolve_model(body, &state);
+    let parsed: Value = serde_json::from_slice(&new_body).unwrap();
+    assert_eq!(parsed["presence_penalty"], 0.3);
+}
+
+#[test]
+fn test_resolve_model_injects_seed() {
+    use std::collections::HashMap;
+    use crate::ModelParams;
+
+    let mut state = create_test_app_state();
+    let mut model_params = HashMap::new();
+    model_params.insert("test-model".to_string(), ModelParams {
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        min_p: None,
+        reasoning_effort: None,
+        seed: Some(42),
+        chat_template_kwargs: None,
+    });
+    state.model_params = model_params;
+
+    let body = Bytes::from(r#"{"model": "test-model", "messages": []}"#);
+    let (_, new_body) = resolve_model(body, &state);
+    let parsed: Value = serde_json::from_slice(&new_body).unwrap();
+    assert_eq!(parsed["seed"], 42);
+}
 }
 
 
