@@ -1042,4 +1042,45 @@ mod getter_tests {
         // Zero total should return 100.0 (default success rate)
         assert_eq!(entry.success_rate(), 100.0);
     }
+ 
+     // Test 19: Circuit breaker token threshold
+     #[test]
+     fn test_circuit_breaker_token_threshold() {
+         let cb_config = CircuitBreakerConfig {
+             max_output_tokens: 100,
+             max_repetitions: 3,
+             max_consecutive_assistant_turns: 5,
+         };
+ 
+         let mut entry = ModelEntry::new();
+ 
+         // Initially not degraded
+         assert!(!entry.is_degraded(3000.0, &cb_config));
+ 
+         // Set output token count above threshold
+         entry.output_token_count = 150;
+         assert!(entry.is_degraded(3000.0, &cb_config), "Should be degraded due to token count");
+}
+ 
+     // Test 20: Best model with all degraded using consecutive failures
+     #[test]
+     fn test_best_model_all_degraded_by_failures() {
+         let store = ModelStatsStore::new(3000.0);
+ 
+         // Make all models degraded with high consecutive failures (3+ failures = degraded)
+         store.record("model-a", 5000.0, false);
+         store.record("model-a", 5000.0, false);
+         store.record("model-a", 5000.0, false);
+ 
+         store.record("model-b", 5000.0, false);
+         store.record("model-b", 5000.0, false);
+         store.record("model-b", 5000.0, false);
+ 
+         let candidates = vec!["model-a".to_string(), "model-b".to_string()];
+ 
+         // Should still return a model even if all are degraded (graceful degradation)
+         let best = store.best_model(&candidates);
+         assert!(best.is_some(), "Should return a model even if all are degraded");
+     }
+
 }

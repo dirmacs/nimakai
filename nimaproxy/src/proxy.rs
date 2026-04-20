@@ -2539,6 +2539,187 @@ fn test_resolve_model_injects_seed() {
     let parsed: Value = serde_json::from_slice(&new_body).unwrap();
     assert_eq!(parsed["seed"], 42);
 }
+
+// ============ Error path tests for uncovered lines ============
+
+// 1. Lines 130, 146 - count_repetitions with <4 words (duplicate removed - already exists)
+
+#[test]
+fn test_count_repetitions_two_words() {
+    assert_eq!(count_repetitions("hello world"), 0);
 }
 
+#[test]
+fn test_count_repetitions_single_word() {
+    assert_eq!(count_repetitions("hello"), 0);
+}
 
+// 2. Lines 160-166 - extract_response_metrics malformed JSON
+#[test]
+fn test_extract_response_metrics_malformed_json() {
+    // Malformed JSON should fall back to text-based token estimation
+    let (tokens, _reps, _tool) = extract_response_metrics("{invalid json");
+    assert!(tokens > 0, "Should estimate tokens from text length");
+}
+
+#[test]
+fn test_extract_response_metrics_partial_json() {
+    let (tokens, _reps, _tool) = extract_response_metrics("{\"usage\": {");
+    assert!(tokens > 0);
+}
+
+// 3. Lines 204-223 - validate with racing_models empty
+#[test]
+fn test_validate_model_exists_racing_models_empty() {
+    let mut state = create_test_app_state();
+    state.racing_models = vec![];
+    // Should pass because no racing_models configured
+    assert!(validate_model_exists("any-model", &state).is_ok());
+}
+
+#[test]
+fn test_validate_model_exists_racing_models_non_empty_not_in_list() {
+    let mut state = create_test_app_state();
+    state.racing_models = vec!["model-a".to_string(), "model-b".to_string()];
+    // Model not in racing_models and no router - should still pass (passthrough)
+    assert!(validate_model_exists("model-c", &state).is_ok());
+}
+
+// 4. Lines 319-320 - transform roles with null content
+#[test]
+fn test_transform_message_roles_no_messages_field() {
+    let state = create_test_app_state();
+    let mut json = json!({"model": "test"});
+    transform_message_roles(&mut json, "test", &state);
+    // Should not panic
+    assert_eq!(json["model"], "test");
+}
+
+#[test]
+fn test_transform_message_roles_messages_not_array() {
+    let state = create_test_app_state();
+    let mut json = json!({"model": "test", "messages": "not-array"});
+    transform_message_roles(&mut json, "test", &state);
+    // Should not panic
+    assert_eq!(json["messages"], "not-array");
+}
+
+// 5. Lines 377, 381-382 - is_minimax_model edge cases
+#[test]
+fn test_is_minimax_model_minimaxai_prefix_variations() {
+    assert!(is_minimax_model("minimaxai/minimax-01"));
+    assert!(is_minimax_model("minimaxai/minimax-02"));
+    assert!(!is_minimax_model("minimaxai")); // Empty after prefix
+}
+
+#[test]
+fn test_is_minimax_model_similar_but_not_minimax() {
+    assert!(!is_minimax_model("minimax/model")); // Missing "ai"
+    assert!(!is_minimax_model("ai/minimaxai")); // Wrong position
+}
+
+// 6. Lines 466-485 - inject_mistral params with no messages
+#[test]
+fn test_inject_mistral_tool_params_no_messages_array() {
+    let mut json = json!({"model": "mistralai/mistral-large"});
+    inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
+    // Should not panic, no params should be added
+    assert!(!json.as_object().unwrap().contains_key("add_generation_prompt"));
+}
+
+#[test]
+fn test_inject_mistral_tool_params_messages_is_null() {
+    let mut json = json!({"model": "mistralai/mistral-large", "messages": null});
+    inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
+    // Should not panic
+    assert_eq!(json["messages"], json!(null));
+}
+
+// 7. Lines 558, 586 - race_models with 1 model
+#[tokio::test]
+async fn test_race_models_single_model_fails() {
+    let state = Arc::new(create_test_app_state());
+    let body = Bytes::from(r#"{"model": "auto", "messages": [{"role": "user", "content": "test"}]}"#);
+    let models = vec!["single-model".to_string()];
+    let response = race_models(state, body, &models).await;
+    // Should return BAD_REQUEST because racing requires >= 2 models
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn test_race_models_empty_models_list() {
+    let state = Arc::new(create_test_app_state());
+    let body = Bytes::from(r#"{"model": "auto", "messages": [{"role": "user", "content": "test"}]}"#);
+    let models: Vec<String> = vec![];
+    let response = race_models(state, body, &models).await;
+    // Should return BAD_REQUEST
+    assert_eq!(response.status(), 400);
+}
+
+// 8. Lines 595-617 - race_models key exhaustion
+#[tokio::test]
+async fn test_race_models_no_available_keys() {
+    let mut state = create_test_app_state();
+    state.pool = KeyPool::new(vec![]); // No keys
+    state.racing_models = vec!["model-a".to_string(), "model-b".to_string()];
+    let state = Arc::new(state);
+    let body = Bytes::from(r#"{"model": "auto", "messages": [{"role": "user", "content": "test"}]}"#);
+    let response = race_models(state, body, &["model-a".to_string(), "model-b".to_string()]).await;
+    // Should handle gracefully
+}
+
+// 9. Lines 671, 690-691 - chat_completions no body
+#[test]
+fn test_resolve_model_invalid_json_body() {
+    let state = create_test_app_state();
+    let body = Bytes::from("not valid json");
+    let (model, _) = resolve_model(body, &state);
+    assert_eq!(model, "unknown");
+}
+
+#[test]
+fn test_resolve_model_empty_bytes() {
+    let state = create_test_app_state();
+    let body = Bytes::from("");
+    let (model, _) = resolve_model(body, &state);
+    assert_eq!(model, "unknown");
+}
+
+// 11. Lines 764, 768-769 - error response parsing
+#[test]
+fn test_extract_response_metrics_empty_object() {
+    let (tokens, _reps, _tool) = extract_response_metrics("{\"usage\": {}}");
+    assert!(tokens > 0); // Falls back to text length
+}
+
+#[test]
+fn test_extract_response_metrics_null_usage() {
+    let (tokens, _reps, _tool) = extract_response_metrics("{\"usage\": null}");
+    assert!(tokens > 0);
+}
+
+// 12. Lines 795, 827-841 - circuit breaker integration
+#[test]
+fn test_model_stats_record_with_degraded_model() {
+    let store = ModelStatsStore::new(3000.0);
+    // Record multiple failures to trigger degradation
+    for _ in 0..5 {
+        store.record("test-model", 5000.0, false);
+    }
+    let snapshot = store.snapshot();
+    // Model should be degraded after multiple failures
+    assert!(snapshot.iter().any(|s| s.degraded));
+}
+
+#[test]
+fn test_count_repetitions_whitespace_handling() {
+    // Test with extra whitespace
+    assert_eq!(count_repetitions("  hello   world  "), 0);
+}
+
+#[test]
+fn test_count_repetitions_newlines() {
+    let text = "hello world test hello world test";
+    assert!(count_repetitions(text) > 0);
+}
+}
