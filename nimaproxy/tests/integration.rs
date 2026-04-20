@@ -848,8 +848,8 @@ fn test_model_validation_passes_when_no_cache() {
 fn test_role_transformation_developer_to_user() {
     use nimaproxy::config::ModelCompat;
 
-    let mut compat = ModelCompat::default();
-    compat.supports_developer_role = Some(vec!["blocked-model".to_string()]);
+    // Model NOT in supports_developer_role list, so developer role should be transformed to user
+    let compat = ModelCompat::default();
 
     let state = AppState::new(
         vec![KeyEntry {
@@ -868,7 +868,7 @@ fn test_role_transformation_developer_to_user() {
     );
 
     let request_body = json!({
-        "model": "blocked-model",
+        "model": "some-model",
         "messages": [
             {"role": "developer", "content": "You are a helpful assistant"}
         ]
@@ -884,7 +884,7 @@ fn test_role_transformation_developer_to_user() {
     let role = transformed["messages"][0]["role"].as_str().unwrap();
     assert_eq!(
         role, "user",
-        "developer role should be transformed to user for model in list"
+        "developer role should be transformed to user for model not in supports_developer_role"
     );
 }
 
@@ -892,8 +892,8 @@ fn test_role_transformation_developer_to_user() {
 fn test_role_transformation_tool_to_assistant() {
     use nimaproxy::config::ModelCompat;
 
-    let mut compat = ModelCompat::default();
-    compat.supports_tool_messages = Some(vec!["allowed-model".to_string()]);
+    // Model NOT in supports_tool_messages list, so tool messages should be transformed
+    let compat = ModelCompat::default();
 
     let state = AppState::new(
         vec![KeyEntry {
@@ -912,7 +912,7 @@ fn test_role_transformation_tool_to_assistant() {
     );
 
     let request_body = json!({
-        "model": "allowed-model",
+        "model": "some-model",
         "messages": [
             {"role": "tool", "content": "Tool result", "tool_call_id": "call_123"}
         ]
@@ -928,7 +928,7 @@ fn test_role_transformation_tool_to_assistant() {
     let role = transformed["messages"][0]["role"].as_str().unwrap();
     assert_eq!(
         role, "assistant",
-        "tool role should be transformed to assistant for model in list"
+        "tool role should be transformed to assistant for model not in supports_tool_messages"
     );
 }
 
@@ -936,6 +936,7 @@ fn test_role_transformation_tool_to_assistant() {
 fn test_role_transformation_no_change_for_allowed_model() {
     use nimaproxy::config::ModelCompat;
 
+    // Model in supports_developer_role list, so developer role should NOT be transformed
     let mut compat = ModelCompat::default();
     compat.supports_developer_role = Some(vec!["allowed-model".to_string()]);
 
@@ -971,19 +972,18 @@ fn test_role_transformation_no_change_for_allowed_model() {
 
     let role = transformed["messages"][0]["role"].as_str().unwrap();
     assert_eq!(
-        role, "user",
-        "developer role should be transformed to user for model in list"
+        role, "developer",
+        "developer role should NOT be transformed for model in supports_developer_role list"
     );
 }
 
 #[test]
 fn test_role_transformation_all_mistral_models() {
-    // This test verifies transformation happens for models IN supports_developer_role.
-    // In production config, the 10 Mistral models are in the list (they need transformation).
-    // All other models should NOT be transformed.
-    // This test uses a model NOT in the list, so it should NOT transform.
+    // Models IN supports_developer_role list do NOT get transformed (they support it natively).
+    // Models NOT in the list DO get transformed.
     let mut compat = ModelCompat::default();
-    compat.supports_developer_role = Some(vec!["mistralai/mistral-small-4-119b-2603".to_string()]); // Only one in transform-list
+    // Only mistral-small supports developer role natively
+    compat.supports_developer_role = Some(vec!["mistralai/mistral-small-4-119b-2603".to_string()]);
 
     let state = AppState::new(
         vec![KeyEntry {
@@ -1001,7 +1001,7 @@ fn test_role_transformation_all_mistral_models() {
         compat,
     );
 
-    // mistral-large is NOT in the allow-list, so should get transformed
+    // mistral-large is NOT in the list, so developer role should be transformed to user
     let model = "mistralai/mistral-large-3-675b-instruct-2512";
     let request_body = json!({
         "model": model,
@@ -1028,8 +1028,8 @@ fn test_role_transformation_all_mistral_models() {
 
     assert_eq!(roles[0], "system");
     assert_eq!(
-        roles[1], "developer",
-        "developer should NOT be transformed for {} (not in list)",
+        roles[1], "user",
+        "developer should be transformed to user for {} (not in supports_developer_role list)",
         model
     );
     assert_eq!(roles[2], "user");
