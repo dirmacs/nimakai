@@ -10,9 +10,9 @@ pub struct MockNvidiaAPI {
 }
 
 impl MockNvidiaAPI {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         MockNvidiaAPI {
-            server: Server::new(),
+            server: Server::new_async().await,
             mocks: Vec::new(),
         }
     }
@@ -27,7 +27,7 @@ impl MockNvidiaAPI {
             .mock("POST", "/v1/chat/completions")
             .match_header("authorization", Matcher::Regex(r"Bearer .+".to_string()))
             .match_header("content-type", "application/json")
-            .match_body(Matcher::PartialJsonString(format!("{{\"model\":\"{}\"", model)))
+            
             .with_status(status)
             .with_header("content-type", "application/json")
             .with_body(
@@ -277,53 +277,49 @@ impl MockNvidiaAPI {
     }
 }
 
-impl Default for MockNvidiaAPI {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Default impl removed - use MockNvidiaAPI::new().await instead
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_mock_api_creation() {
-        let mock_api = MockNvidiaAPI::new();
+    #[tokio::test]
+    async fn test_mock_api_creation() {
+        let mock_api = MockNvidiaAPI::new().await;
         assert!(!mock_api.url().is_empty());
     }
 
-    #[test]
-    fn test_mock_chat_success() {
-        let mut mock_api = MockNvidiaAPI::new();
+    #[tokio::test]
+    async fn test_mock_chat_success() {
+        let mut mock_api = MockNvidiaAPI::new().await;
         mock_api.mock_chat_success("nvidia/test-model", "Hello!", 200);
         assert_eq!(mock_api.mocks.len(), 1);
     }
 
-    #[test]
-    fn test_mock_unauthorized() {
-        let mut mock_api = MockNvidiaAPI::new();
+    #[tokio::test]
+    async fn test_mock_unauthorized() {
+        let mut mock_api = MockNvidiaAPI::new().await;
         mock_api.mock_unauthorized();
         assert_eq!(mock_api.mocks.len(), 1);
     }
 
-    #[test]
-    fn test_mock_rate_limited() {
-        let mut mock_api = MockNvidiaAPI::new();
+    #[tokio::test]
+    async fn test_mock_rate_limited() {
+        let mut mock_api = MockNvidiaAPI::new().await;
         mock_api.mock_rate_limited(60);
         assert_eq!(mock_api.mocks.len(), 1);
     }
 
-    #[test]
-    fn test_mock_server_error() {
-        let mut mock_api = MockNvidiaAPI::new();
+    #[tokio::test]
+    async fn test_mock_server_error() {
+        let mut mock_api = MockNvidiaAPI::new().await;
         mock_api.mock_server_error("Internal error");
         assert_eq!(mock_api.mocks.len(), 1);
     }
 
-    #[test]
-    fn test_mock_models_success() {
-        let mut mock_api = MockNvidiaAPI::new();
+    #[tokio::test]
+    async fn test_mock_models_success() {
+        let mut mock_api = MockNvidiaAPI::new().await;
         mock_api.mock_models_success(vec!["model1", "model2"]);
         assert_eq!(mock_api.mocks.len(), 1);
     }

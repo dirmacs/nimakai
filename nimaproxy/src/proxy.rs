@@ -1468,4 +1468,413 @@ fn test_resolve_model_auto_model_selection() {
     let parsed: Value = serde_json::from_slice(&new_body).unwrap();
     assert_eq!(parsed["model"], model);
 }
+
+    // ============ Mocked integration tests using MockNvidiaAPI ============
+
+    #[tokio::test]
+    async fn test_chat_completions_success() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_chat_success("nvidia/test-model", "Hello from mock!", 200);
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        let body = Bytes::from(r#"{"model": "nvidia/test-model", "messages": [{"role": "user", "content": "Hi"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_chat_completions_streaming() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_chat_stream("nvidia/test-model", vec!["Hello", " from", " streaming"]);
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        let body = Bytes::from(r#"{"model": "nvidia/test-model", "messages": [{"role": "user", "content": "Hi"}], "stream": true}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_chat_completions_unauthorized() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_unauthorized();
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        let body = Bytes::from(r#"{"model": "nvidia/test-model", "messages": [{"role": "user", "content": "Hi"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_chat_completions_rate_limited() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_rate_limited(60);
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        let body = Bytes::from(r#"{"model": "nvidia/test-model", "messages": [{"role": "user", "content": "Hi"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 429);
+    }
+
+    #[tokio::test]
+    async fn test_chat_completions_server_error() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_server_error("Internal server error");
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        let body = Bytes::from(r#"{"model": "nvidia/test-model", "messages": [{"role": "user", "content": "Hi"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 500);
+    }
+
+    #[tokio::test]
+    async fn test_chat_completions_empty_messages() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_chat_success("nvidia/test-model", "Response", 200);
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        let body = Bytes::from(r#"{"model": "nvidia/test-model", "messages": []}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_chat_completions_model_routing() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use crate::model_router::{ModelRouter, Strategy};
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_chat_success("routed-model", "Routed response", 200);
+
+        let mut state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        // Use Arc::get_mut to modify the router
+        if let Some(state_mut) = Arc::get_mut(&mut state) {
+            state_mut.router = Some(ModelRouter::new(
+                vec!["routed-model".to_string()],
+                Strategy::RoundRobin
+            ));
+        }
+
+        let body = Bytes::from(r#"{"model": "auto", "messages": [{"role": "user", "content": "Hi"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_race_models_two_models() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_chat_success("nvidia/model-1", "Model 1 wins", 200);
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .with_custom_racing_models(vec![
+                "nvidia/model-1".to_string(),
+                "nvidia/model-2".to_string(),
+            ])
+            .with_racing_max_parallel(2)
+            .with_racing_timeout_ms(5000)
+            .build();
+
+        let body = Bytes::from(r#"{"model": "auto", "messages": [{"role": "user", "content": "Hi"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_race_models_all_fail() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_server_error("Backend failure");
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .with_custom_racing_models(vec![
+                "nvidia/model-1".to_string(),
+                "nvidia/model-2".to_string(),
+            ])
+            .with_racing_max_parallel(2)
+            .with_racing_timeout_ms(5000)
+            .build();
+
+        let body = Bytes::from(r#"{"model": "auto", "messages": [{"role": "user", "content": "Hi"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 500);
+    }
+
+    #[tokio::test]
+    async fn test_race_models_timeout() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_server_error("Timeout simulation");
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .with_custom_racing_models(vec![
+                "nvidia/slow-model".to_string(),
+            ])
+            .with_racing_max_parallel(1)
+            .with_racing_timeout_ms(100)
+            .build();
+
+        let body = Bytes::from(r#"{"model": "auto", "messages": [{"role": "user", "content": "Hi"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 500);
+    }
+
+    #[test]
+    fn test_resolve_model_custom_params() {
+        use std::collections::HashMap;
+        use crate::ModelParams;
+
+        let mut state = create_test_app_state();
+        let mut model_params = HashMap::new();
+        model_params.insert("nvidia/test".to_string(), ModelParams {
+            temperature: Some(0.8),
+            max_tokens: Some(2048),
+            ..Default::default()
+        });
+        state.model_params = model_params;
+
+        let body = Bytes::from(r#"{"model": "nvidia/test", "messages": [], "temperature": 0.5}"#);
+        let (_, new_body) = resolve_model(body, &state);
+
+        let parsed: Value = serde_json::from_slice(&new_body).unwrap();
+        assert_eq!(parsed["temperature"], 0.8);
+        assert_eq!(parsed["max_tokens"], 2048);
+    }
+
+    #[test]
+    fn test_resolve_model_invalid_model() {
+        let state = create_test_app_state();
+        let body = Bytes::from(r#"{"model": 123, "messages": []}"#);
+        let (model, _) = resolve_model(body, &state);
+
+        assert_eq!(model, "unknown");
+    }
+
+    #[tokio::test]
+    async fn test_streaming_response() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_chat_stream("nvidia/stream-model", vec!["Chunk1", "Chunk2", "Chunk3"]);
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        let body = Bytes::from(r#"{"model": "nvidia/stream-model", "messages": [{"role": "user", "content": "Stream it"}], "stream": true}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_error_handling_in_chain() {
+        use crate::mock_http::MockNvidiaAPI;
+        use crate::test_utils::MockAppStateBuilder;
+        use std::sync::Arc;
+
+        let mut mock_api = MockNvidiaAPI::new().await;
+        let mock_url = mock_api.url();
+        mock_api.mock_not_found();
+
+        let state = MockAppStateBuilder::new()
+            .with_target(&mock_url)
+            .with_custom_keys(vec![crate::KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+            }])
+            .build();
+
+        let body = Bytes::from(r#"{"model": "nonexistent-model", "messages": [{"role": "user", "content": "Error test"}]}"#);
+        let response = chat_completions(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 404);
+    }
 }
+
+
