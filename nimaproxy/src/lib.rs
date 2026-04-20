@@ -3,6 +3,8 @@ pub mod key_pool;
 pub mod model_router;
 pub mod model_stats;
 pub mod proxy;
+#[cfg(test)]
+pub mod mock_http;
 
 pub use proxy::validate_model_exists;
 
