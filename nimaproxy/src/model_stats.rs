@@ -831,3 +831,215 @@ mod tests {
         assert!(!viable.contains(&"model-a".to_string()));
     }
 }
+
+// === NEW TESTS FOR GETTER METHODS ===
+
+#[cfg(test)]
+mod getter_tests {
+    use super::*;
+
+    #[test]
+    fn test_get_model_timeout_default() {
+        let store = ModelStatsStore::new(3000.0);
+        let max_timeout = 30000u64;
+
+        // Unknown model should return max_timeout
+        let timeout = store.get_model_timeout("unknown-model", max_timeout);
+        assert_eq!(timeout, max_timeout);
+    }
+
+    #[test]
+    fn test_get_model_timeout_configured() {
+        let store = ModelStatsStore::new(3000.0);
+        let max_timeout = 30000u64;
+
+        // Record some stats for a model
+        store.record("test-model", 1000.0, true);
+        store.record("test-model", 1200.0, true);
+        store.record("test-model", 1100.0, true);
+
+        let timeout = store.get_model_timeout("test-model", max_timeout);
+
+        // Should be based on p95 + buffer, but within max
+        assert!(timeout >= 1000); // At least 1s minimum
+        assert!(timeout <= max_timeout);
+    }
+
+    #[test]
+    fn test_get_model_timeout_unknown_model() {
+        let store = ModelStatsStore::new(3000.0);
+        let max_timeout = 60000u64;
+
+        // Model with no stats should return max_timeout
+        let timeout = store.get_model_timeout("nonexistent", max_timeout);
+        assert_eq!(timeout, max_timeout);
+    }
+
+    #[test]
+    fn test_racing_candidates_empty() {
+        let store = ModelStatsStore::new(3000.0);
+        let candidates: Vec<String> = vec![];
+
+        let result = store.racing_candidates(&candidates, 5);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_racing_candidates_filters_degraded() {
+        let store = ModelStatsStore::new(3000.0);
+
+        // Make model-a degraded with high latency
+        store.record("model-a", 5000.0, true);
+        store.record("model-a", 5000.0, true);
+        store.record("model-a", 5000.0, true);
+        store.record("model-a", 5000.0, true);
+
+        // model-b is healthy
+        store.record("model-b", 500.0, true);
+        store.record("model-b", 500.0, true);
+        store.record("model-b", 500.0, true);
+
+        let candidates = vec!["model-a".to_string(), "model-b".to_string()];
+        let result = store.racing_candidates(&candidates, 5);
+
+        // model-a should be filtered out as degraded
+        assert!(!result.contains(&"model-a".to_string()));
+        assert!(result.contains(&"model-b".to_string()));
+    }
+
+    #[test]
+    fn test_racing_candidates_orders_by_latency() {
+        let store = ModelStatsStore::new(3000.0);
+
+        // Record different latencies
+        store.record("slow", 2000.0, true);
+        store.record("slow", 2000.0, true);
+        store.record("slow", 2000.0, true);
+
+        store.record("fast", 500.0, true);
+        store.record("fast", 500.0, true);
+        store.record("fast", 500.0, true);
+
+        store.record("medium", 1000.0, true);
+        store.record("medium", 1000.0, true);
+        store.record("medium", 1000.0, true);
+
+        let candidates = vec!["slow".to_string(), "fast".to_string(), "medium".to_string()];
+        let result = store.racing_candidates(&candidates, 5);
+
+        // Should be ordered by latency (fastest first)
+        assert_eq!(result[0], "fast");
+        assert_eq!(result[1], "medium");
+        assert_eq!(result[2], "slow");
+    }
+
+    #[test]
+    fn test_best_model_empty_candidates() {
+        let store = ModelStatsStore::new(3000.0);
+        let candidates: Vec<String> = vec![];
+
+        let result = store.best_model(&candidates);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_best_model_all_degraded() {
+        let store = ModelStatsStore::new(3000.0);
+
+        // Make both models degraded
+        store.record("model-a", 5000.0, true);
+        store.record("model-a", 5000.0, true);
+        store.record("model-a", 5000.0, true);
+        store.record("model-a", 5000.0, true);
+
+        store.record("model-b", 6000.0, true);
+        store.record("model-b", 6000.0, true);
+        store.record("model-b", 6000.0, true);
+        store.record("model-b", 6000.0, true);
+
+        let candidates = vec!["model-a".to_string(), "model-b".to_string()];
+        let result = store.best_model(&candidates);
+
+        // Should still pick one (least degraded - lowest latency)
+        assert!(result.is_some());
+        // Should pick model-a as it has lower latency
+        assert_eq!(result.unwrap(), "model-a");
+    }
+
+    #[test]
+    fn test_best_model_picks_fastest() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record("slow", 2000.0, true);
+        store.record("slow", 2000.0, true);
+        store.record("slow", 2000.0, true);
+
+        store.record("fast", 500.0, true);
+        store.record("fast", 500.0, true);
+        store.record("fast", 500.0, true);
+
+        let candidates = vec!["slow".to_string(), "fast".to_string()];
+        let result = store.best_model(&candidates).unwrap();
+
+        assert_eq!(result, "fast");
+    }
+
+    #[test]
+    fn test_snapshot_empty_store() {
+        let store = ModelStatsStore::new(3000.0);
+        let snapshot = store.snapshot();
+
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_single_model() {
+        let store = ModelStatsStore::new(3000.0);
+        store.record("single-model", 100.0, true);
+
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id, "single-model");
+        assert_eq!(snapshot[0].total, 1);
+        assert_eq!(snapshot[0].success, 1);
+    }
+
+    #[test]
+    fn test_snapshot_multiple_models_sorted() {
+        let store = ModelStatsStore::new(3000.0);
+        store.record("zebra", 100.0, true);
+        store.record("alpha", 200.0, true);
+        store.record("mango", 300.0, true);
+
+        let snapshot = store.snapshot();
+
+        // Should be sorted alphabetically by id
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(snapshot[0].id, "alpha");
+        assert_eq!(snapshot[1].id, "mango");
+        assert_eq!(snapshot[2].id, "zebra");
+    }
+
+    #[test]
+    fn test_avg_ms_empty() {
+        let entry = ModelEntry::new();
+        assert_eq!(entry.avg_ms(), None);
+    }
+
+    #[test]
+    fn test_avg_ms_single_sample() {
+        let mut entry = ModelEntry::new();
+        entry.push(42.0);
+
+        let avg = entry.avg_ms();
+        assert!(avg.is_some());
+        assert_eq!(avg.unwrap(), 42.0);
+    }
+
+    #[test]
+    fn test_success_rate_zero_total() {
+        let entry = ModelEntry::new();
+        // Zero total should return 100.0 (default success rate)
+        assert_eq!(entry.success_rate(), 100.0);
+    }
+}
