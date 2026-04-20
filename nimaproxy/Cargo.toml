@@ -40,6 +40,7 @@ tempfile = "3"
 reqwest = { version = "0.12", features = ["rustls-tls", "blocking"] }
 mockito = "1"
 mockall = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 
 [profile.release]
 opt-level = 3
