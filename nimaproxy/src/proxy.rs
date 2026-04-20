@@ -1343,4 +1343,129 @@ mod tests {
         assert_eq!(tools[0]["function"]["name"], "tool1");
         assert_eq!(tools[1]["function"]["name"], "tool2");
     }
+
+// ============ Additional edge case tests ============
+
+#[test]
+fn test_is_minimax_model_true_for_minimaxai_prefix() {
+    assert!(is_minimax_model("minimaxai/minimax-01"));
+    assert!(is_minimax_model("minimaxai/minimax-02"));
+}
+
+#[test]
+fn test_is_minimax_model_false_for_non_minimax() {
+    assert!(!is_minimax_model("openai/gpt-4"));
+    assert!(!is_minimax_model("anthropic/claude"));
+    assert!(!is_minimax_model("mistralai/mistral-large"));
+}
+
+#[test]
+fn test_is_minimax_model_false_for_empty_string() {
+    assert!(!is_minimax_model(""));
+}
+
+#[test]
+fn test_is_minimax_model_false_for_partial_match() {
+    assert!(!is_minimax_model("ai/minimaxai-model"));
+}
+
+#[test]
+fn test_inject_minimax_system_message_no_messages_array() {
+    let mut json = json!({
+        "model": "minimaxai/minimax-01"
+    });
+    inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
+    assert!(!json.as_object().unwrap().contains_key("messages"));
+}
+
+#[test]
+fn test_inject_minimax_system_message_messages_not_array() {
+    let mut json = json!({
+        "model": "minimaxai/minimax-01",
+        "messages": "not-an-array"
+    });
+    inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
+    assert_eq!(json["messages"], "not-an-array");
+}
+
+#[test]
+fn test_transform_message_roles_empty_messages() {
+    let state = create_test_app_state();
+    let mut json = json!({
+        "model": "openai/gpt-4",
+        "messages": []
+    });
+    transform_message_roles(&mut json, "openai/gpt-4", &state);
+    assert_eq!(json["messages"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_transform_message_roles_developer_role_in_middle() {
+    let state = create_test_app_state();
+    let mut json = json!({
+        "model": "openai/gpt-4",
+        "messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "developer", "content": "You are helpful"},
+            {"role": "assistant", "content": "Hi"}
+        ]
+    });
+    transform_message_roles(&mut json, "openai/gpt-4", &state);
+    assert_eq!(json["messages"][1]["role"], "user");
+}
+
+#[test]
+fn test_sanitize_tool_calls_tool_calls_is_null() {
+    let mut json = json!({
+        "messages": [
+            {"role": "assistant", "tool_calls": null}
+        ]
+    });
+    sanitize_tool_calls(&mut json);
+    assert_eq!(json["messages"][0]["tool_calls"], json!(null));
+}
+
+#[test]
+fn test_sanitize_tool_calls_missing_name_field() {
+    let mut json = json!({
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_1", "function": {"arguments": "{}"}}
+                ]
+            }
+        ]
+    });
+    sanitize_tool_calls(&mut json);
+    assert_eq!(json["messages"][0]["tool_calls"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn test_resolve_model_empty_body() {
+    let state = create_test_app_state();
+    let body = Bytes::from("{}");
+    let (model, _) = resolve_model(body, &state);
+    assert_eq!(model, "unknown");
+}
+
+#[test]
+fn test_resolve_model_auto_model_selection() {
+    use crate::model_router::{ModelRouter, Strategy};
+
+    let mut state = create_test_app_state();
+    state.router = Some(ModelRouter::new(
+        vec!["model1".to_string(), "model2".to_string()],
+        Strategy::RoundRobin
+    ));
+    
+    let body = Bytes::from(r#"{"model": "auto"}"#);
+    let (model, new_body) = resolve_model(body, &state);
+    
+    assert_ne!(model, "auto");
+    assert!(model == "model1" || model == "model2");
+    
+    let parsed: Value = serde_json::from_slice(&new_body).unwrap();
+    assert_eq!(parsed["model"], model);
+}
 }
