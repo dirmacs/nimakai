@@ -552,4 +552,211 @@ label = "test"
             unsafe { proxy_stop() };
         });
     }
+
+    /// Test AppState::new() initialization
+    #[test]
+    fn test_app_state_new() {
+        let keys = vec![KeyEntry {
+            key: NVIDIA_API_KEY.to_string(),
+            label: Some("test-key".to_string()),
+        }];
+        let model_params = HashMap::new();
+        let model_compat = config::ModelCompat::default();
+
+        let state = AppState::new(
+            keys,
+            "http://localhost:8080".to_string(),
+            None,
+            ModelStatsStore::new(100.0),
+            vec!["nvidia/nemotron-3b".to_string()],
+            3,
+            5000,
+            "round_robin".to_string(),
+            model_params,
+            model_compat,
+        );
+
+        assert_eq!(state.racing_models.len(), 1);
+        assert_eq!(state.racing_max_parallel, 3);
+        assert_eq!(state.racing_timeout_ms, 5000);
+        assert_eq!(state.racing_strategy, "round_robin");
+        assert_eq!(state.target, "http://localhost:8080");
+    }
+
+    /// Test pid_file_path with override path
+    #[test]
+    fn test_pid_file_path_with_override() {
+        let override_path = Some("/custom/pid/file.pid");
+        let result = pid_file_path(override_path);
+        assert_eq!(result, PathBuf::from("/custom/pid/file.pid"));
+    }
+
+    /// Test pid_file_path with TLS path
+    #[test]
+    fn test_pid_file_path_with_tls() {
+        let test_pid = "/tmp/test_tls_pid.pid";
+        set_tls_pid_file(test_pid);
+        let result = pid_file_path(None);
+        assert_eq!(result, PathBuf::from(test_pid));
+
+        TLS_PID_FILE.with(|tls| {
+            *tls.borrow_mut() = None;
+        });
+    }
+
+    /// Test pid_file_path falls back to env var
+    #[test]
+    fn test_pid_file_path_fallback_to_env() {
+        TLS_PID_FILE.with(|tls| {
+            *tls.borrow_mut() = None;
+        });
+        std::env::set_var("NIMAPROXY_PID_FILE", "/tmp/env_pid.pid");
+        let result = pid_file_path(None);
+        assert_eq!(result, PathBuf::from("/tmp/env_pid.pid"));
+        std::env::remove_var("NIMAPROXY_PID_FILE");
+    }
+
+    /// Test pid_file_path default fallback
+    #[test]
+    fn test_pid_file_path_default() {
+        TLS_PID_FILE.with(|tls| {
+            *tls.borrow_mut() = None;
+        });
+        std::env::remove_var("NIMAPROXY_PID_FILE");
+        let result = pid_file_path(None);
+        assert_eq!(result, PathBuf::from("/tmp/nimaproxy.pid"));
+    }
+
+    /// Test is_process_alive with current process
+    #[test]
+    fn test_is_process_alive_current() {
+        let current_pid = unsafe { libc::getpid() };
+        assert!(is_process_alive(current_pid));
+    }
+
+    /// Test is_process_alive returns false for clearly invalid pid
+    #[test]
+    fn test_is_process_alive_invalid() {
+        // Use a very high pid that won't exist
+        // Note: actual behavior depends on system, so we just verify the function runs
+        let result = is_process_alive(999999);
+        // This pid should not exist on most systems
+        assert!(!result, "pid 999999 should not exist");
+    }
+
+    /// Test read_pid_and_port with invalid file
+    #[test]
+    fn test_read_pid_and_port_invalid_file() {
+        let result = read_pid_and_port(&PathBuf::from("/nonexistent/file.pid"));
+        assert!(result.is_none());
+    }
+
+    /// Test read_pid_and_port with empty content
+    #[test]
+    fn test_read_pid_and_port_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pid_file = temp_dir.path().join("test.pid");
+        std::fs::write(&pid_file, "").unwrap();
+
+        let result = read_pid_and_port(&pid_file);
+        assert!(result.is_none());
+    }
+
+    /// Test read_pid_and_port with "starting" content
+    #[test]
+    fn test_read_pid_and_port_starting() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pid_file = temp_dir.path().join("test.pid");
+        std::fs::write(&pid_file, "starting").unwrap();
+
+        let result = read_pid_and_port(&pid_file);
+        assert!(result.is_none());
+    }
+
+    /// Test read_pid_and_port with valid content
+    #[test]
+    fn test_read_pid_and_port_valid() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pid_file = temp_dir.path().join("test.pid");
+        std::fs::write(&pid_file, "12345:8080").unwrap();
+
+        let result = read_pid_and_port(&pid_file);
+        assert!(result.is_some());
+        let (pid, port) = result.unwrap();
+        assert_eq!(pid, 12345);
+        assert_eq!(port, 8080);
+    }
+
+    /// Test read_pid_and_port without port (defaults to 8080)
+    #[test]
+    fn test_read_pid_and_port_default_port() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pid_file = temp_dir.path().join("test.pid");
+        std::fs::write(&pid_file, "12345").unwrap();
+
+        let result = read_pid_and_port(&pid_file);
+        assert!(result.is_some());
+        let (pid, port) = result.unwrap();
+        assert_eq!(pid, 12345);
+        assert_eq!(port, 8080);
+    }
+
+    /// Test check_proxy_alive when proxy is not running
+    #[test]
+    fn test_check_proxy_alive_not_running() {
+        assert!(!check_proxy_alive(9999));
+    }
+
+    /// Test wait_for_proxy_ready timeout
+    #[test]
+    fn test_wait_for_proxy_ready_timeout() {
+        let result = wait_for_proxy_ready(9999, 100);
+        assert!(!result);
+    }
+
+    /// Test proxy_free_string with null pointer (should not panic)
+    #[test]
+    fn test_proxy_free_string_null() {
+        unsafe {
+            proxy_free_string(std::ptr::null_mut());
+        }
+    }
+
+    /// Test proxy_start with null config path
+    #[test]
+    fn test_proxy_start_null_config() {
+        let result = unsafe { proxy_start(std::ptr::null(), 0) };
+        assert_eq!(result, -1, "proxy_start with null config should fail");
+    }
+
+    /// Test proxy_health_impl with no valid pid file
+    #[test]
+    fn test_proxy_health_impl_no_pid_file() {
+        let fake_path = PathBuf::from("/nonexistent/pid/file.pid");
+        let result = proxy_health_impl(&fake_path);
+        assert!(result.is_null(), "health should return null for nonexistent pid file");
+    }
+
+    /// Test proxy_stats_impl with no valid pid file
+    #[test]
+    fn test_proxy_stats_impl_no_pid_file() {
+        let fake_path = PathBuf::from("/nonexistent/pid/file.pid");
+        let result = proxy_stats_impl(&fake_path);
+        assert!(result.is_null(), "stats should return null for nonexistent pid file");
+    }
+
+    /// Test proxy_stats_impl with dead process
+    #[test]
+    fn test_proxy_stats_impl_dead_process() {
+        // Use a non-existent pid that will fail the kill check
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pid_file = temp_dir.path().join("test.pid");
+        // Use a very high pid that won't exist
+        std::fs::write(&pid_file, "999999:8080").unwrap();
+
+        let result = proxy_stats_impl(&pid_file);
+        // The function should return null when process doesn't exist
+        assert!(result.is_null(), "stats should return null for non-existent process");
+    }
+
 }
