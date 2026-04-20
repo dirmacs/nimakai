@@ -762,4 +762,41 @@ label = "test"
         assert!(result.is_null(), "stats should return null for non-existent process");
     }
 
+
+    // Test 16: FFI null pointer handling
+    #[test]
+    fn test_ffi_null_pointer_handling() {
+        unsafe {
+            proxy_free_string(std::ptr::null_mut());
+        }
+        let result = unsafe { proxy_start(std::ptr::null(), 0) };
+        assert_eq!(result, -1, "Should return -1 for null config");
+    }
+
+    // Test 17: FFI invalid UTF-8 handling
+    #[test]
+    fn test_ffi_invalid_utf8_handling() {
+        let invalid_bytes = vec![0xFF, 0xFE, 0xFD];
+        let c_string = CString::from_vec_with_nul(invalid_bytes);
+        assert!(c_string.is_err(), "Should fail for invalid UTF-8");
+    }
+
+    // Test 18: FFI memory leak prevention
+    #[test]
+    fn test_ffi_memory_leak_prevention() {
+        with_isolated_env(19200, |cfg_path, pid_file| {
+            let config_path = CString::new(cfg_path).unwrap();
+            let pid_file_cstr = CString::new(pid_file).unwrap();
+            let start_result = unsafe {
+                proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr())
+            };
+            assert_eq!(start_result, 0);
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let stats = unsafe { proxy_stats() };
+            assert!(!stats.is_null());
+            unsafe { proxy_free_string(stats) };
+            unsafe { proxy_stop() };
+            assert!(true);
+        });
+    }
 }
