@@ -256,7 +256,7 @@ target = "https://custom.api.com"
 key = "nvapi-test"
 label = "test-key"
 
-[Routing]
+[routing]
 strategy = "latency_aware"
 "#,
         );
@@ -332,7 +332,7 @@ key = "key3"
 [[keys]]
 key = "test"
 
-[Routing]
+[routing]
 strategy = "latency_aware"
 spike_threshold_ms = 5000.0
 "#,
@@ -525,5 +525,353 @@ key = "test"
         assert!(!compat.should_transform_tool_messages("allowed-model"));
         assert!(compat.should_transform_developer_role("blocked-model"));
         assert!(compat.should_transform_tool_messages("blocked-model"));
+}
+    #[test]
+    fn test_listen_addr_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.listen_addr(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_listen_addr_custom() {
+        let file = write_temp_config(
+            r#"
+listen = "0.0.0.0:9090"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.listen_addr(), "0.0.0.0:9090");
+    }
+
+    #[test]
+    fn test_target_url_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.target_url(), "https://integrate.api.nvidia.com");
+    }
+
+    #[test]
+    fn test_target_url_custom() {
+        let file = write_temp_config(
+            r#"
+target = "https://custom.endpoint.com"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.target_url(), "https://custom.endpoint.com");
+    }
+
+    #[test]
+    fn test_racing_enabled_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_enabled(), true);
+    }
+
+    #[test]
+    fn test_racing_enabled_true() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+enabled = true
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_enabled(), true);
+    }
+
+    #[test]
+    fn test_racing_models_empty() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert!(config.racing_models().is_empty());
+    }
+
+    #[test]
+    fn test_racing_models_with_config() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+models = ["model1", "model2", "model3"]
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        let models = config.racing_models();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0], "model1");
+        assert_eq!(models[2], "model3");
+    }
+
+    #[test]
+    fn test_racing_max_parallel_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_max_parallel(), 3);
+    }
+
+    #[test]
+    fn test_racing_max_parallel_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+max_parallel = 5
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_max_parallel(), 5);
+    }
+
+    #[test]
+    fn test_racing_timeout_ms_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_timeout_ms(), 8000);
+    }
+
+    #[test]
+    fn test_racing_timeout_ms_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+timeout_ms = 12000
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_timeout_ms(), 12000);
+    }
+
+    #[test]
+    fn test_racing_strategy_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_strategy(), "complete");
+    }
+
+    #[test]
+    fn test_racing_strategy_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+strategy = "first_token"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_strategy(), "first_token");
+    }
+
+    #[test]
+    fn test_routing_models_empty() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert!(config.routing_models().is_empty());
+    }
+
+    #[test]
+    fn test_routing_models_with_config() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[routing]
+models = ["auto-model-1", "auto-model-2"]
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        let models = config.routing_models();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0], "auto-model-1");
+        assert_eq!(models[1], "auto-model-2");
+    }
+
+    #[test]
+    fn test_routing_strategy_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.routing_strategy(), "round_robin");
+    }
+
+    #[test]
+    fn test_routing_strategy_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[routing]
+strategy = "latency_aware"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.routing_strategy(), "latency_aware");
+    }
+
+    #[test]
+    fn test_routing_spike_threshold_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.routing_spike_threshold_ms(), 3000.0);
+    }
+
+    #[test]
+    fn test_routing_spike_threshold_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[routing]
+spike_threshold_ms = 4500.0
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.routing_spike_threshold_ms(), 4500.0);
+    }
+
+    #[test]
+    fn test_routing_enabled_with_models() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[routing]
+models = ["model1"]
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.routing_enabled(), true);
+    }
+
+    #[test]
+    fn test_routing_enabled_empty() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[routing]
+strategy = "round_robin"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.routing_enabled(), true);
+    }
+
+    #[test]
+    fn test_get_model_params_none() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert!(config.get_model_params("any-model").is_none());
+    }
+
+    #[test]
+    fn test_circuit_breaker_defaults() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        let cb = config.circuit_breaker_config();
+        assert_eq!(cb.max_output_tokens, 32000);
+        assert_eq!(cb.max_repetitions, 5);
+        assert_eq!(cb.max_consecutive_assistant_turns, 10);
+    }
+
+    #[test]
+    fn test_circuit_breaker_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[circuit_breaker]
+max_output_tokens = 8000
+max_repetitions = 2
+max_consecutive_assistant_turns = 3
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        let cb = config.circuit_breaker_config();
+        assert_eq!(cb.max_output_tokens, 8000);
+        assert_eq!(cb.max_repetitions, 2);
+        assert_eq!(cb.max_consecutive_assistant_turns, 3);
     }
 }
