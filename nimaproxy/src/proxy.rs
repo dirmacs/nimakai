@@ -281,6 +281,7 @@ fn sanitize_tool_calls(json: &mut Value) {
                 if role == "assistant" {
                     if let Some(obj) = msg.as_object_mut() {
                         obj.remove("tool_call_id");
+                    obj.remove("reasoning");  // Strip reasoning field - not accepted by most models
                     }
                 }
             }
