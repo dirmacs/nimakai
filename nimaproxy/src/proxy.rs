@@ -266,6 +266,16 @@ fn sanitize_tool_calls(json: &mut Value) {
     // Sanitize tool_calls in messages
     if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
         for msg in messages.iter_mut() {
+            // Strip tool_call_id from assistant messages - most models don't accept it
+            // Pydantic error: "Extra inputs are not permitted" for tool_call_id field
+            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+                if role == "assistant" {
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.remove("tool_call_id");
+                    }
+                }
+            }
+            
             if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
                 // Filter out tool_calls with empty names
                 tool_calls.retain(|tc| {
@@ -1412,4 +1422,78 @@ async fn test_stream_termination_edge_cases() {
     assert!(response.status() >= StatusCode::BAD_REQUEST || response.status() == StatusCode::OK);
 }
 
+}
+
+#[cfg(test)]
+mod tool_call_id_tests {
+    use serde_json::json;
+    use super::sanitize_tool_calls;
+
+    #[test]
+    fn test_sanitize_strips_tool_call_id_from_assistant() {
+        // Assistant message with tool_call_id should have it stripped
+        let mut json = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Let me call a tool",
+                    "tool_call_id": "call_123"
+                }
+            ]
+        });
+        
+        sanitize_tool_calls(&mut json);
+        
+        // tool_call_id should be removed
+        assert!(!json["messages"][0].as_object().unwrap().contains_key("tool_call_id"));
+    }
+
+    #[test]
+    fn test_sanitize_keeps_tool_call_id_in_tool_messages() {
+        // Tool messages can keep tool_call_id (it's valid in tool responses)
+        let mut json = json!({
+            "messages": [
+                {
+                    "role": "tool",
+                    "content": "Tool result",
+                    "tool_call_id": "call_123"
+                }
+            ]
+        });
+        
+        sanitize_tool_calls(&mut json);
+        
+        // tool_call_id should remain in tool messages
+        assert!(json["messages"][0].as_object().unwrap().contains_key("tool_call_id"));
+    }
+
+    #[test]
+    fn test_sanitize_removes_tool_call_id_even_with_tool_calls() {
+        // Assistant message with both tool_call_id and tool_calls
+        let mut json = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_call_id": "call_123",
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": "{}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+        
+        sanitize_tool_calls(&mut json);
+        
+        // tool_call_id should be removed, tool_calls should remain
+        assert!(!json["messages"][0].as_object().unwrap().contains_key("tool_call_id"));
+        assert!(json["messages"][0].as_object().unwrap().contains_key("tool_calls"));
+    }
 }
