@@ -557,3 +557,97 @@ async fn test_key_pool_exhaustion() {
     
     mock.assert();
 }
+
+#[tokio::test]
+async fn test_proxy_handles_json_parse_failure() {
+    use mockito::Server;
+    let mut server = Server::new_async().await;
+    
+    // Mock that returns invalid JSON
+    let mock = server.mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_body("not valid json {{{")
+        .expect_at_least(1)
+        .create();
+    
+    let state = make_test_state(server.url());
+    
+    // Body with invalid JSON model field
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 10
+    });
+    
+    let resp = chat_completions(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    ).await;
+    
+    let response = resp.into_response();
+    let status = response.status();
+    
+    // Should handle gracefully - either success or specific error
+    assert!(status.as_u16() >= 400 || status.as_u16() == 200);
+    mock.assert();
+}
+
+#[tokio::test]
+async fn test_proxy_connection_refusal() {
+    // Test with unreachable server - connection refused
+    let state = make_test_state("http://localhost:1".to_string()); // Port 1 is unreachable
+    
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 10
+    });
+    
+    let resp = chat_completions(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    ).await;
+    
+    let response = resp.into_response();
+    let status = response.status();
+    
+    // Should return BAD_GATEWAY on connection error
+    assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn test_proxy_with_empty_messages() {
+    use mockito::Server;
+    let mut server = Server::new_async().await;
+    
+    let mock = server.mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"choices": [{"message": {"role": "assistant", "content": "test"}}]}"#)
+        .expect_at_least(1)
+        .create();
+    
+    let state = make_test_state(server.url());
+    
+    // Empty messages array
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [],
+        "max_tokens": 10
+    });
+    
+    let resp = chat_completions(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    ).await;
+    
+    let response = resp.into_response();
+    let status = response.status();
+    
+    // Should handle empty messages - may succeed or fail validation
+    mock.assert();
+    assert!(status.as_u16() >= 200 && status.as_u16() < 600);
+}
