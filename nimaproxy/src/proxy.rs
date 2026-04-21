@@ -1521,28 +1521,23 @@ fn log_turn_request(
     is_racing: bool,
     error: Option<String>,
 ) {
-    use crate::turn_log::{TurnLog, log_turn as log_turn_event};
+    use crate::turn_log::{TurnLog, MessageLog, log_turn as log_turn_event};
     
-    let turn = TurnLog {
-        timestamp: chrono::Utc::now(),
-        request_id: None,
-        requested_model: requested_model.to_string(),
-        responding_model: responding_model.to_string(),
-        latency_ms: latency_ms as u64,
+    let mut turn = TurnLog::new(
+        requested_model.to_string(),
+        responding_model.to_string(),
+        latency_ms as u64,
         success,
         status_code,
-        request_message_count: message_count,
-        response_message_count: 1, // Simplified
-        request_tokens: None,
-        response_tokens: None,
+        message_count,
+        1, // response_message_count
         has_tool_calls,
         tool_call_count,
-        error,
-        key_label: key_label.map(String::from),
+        key_label.map(String::from),
         is_racing,
-        racing_models_count: None,
-        racing_winner: None,
-    };
+    );
+    
+    turn.error = error;
     
     log_turn_event(&turn);
 }
