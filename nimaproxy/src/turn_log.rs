@@ -1,5 +1,5 @@
 //! Structured turn logging for observability and analysis.
-//! Logs each request/response pair to JSONL format.
+//! Logs each request/response pair to JSONL format with message content.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -7,6 +7,15 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write, BufWriter};
 use std::path::Path;
 use std::sync::Mutex;
+
+/// A single message in a conversation
+#[derive(Serialize, Debug, Clone)]
+pub struct MessageLog {
+    pub role: String,
+    pub content: String,
+    pub tool_call_id: Option<String>,
+    pub tool_calls: Option<String>, // JSON string for complex structure
+}
 
 /// Metadata about a completed turn (request/response pair)
 #[derive(Serialize, Debug, Clone)]
@@ -64,6 +73,12 @@ pub struct TurnLog {
     
     /// Racing context: did this model win the race?
     pub racing_winner: Option<bool>,
+    
+    /// Full request messages (redacted if needed)
+    pub request_messages: Vec<MessageLog>,
+    
+    /// Response message (first choice only)
+    pub response_message: Option<MessageLog>,
 }
 
 impl TurnLog {
@@ -99,6 +114,8 @@ impl TurnLog {
             is_racing,
             racing_models_count: None,
             racing_winner: None,
+            request_messages: Vec::new(),
+            response_message: None,
         }
     }
 }
@@ -215,5 +232,106 @@ where
 {
     unsafe {
         GLOBAL_LOGGER.as_ref().map(|logger| f(logger))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::NamedTempFile;
+    use std::io::BufRead;
+
+    #[test]
+    fn test_turn_log_creation() {
+        let turn = TurnLog::new(
+            "auto".to_string(),
+            "mistralai/devstral-2-123b".to_string(),
+            742,
+            true,
+            200,
+            5,
+            1,
+            false,
+            0,
+            Some("test".to_string()),
+            true,
+        );
+        
+        assert_eq!(turn.requested_model, "auto");
+        assert_eq!(turn.responding_model, "mistralai/devstral-2-123b");
+        assert_eq!(turn.latency_ms, 742);
+        assert!(turn.success);
+        assert!(!turn.has_tool_calls);
+    }
+
+    #[test]
+    fn test_turn_log_with_messages() {
+        let mut turn = TurnLog::new(
+            "auto".to_string(),
+            "qwen/qwen3.5".to_string(),
+            891,
+            true,
+            200,
+            3,
+            1,
+            true,
+            2,
+            None,
+            false,
+        );
+        
+        turn.request_messages = vec![
+            MessageLog {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            MessageLog {
+                role: "assistant".to_string(),
+                content: "Hi there!".to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        
+        turn.response_message = Some(MessageLog {
+            role: "assistant".to_string(),
+            content: "How can I help?".to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        
+        assert_eq!(turn.request_messages.len(), 2);
+        assert_eq!(turn.request_messages[0].role, "user");
+        assert!(turn.response_message.is_some());
+    }
+
+    #[test]
+    fn test_logger_initially_disabled() {
+        let logger = TurnLogger::new("/tmp/test_turns.jsonl", false).unwrap();
+        assert!(!logger.is_enabled());
+    }
+
+    #[test]
+    fn test_turn_log_serialization() {
+        let turn = TurnLog::new(
+            "auto".to_string(),
+            "test-model".to_string(),
+            100,
+            true,
+            200,
+            2,
+            1,
+            false,
+            0,
+            Some("key1".to_string()),
+            false,
+        );
+        
+        let json = serde_json::to_string(&turn).unwrap();
+        assert!(json.contains("test-model"));
+        assert!(json.contains("requested_model"));
     }
 }
