@@ -3,6 +3,7 @@ pub mod key_pool;
 pub mod model_router;
 pub mod model_stats;
 pub mod proxy;
+pub mod turn_log;
 pub mod test_utils;
 #[cfg(test)]
 pub mod mock_http;

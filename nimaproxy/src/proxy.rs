@@ -1506,3 +1506,43 @@ mod tool_call_id_tests {
         assert!(json["messages"][0].as_object().unwrap().contains_key("tool_calls"));
     }
 }
+
+/// Log a completed turn
+fn log_turn_request(
+    requested_model: &str,
+    responding_model: &str,
+    latency_ms: u128,
+    success: bool,
+    status_code: u16,
+    message_count: usize,
+    has_tool_calls: bool,
+    tool_call_count: usize,
+    key_label: Option<&str>,
+    is_racing: bool,
+    error: Option<String>,
+) {
+    use crate::turn_log::{TurnLog, log_turn as log_turn_event};
+    
+    let turn = TurnLog {
+        timestamp: chrono::Utc::now(),
+        request_id: None,
+        requested_model: requested_model.to_string(),
+        responding_model: responding_model.to_string(),
+        latency_ms: latency_ms as u64,
+        success,
+        status_code,
+        request_message_count: message_count,
+        response_message_count: 1, // Simplified
+        request_tokens: None,
+        response_tokens: None,
+        has_tool_calls,
+        tool_call_count,
+        error,
+        key_label: key_label.map(String::from),
+        is_racing,
+        racing_models_count: None,
+        racing_winner: None,
+    };
+    
+    log_turn_event(&turn);
+}
