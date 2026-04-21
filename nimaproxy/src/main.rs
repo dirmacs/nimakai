@@ -7,6 +7,7 @@ use axum::{
     Router,
 };
 use tracing::{info, warn};
+use nimaproxy::turn_log;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn usage() -> ! {
@@ -69,6 +70,10 @@ async fn main() {
         .try_init();
 
     info!("nimaproxy starting up");
+
+// Initialize turn logging
+let _ = turn_log::init_logger("/var/log/nimaproxy/turns.jsonl", true);
+info!("Turn logging initialized");
 
     // Load config to determine actual port
     let config_path = config_path.unwrap_or_else(|| "nimaproxy.toml".to_string());
