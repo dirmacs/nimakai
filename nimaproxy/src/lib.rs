@@ -13,7 +13,7 @@ pub use proxy::validate_model_exists;
 pub use config::{load as config_load, Config, KeyEntry, ModelParams, RoutingConfig};
 pub use key_pool::KeyPool;
 pub use model_router::{ModelRouter, Strategy};
-pub use model_stats::{ModelStatsStore, ModelSnapshot};
+pub use model_stats::{ModelStatsStore, ModelSnapshot, ModelStatus, RecordOutcome};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::os::raw::c_char;

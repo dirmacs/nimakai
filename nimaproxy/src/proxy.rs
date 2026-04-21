@@ -206,16 +206,19 @@ pub async fn chat_completions(
                     }
                 };
                 
-                let full_body = collected.concat();
-                eprintln!("DEBUG: NVIDIA API response - status={}, body={}", status, std::str::from_utf8(&full_body).unwrap_or("<invalid utf8>"));
+let full_body = collected.concat();
+eprintln!("DEBUG: NVIDIA API response - status={}, body={}", status, std::str::from_utf8(&full_body).unwrap_or("<invalid utf8>"));
 
-        // Check for DEGRADED model error from NVIDIA API
-        let body_str = std::str::from_utf8(&full_body).unwrap_or("");
-        if body_str.contains("DEGRADED") || body_str.contains("degraded") {
-            eprintln!("[nimaproxy] model {} returned DEGRADED error, will retry", model_id);
-            state.model_stats.record(&model_id, ttfc_ms, false);
-            continue; // Retry with different model
-        }
+// Check for server-side degradation from NVIDIA API
+// NVIDIA returns: {"status":400,"title":"Bad Request","detail":"Function id '...': DEGRADED function cannot be invoked"}
+let body_str = std::str::from_utf8(&full_body).unwrap_or("");
+if status == 400 && (body_str.contains("DEGRADED") || body_str.contains("degraded")) {
+    eprintln!("[nimaproxy] SERVER-DEGRADED: model '{}' returned DEGRADED error from NVIDIA (server-side block)", model_id);
+    // Record as server-side degraded - this immediately marks the model as unavailable
+    state.model_stats.record_server_degraded(&model_id);
+    // Continue retry with a different model
+    continue;
+}
 
                 let (output_tokens, repetition_count, had_tool_call) = extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
                 
@@ -272,89 +275,99 @@ pub async fn chat_completions(
 /// NVIDIA NIM (via Azure OpenAI validation) rejects empty function names with:
 /// "Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64"
 fn sanitize_tool_calls(json: &mut Value) {
-    // Sanitize tool_calls in messages
-    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
-        for msg in messages.iter_mut() {
-            // Strip tool_call_id from assistant messages - most models don't accept it
-            // Pydantic error: "Extra inputs are not permitted" for tool_call_id field
-            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
-                if role == "assistant" {
-                    if let Some(obj) = msg.as_object_mut() {
-                        obj.remove("tool_call_id");
-                    obj.remove("reasoning");  // Strip reasoning field - not accepted by most models
-                    }
-                }
-            }
-            
-            if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-                // Filter out tool_calls with empty names
-                tool_calls.retain(|tc| {
-                    if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
-                        !name.is_empty()
-                    } else {
-                        // Keep if no name field (shouldn't happen but be safe)
-                        true
-                    }
-                });
-                // If all tool_calls were removed, remove the tool_calls field entirely
-                if tool_calls.is_empty() {
-                    if let Some(obj) = msg.as_object_mut() {
-                        obj.remove("tool_calls");
-                    }
-                }
-            }
-        }
-    }
-
-    // Sanitize tools array (tool definitions)
-    if let Some(tools) = json.get_mut("tools").and_then(|t| t.as_array_mut()) {
-        // Filter out tools with empty function names
-        tools.retain(|tool| {
-            if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
-                !name.is_empty()
-            } else {
-                // Keep if no name field (shouldn't happen but be safe)
-                true
-            }
-        });
-        // If all tools were removed, remove the tools field entirely
-        if tools.is_empty() {
-            if let Some(obj) = json.as_object_mut() {
-                obj.remove("tools");
-            }
-        }
-    }
+ // Sanitize tool_calls in messages
+ if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+ for msg in messages.iter_mut() {
+ // Strip tool_call_id from assistant messages - most models don't accept it
+ // Pydantic error: "Extra inputs are not permitted" for tool_call_id field
+ if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+ if role == "assistant" {
+ if let Some(obj) = msg.as_object_mut() {
+ obj.remove("tool_call_id");
+ obj.remove("reasoning"); // Strip reasoning field - not accepted by most models
+// Ensure assistant messages with tool_calls have content
+// NVIDIA requires non-null content even for tool-call-only messages
+if obj.get("tool_calls").is_some() && obj.get("content").is_none() {
+obj.insert("content".to_string(), Value::String("".to_string()));
 }
+ }
+ }
+ }
+ 
+ if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+ // Filter out tool_calls with empty names
+ tool_calls.retain(|tc| {
+ if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+ !name.is_empty()
+ } else {
+ // Keep if no name field (shouldn't happen but be safe)
+ true
+ }
+ });
+ // If all tool_calls were removed, remove the tool_calls field entirely
+ if tool_calls.is_empty() {
+ if let Some(obj) = msg.as_object_mut() {
+ obj.remove("tool_calls");
+ }
+ }
+ }
+ }
+ }
 
-/// Transform unsupported roles in messages:
+ // Sanitize tools array (tool definitions)
+ if let Some(tools) = json.get_mut("tools").and_then(|t| t.as_array_mut()) {
+ // Filter out tools with empty function names
+ tools.retain(|tool| {
+ if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+ !name.is_empty()
+ } else {
+ // Keep if no name field (shouldn't happen but be safe)
+ true
+ }
+ });
+ // If all tools were removed, remove the tools field entirely
+ if tools.is_empty() {
+ if let Some(obj) = json.as_object_mut() {
+ obj.remove("tools");
+ }
+ }
+ }
+}
 /// - "developer" → "user" (NVIDIA NIM doesn't support developer role)
 /// - "tool" → "assistant" (NVIDIA NIM doesn't support tool role)
+///
+/// For tool messages, we also need to:
+/// - Keep tool_call_id (required for matching tool results to calls)
+/// - Keep content as the tool output
 fn transform_message_roles(json: &mut Value, model_id: &str, state: &AppState) {
-    let transform_developer = state.model_compat.should_transform_developer_role(model_id);
-    let transform_tool = state.model_compat.should_transform_tool_messages(model_id);
-    
-    eprintln!("DEBUG: transform_message_roles - model_id={}, transform_developer={}, transform_tool={}", model_id, transform_developer, transform_tool);
+ let transform_developer = state.model_compat.should_transform_developer_role(model_id);
+ let transform_tool = state.model_compat.should_transform_tool_messages(model_id);
+ 
+ eprintln!("DEBUG: transform_message_roles - model_id={}, transform_developer={}, transform_tool={}", model_id, transform_developer, transform_tool);
 
-    if !transform_developer && !transform_tool {
-        eprintln!("DEBUG: No transformation needed, returning early");
-        return;
-    }
+ if !transform_developer && !transform_tool {
+ eprintln!("DEBUG: No transformation needed, returning early");
+ return;
+ }
 
-    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
-        for msg in messages {
-            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
+ if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+ for msg in messages {
+ let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
 
-            if transform_developer && role == "developer" {
-                if let Some(v) = msg.get_mut("role") {
-                    *v = Value::String("user".to_string());
-                }
-            } else if transform_tool && role == "tool" {
-                if let Some(v) = msg.get_mut("role") {
-                    *v = Value::String("assistant".to_string());
-                }
-            }
-        }
-    }
+ if transform_developer && role == "developer" {
+ if let Some(v) = msg.get_mut("role") {
+ *v = Value::String("user".to_string());
+ }
+ } else if transform_tool && role == "tool" {
+ // Transform tool role to assistant
+ if let Some(v) = msg.get_mut("role") {
+ *v = Value::String("assistant".to_string());
+ }
+ // Tool messages have tool_call_id which assistant messages also support
+ // when they're responding to a tool call, so we keep it
+ }
+ }
+ }
 }
 /// Check if the conversation has tool messages or tool calls (indicating a tool call flow).
 /// This requires special handling for Mistral models on NVIDIA NIM.
