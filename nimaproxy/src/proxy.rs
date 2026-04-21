@@ -208,6 +208,15 @@ pub async fn chat_completions(
                 
                 let full_body = collected.concat();
                 eprintln!("DEBUG: NVIDIA API response - status={}, body={}", status, std::str::from_utf8(&full_body).unwrap_or("<invalid utf8>"));
+
+        // Check for DEGRADED model error from NVIDIA API
+        let body_str = std::str::from_utf8(&full_body).unwrap_or("");
+        if body_str.contains("DEGRADED") || body_str.contains("degraded") {
+            eprintln!("[nimaproxy] model {} returned DEGRADED error, will retry", model_id);
+            state.model_stats.record(&model_id, ttfc_ms, false);
+            continue; // Retry with different model
+        }
+
                 let (output_tokens, repetition_count, had_tool_call) = extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
                 
                 if output_tokens > 0 || repetition_count > 0 {
