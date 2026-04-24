@@ -1564,6 +1564,50 @@ mod tool_call_id_tests {
         assert!(!json["messages"][0].as_object().unwrap().contains_key("tool_call_id"));
         assert!(json["messages"][0].as_object().unwrap().contains_key("tool_calls"));
     }
+
+    #[test]
+    fn test_validate_mistral_tool_call_ids_valid() {
+        let json = json!({
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "abc123XYZ", "type": "function", "function": {"name": "test"}}]
+            ]
+        });
+        let result = validate_mistral_tool_call_ids(&json, "mistralai/devstral-2-123b-instruct-2512");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_mistral_tool_call_ids_invalid_length() {
+        let json = json!({
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test"}}]
+            ]
+        });
+        let result = validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_mistral_tool_call_ids_invalid_chars() {
+        let json = json!({
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]
+            ]
+        });
+        let result = validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_mistral_tool_call_ids_non_mistral() {
+        let json = json!({
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]
+            ]
+        });
+        let result = validate_mistral_tool_call_ids(&json, "openai/gpt-4");
+        assert!(result.is_ok());
+    }
 }
 
 /// Log a completed turn
