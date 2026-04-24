@@ -464,6 +464,7 @@ async fn test_reasoning_field_stripped() {
 /// the number of tool responses in subsequent messages.
 #[tokio::test]
 #[ignore]
+
 async fn test_mismatched_tool_calls_and_responses() {
     let state = make_state();
     let model = "mistralai/devstral-2-123b-instruct-2512";
@@ -504,20 +505,8 @@ async fn test_mismatched_tool_calls_and_responses() {
     assert!(!tool_calls.is_empty());
     let tool_call_id = tool_calls[0]["id"].as_str().unwrap();
 
-    // Second turn: send mismatched count: two tool calls but only one tool response.
-    // We'll duplicate the tool call in the assistant message but provide only one tool response.
-    let mut tool_calls_value = serde_json::Value::Array(tool_calls.clone());
-    // Add an extra dummy tool call to create mismatch
-    let extra_call = json!({
-        "id": "dummy_id",
-        "type": "function",
-        "function": {"name": "get_weather", "arguments": "{\"city\": \"London\"}"}
-    });
-    if let serde_json::Value::Array(ref mut arr) = tool_calls_value {
-        arr.push(extra_call);
-    }
-
-    let body2 = json!({
+    // Second turn: construct request programmatically to avoid json! macro issues.
+    let mut body2_val = json!({
         "model": model,
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -525,11 +514,11 @@ async fn test_mismatched_tool_calls_and_responses() {
             {
                 "role": "assistant",
                 "content": null,
-                "tool_calls": tool_calls_value
+                "tool_calls": []
             },
             {
                 "role": "tool",
-                "tool_call_id": tool_call_id,
+                "tool_call_id": "",
                 "content": "Sunny, 22°C"
             }
         ],
@@ -553,7 +542,30 @@ async fn test_mismatched_tool_calls_and_responses() {
         "temperature": 0.0
     });
 
-    let (status2, resp2) = send_chat(state.clone(), body2).await;
+    // Set correct tool_call_id for the tool message.
+    if let Some(messages) = body2_val["messages"].as_array_mut() {
+        if let Some(tool_msg) = messages.get_mut(3) {
+            tool_msg["tool_call_id"] = serde_json::Value::String(tool_call_id.to_string());
+        }
+        // Set tool_calls in assistant message (index 2) with mismatched count.
+        if let Some(asst) = messages.get_mut(2) {
+            let mut arr = Vec::new();
+            // Add original tool calls
+            for tc in tool_calls.iter() {
+                arr.push(tc.clone());
+            }
+            // Add extra dummy tool call to create mismatch.
+            let dummy = json!({
+                "id": "dummy_id",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{\"city\": \"London\"}"}
+            });
+            arr.push(dummy);
+            asst["tool_calls"] = serde_json::Value::Array(arr);
+        }
+    }
+
+    let (status2, resp2) = send_chat(state.clone(), body2_val).await;
     eprintln!("[test_mismatched] turn2 status={}", status2);
     // Expect 400 with mismatch error
     if status2 == 400 {
