@@ -292,16 +292,17 @@ fn sanitize_tool_calls(json: &mut Value) {
  if let Some(obj) = msg.as_object_mut() {
  obj.remove("tool_call_id");
  obj.remove("reasoning"); // Strip reasoning field - not accepted by most models
-// Ensure assistant messages with tool_calls have content
-// NVIDIA requires non-null content even for tool-call-only messages
-if obj.get("tool_calls").is_some() && obj.get("content").is_none() {
-obj.insert("content".to_string(), Value::String("".to_string()));
-}
+            // NVIDIA NIM requires: EITHER content OR tool_calls, not both
+            // When tool_calls is present, set content to null
+            if obj.get("tool_calls").is_some() {
+                obj.insert("content".to_string(), serde_json::Value::Null);
+            }
  }
  }
  }
  
- if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+ let original_len = tool_calls.len();
  // Filter out tool_calls with empty names
  tool_calls.retain(|tc| {
  if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
@@ -311,13 +312,13 @@ obj.insert("content".to_string(), Value::String("".to_string()));
  true
  }
  });
- // If all tool_calls were removed, remove the tool_calls field entirely
- if tool_calls.is_empty() {
+ // If all tool_calls were removed (and there were some originally), remove the tool_calls field entirely
+ if original_len > 0 && tool_calls.is_empty() {
  if let Some(obj) = msg.as_object_mut() {
  obj.remove("tool_calls");
  }
  }
- }
+}
  }
  }
 
@@ -398,6 +399,39 @@ pub(super) fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Re
     }
     
     Ok(())
+}
+
+/// Fix message ordering for OpenAI API compatibility.
+/// After tool messages, the API requires an assistant message before the next user message.
+/// This function inserts empty assistant messages where needed.
+pub fn fix_message_ordering(json: &mut Value) {
+
+    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+
+        let mut i = 0;
+        while i < messages.len() {
+            let current_role = messages[i].get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if current_role == "tool" {
+                // Check if next message exists and is "user"
+                if i + 1 < messages.len() {
+                    let next_role = messages[i + 1].get("role").and_then(|r| r.as_str()).unwrap_or("");
+                    if next_role == "user" {
+                        // Insert an assistant message after the tool message
+                        // Must have ONLY content (no tool_calls field)
+                        // NVIDIA NIM rejects messages with both content AND tool_calls
+                        let empty_assistant = serde_json::json!({
+                            "role": "assistant",
+                            "content": "Processing..."
+                        });
+                        messages.insert(i + 1, empty_assistant);
+                        i += 2; // Skip the inserted message
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
 }
 
 /// - "developer" → "user" (NVIDIA NIM doesn't support developer role)
@@ -601,6 +635,10 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
 
     // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
     sanitize_tool_calls(&mut json);
+
+    // Fix message ordering BEFORE transformation
+    // so fix_message_ordering sees "tool" role, not already-transformed "assistant"
+    fix_message_ordering(&mut json);
 
     transform_message_roles(&mut json, &model_id, state);
 
@@ -808,16 +846,21 @@ async fn race_models(
   };
   json["model"] = Value::String(model_id.clone());
 
-  // Transform message roles for models that don't support developer/tool roles
-  transform_message_roles(&mut json, model_id, &state);
-
+    // Inject Mistral-specific parameters BEFORE message transformations
+    // so has_tool_messages() can detect tool messages in the original JSON
+    inject_mistral_tool_params(&mut json, model_id);
     // Inject MiniMax system message for JSON tool calling
     inject_minimax_system_message(&mut json, model_id);
-            // Inject Mistral-specific parameters for tool calling continuation
-            inject_mistral_tool_params(&mut json, model_id);
 
-            // Sanitize tool_calls to remove entries with empty names
-            sanitize_tool_calls(&mut json);
+    // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
+    sanitize_tool_calls(&mut json);
+
+    // Fix message ordering BEFORE transformation
+    // so fix_message_ordering sees "tool" role, not already-transformed "assistant"
+    fix_message_ordering(&mut json);
+
+    // Transform message roles for models that don't support developer/tool roles
+    transform_message_roles(&mut json, model_id, &state);
 
             // Inject per-model hyperparameters - override client settings with proxy config
         if let Some(params) = state.model_params.get(model_id) {
@@ -981,6 +1024,7 @@ pending = remaining;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::fix_message_ordering;
     use serde_json::json;
     use std::collections::HashMap;
     use crate::{config::ModelCompat, key_pool::KeyPool, model_stats::ModelStatsStore};
@@ -1596,6 +1640,74 @@ mod tool_call_id_tests {
         // tool_call_id should be removed, tool_calls should remain
         assert!(!json["messages"][0].as_object().unwrap().contains_key("tool_call_id"));
         assert!(json["messages"][0].as_object().unwrap().contains_key("tool_calls"));
+    }
+
+    // ============ fix_message_ordering tests ============
+
+    #[test]
+    fn test_fix_message_ordering_no_change_needed() {
+        // No tool messages, should be unchanged
+        let mut json = json!({
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hello"}
+            ]
+        });
+        crate::proxy::fix_message_ordering(&mut json);
+        assert_eq!(json["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_fix_message_ordering_inserts_assistant() {
+        // tool followed by user - should insert empty assistant
+        let mut json = json!({
+            "messages": [
+                {"role": "tool", "tool_call_id": "1", "content": "result"},
+                {"role": "user", "content": "next"}
+            ]
+        });
+        crate::proxy::fix_message_ordering(&mut json);
+        let msgs = json["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "Processing...");
+        assert!(msgs[1]["tool_calls"].is_array());
+        assert_eq!(msgs[1]["tool_calls"].as_array().unwrap().len(), 0);
+        assert_eq!(msgs[2]["role"], "user");
+    }
+
+    #[test]
+    fn test_fix_message_ordering_multiple_tools_before_user() {
+        // Multiple tool messages followed by user
+        let mut json = json!({
+            "messages": [
+                {"role": "tool", "tool_call_id": "1", "content": "r1"},
+                {"role": "tool", "tool_call_id": "2", "content": "r2"},
+                {"role": "user", "content": "next"}
+            ]
+        });
+        crate::proxy::fix_message_ordering(&mut json);
+        let msgs = json["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[3]["role"], "user");
+    }
+
+    #[test]
+    fn test_fix_message_ordering_assistant_exists_no_change() {
+        // tool followed by assistant followed by user - no change needed
+        let mut json = json!({
+            "messages": [
+                {"role": "tool", "tool_call_id": "1", "content": "result"},
+                {"role": "assistant", "content": "summary"},
+                {"role": "user", "content": "next"}
+            ]
+        });
+        crate::proxy::fix_message_ordering(&mut json);
+        assert_eq!(json["messages"].as_array().unwrap().len(), 3);
     }
 
     #[test]
