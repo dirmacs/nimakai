@@ -10,6 +10,9 @@ src/nimcache/
 # OMP temp directory
 .opencode/
 
+# Planning and debug sessions
+.planning/
+
 # Compiled test binaries
 tests/test_types
 tests/test_metrics

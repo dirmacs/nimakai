@@ -1,5 +1,5 @@
 # Package
-version       = "0.9.1"
+version       = "0.13.0"
 author        = "bkataru"
 description   = "NVIDIA NIM model latency benchmarker"
 license       = "MIT"

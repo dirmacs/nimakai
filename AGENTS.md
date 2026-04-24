@@ -1,12 +1,12 @@
 # Nimakai — Agent Context
 
-Nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.10.0. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.13.0. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
 **Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory).
 
-## FFI Integration (v0.10.0)
+## FFI Integration (v0.13.0)
 
-nimakai v0.10.0 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
+nimakai v0.13.0 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
 
 ```bash
 nimakai proxy start --proxy-config /path/to/nimaproxy.toml --proxy-port 8080
