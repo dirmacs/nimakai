@@ -2,7 +2,7 @@
 
 nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.13.0. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory).
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.13.1 includes critical fixes for NVIDIA NIM assistant message validation and OMP/Pawan integration.
 
 ## FFI Integration (v0.13.0)
 
@@ -140,12 +140,32 @@ Tiers: `S+` (SWE-bench >60%) → `S` → `A+` → `A` → `A-` → `B+` → `B` 
 
 ## Integration with oh-my-opencode
 
-Nimakai's `recommend` subcommand outputs JSON consumed by aegis-opencode for routing config generation:
+Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for routing config generation:
 
 ```bash
 ./nimakai recommend --task coding --format json
 # → {"primary": "nvidia/devstral-2-123b", "fallback": "stepfun-ai/step-3.5-flash"}
 ```
+
+## nimaproxy v0.13.1 Critical Fixes
+
+### Assistant Message Validation
+NVIDIA NIM API requires assistant messages to have either `content` OR `tool_calls`, not both:
+- **Issue**: `fix_message_ordering()` inserted messages with both `content` AND `tool_calls: []`
+- **Fix**: Removed `tool_calls` from inserted messages
+- **Impact**: Resolves OMP/Pawan integration errors when tool→user transitions occur
+
+### Content Field Sanitization
+When `tool_calls` is present, `content` must be `null` (not empty string):
+- **Issue**: `sanitize_tool_calls()` set empty string `content: ""` for messages with `tool_calls`
+- **Fix**: Sets `content` to `serde_json::Value::Null` instead
+- **Impact**: Prevents "Assistant message must have either content or tool_calls, but not both" errors
+
+### Message Ordering
+Inserts empty assistant messages between `tool` and `user` roles to satisfy NVIDIA validation:
+- Runs before `transform_message_roles()` in both `resolve_model()` and `race_models()`
+- Handles all tool→user transitions in conversation history
+- Ensures compatibility with OMP, Pawan, and similar frameworks
 
 ## Environment
 
