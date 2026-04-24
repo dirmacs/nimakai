@@ -342,28 +342,65 @@ obj.insert("content".to_string(), Value::String("".to_string()));
 }
 /// Validate tool call IDs for Mistral models.
 /// Mistral requires tool call IDs to be exactly 9 alphanumeric characters.
-fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Result<(), (StatusCode, String)> {
+/// Also validates that the number of tool calls matches the number of tool responses
+/// (only when tool messages are present in the request).
+pub(super) fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Result<(), (StatusCode, String)> {
     if !is_mistral_model(model_id) {
         return Ok(());
     }
+    let mut tool_call_ids = std::collections::HashSet::new();
+    let mut tool_response_ids = std::collections::HashSet::new();
+    let mut has_tool_messages = false;
+    
     if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
         for msg in messages {
             if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
                 if role == "assistant" {
+                    // Collect tool call IDs from assistant message
                     if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
                         for tc in tool_calls {
                             if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                                // Validate format: exactly 9 alphanumeric chars
                                 if id.len() != 9 || !id.chars().all(|c| c.is_alphanumeric()) {
                                     return Err((StatusCode::BAD_REQUEST,
                                         format!("Tool call id '{}' is invalid. Must be exactly 9 alphanumeric characters for Mistral models.", id)));
                                 }
+                                tool_call_ids.insert(id.to_string());
                             }
                         }
+                    }
+                } else if role == "tool" {
+                    // Collect tool response IDs
+                    has_tool_messages = true;
+                    if let Some(id) = msg.get("tool_call_id").and_then(|i| i.as_str()) {
+                        tool_response_ids.insert(id.to_string());
                     }
                 }
             }
         }
     }
+    
+    // Only check count matching if there are tool messages in the request
+    // (if no tool messages, we're in the middle of a conversation where
+    // the model just returned tool calls and client hasn't sent responses yet)
+    if has_tool_messages {
+        // Check that all tool calls have corresponding responses
+        for id in &tool_call_ids {
+            if !tool_response_ids.contains(id) {
+                return Err((StatusCode::BAD_REQUEST,
+                    format!("Not the same number of function calls and responses: missing response for tool call id '{}'", id)));
+            }
+        }
+        
+        // Check that all tool responses have corresponding calls
+        for id in &tool_response_ids {
+            if !tool_call_ids.contains(id) {
+                return Err((StatusCode::BAD_REQUEST,
+                    format!("Not the same number of function calls and responses: no tool call found for response with id '{}'", id));
+            }
+        }
+    }
+    
     Ok(())
 }
 
@@ -1567,45 +1604,29 @@ mod tool_call_id_tests {
 
     #[test]
     fn test_validate_mistral_tool_call_ids_valid() {
-        let json = json!({
-            "messages": [
-                {"role": "assistant", "tool_calls": [{"id": "abc123XYZ", "type": "function", "function": {"name": "test"}}]
-            ]
-        });
-        let result = validate_mistral_tool_call_ids(&json, "mistralai/devstral-2-123b-instruct-2512");
+        let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "abc123XYZ", "type": "function", "function": {"name": "test"}}]}]});
+        let result = crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/devstral-2-123b-instruct-2512");
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_mistral_tool_call_ids_invalid_length() {
-        let json = json!({
-            "messages": [
-                {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test"}}]
-            ]
-        });
-        let result = validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
+        let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test"}}]}]});
+        let result = crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_mistral_tool_call_ids_invalid_chars() {
-        let json = json!({
-            "messages": [
-                {"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]
-            ]
-        });
-        let result = validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
+        let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]}]});
+        let result = crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_mistral_tool_call_ids_non_mistral() {
-        let json = json!({
-            "messages": [
-                {"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]
-            ]
-        });
-        let result = validate_mistral_tool_call_ids(&json, "openai/gpt-4");
+        let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]}]});
+        let result = crate::proxy::validate_mistral_tool_call_ids(&json, "openai/gpt-4");
         assert!(result.is_ok());
     }
 }
