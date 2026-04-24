@@ -133,6 +133,13 @@ pub async fn chat_completions(
 
     let (model_id, body) = resolve_model(body, &state);
 
+    // Validate tool call IDs for Mistral models
+    if let Ok(json) = serde_json::from_slice::<Value>(&body) {
+        if let Err((status, msg)) = validate_mistral_tool_call_ids(&json, &model_id) {
+            return (status, msg).into_response();
+        }
+    }
+
     // Racing only triggers when the ORIGINAL request was model="auto"
     if original_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2 {
         let racing_models = state.racing_models.clone();
