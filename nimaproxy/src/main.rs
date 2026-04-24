@@ -135,6 +135,9 @@ info!("Turn logging initialized");
     let model_params = cfg.model_params.unwrap_or_default();
     let model_compat = cfg.model_compat.unwrap_or_default();
 
+    eprintln!("[nimaproxy main] model_compat loaded: supports_developer_role={:?}, supports_tool_messages={:?}", 
+        model_compat.supports_developer_role, model_compat.supports_tool_messages);
+
     let state = AppState::new(
         keys,
         target.clone(),

@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures::{TryStreamExt, FutureExt};
 use serde_json::Value;
 use tokio::time::timeout;
 
@@ -879,25 +879,36 @@ async fn race_models(
         handles.push((model_id.clone(), handle));
     }
 
-    if handles.is_empty() {
-        return (StatusCode::BAD_REQUEST, "no valid models to race").into_response();
-    }
+if handles.is_empty() {
+return (StatusCode::BAD_REQUEST, "no valid models to race").into_response();
+}
 
-    for (model_id, handle) in handles {
-        match handle.await {
-            Ok(Ok(response)) => return response,
-            Ok(Err(e)) => {
-                eprintln!("[racing] {} failed: {}", model_id, e);
-                continue;
-            }
-            Err(e) => {
-                eprintln!("[racing] {} panicked: {}", model_id, e);
-                continue;
-            }
-        }
-    }
+// Use select_all to wait for results in completion order, not spawn order
+// This ensures the first response wins, regardless of which model it comes from
+use futures::future::select_all;
+let mut pending: Vec<_> = handles.into_iter().map(|(model_id, handle)| {
+async move { (model_id, handle.await) }.boxed()
+}).collect();
 
-    (StatusCode::BAD_GATEWAY, "all racing models failed").into_response()
+let mut last_error = None;
+
+while !pending.is_empty() {
+let ((model_id, result), _idx, remaining) = select_all(pending).await;
+match result {
+Ok(Ok(response)) => return response,
+Ok(Err(e)) => {
+eprintln!("[racing] {} failed: {}", model_id, e);
+last_error = Some(e);
+}
+Err(e) => {
+eprintln!("[racing] {} panicked: {}", model_id, e);
+last_error = Some(e.to_string());
+}
+}
+pending = remaining;
+}
+
+(StatusCode::BAD_GATEWAY, last_error.unwrap_or_else(|| "all racing models failed".to_string())).into_response()
 }
 
 #[cfg(test)]
