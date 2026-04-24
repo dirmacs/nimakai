@@ -10,9 +10,16 @@ pub struct ModelCompat {
 impl ModelCompat {
     pub fn should_transform_developer_role(&self, model_id: &str) -> bool {
         // If list is None (not configured) or empty, transform ALL models
-        // If list has entries, only transform models NOT in the list
+        // If list has entries:
+        //   - If list contains "all", transform NO models (all support the feature)
+        //   - Otherwise, only transform models NOT in the list
         if let Some(models) = &self.supports_developer_role {
-            // List exists: transform if model is NOT in the list
+            // List exists
+            if models.iter().any(|m| m == "all") {
+                // Special case: "all" means all models support the feature
+                return false; // Don't transform any models
+            }
+            // List exists but doesn't contain "all": transform if model is NOT in the list
             return !models.iter().any(|m| m == model_id);
         }
         // No config: transform all models (default behavior)
@@ -23,6 +30,10 @@ impl ModelCompat {
         // If model is in supports_tool_messages list, it supports tool messages
         // and should NOT be transformed. Return false for these models.
         if let Some(models) = &self.supports_tool_messages {
+            // Special case: "all" means all models support tool messages
+            if models.iter().any(|m| m == "all") {
+                return false; // Model supports tool messages, don't transform
+            }
             if models.iter().any(|m| m == model_id) {
                 return false; // Model supports tool messages, don't transform
             }
