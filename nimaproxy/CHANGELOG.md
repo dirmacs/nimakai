@@ -2,6 +2,14 @@
 
 All notable changes to nimaproxy will be documented in this file.
 
+## [0.13.1] - 2026-04-25
+
+### Fixed
+- **Assistant message validation**: Messages with `tool_calls` must NOT have `content` field (NVIDIA NIM requirement)
+- **Unexpected role 'user' after role 'tool'**: Insert assistant message between tool→user transitions (fixes OMP/Pawan integration)
+- Ensure `content` is `null` (not empty string) when `tool_calls` present
+- `sanitize_tool_calls()` now properly handles messages with `tool_calls` field
+
 ## [0.13.0] - 2026-04-20
 
 ### Added
