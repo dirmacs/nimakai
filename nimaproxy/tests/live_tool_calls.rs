@@ -562,4 +562,3 @@ async fn test_mismatched_tool_calls_and_responses() {
     // We don't assert 400 because the API might handle mismatch differently.
     // The test is to observe behavior and ensure proxy doesn't panic.
 }
-

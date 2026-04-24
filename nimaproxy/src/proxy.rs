@@ -333,6 +333,33 @@ obj.insert("content".to_string(), Value::String("".to_string()));
  }
  }
 }
+/// Validate tool call IDs for Mistral models.
+/// Mistral requires tool call IDs to be exactly 9 alphanumeric characters.
+fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Result<(), (StatusCode, String)> {
+    if !is_mistral_model(model_id) {
+        return Ok(());
+    }
+    if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
+        for msg in messages {
+            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+                if role == "assistant" {
+                    if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
+                        for tc in tool_calls {
+                            if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                                if id.len() != 9 || !id.chars().all(|c| c.is_alphanumeric()) {
+                                    return Err((StatusCode::BAD_REQUEST,
+                                        format!("Tool call id '{}' is invalid. Must be exactly 9 alphanumeric characters for Mistral models.", id)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// - "developer" → "user" (NVIDIA NIM doesn't support developer role)
 /// - "tool" → "assistant" (NVIDIA NIM doesn't support tool role)
 ///
