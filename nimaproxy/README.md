@@ -131,6 +131,13 @@ cargo test --test coverage_gaps  # Coverage gaps (14)
 cargo tarpaulin --out Html
 ```
 
+## Recent Changes (v0.13.1)
+
+### Fixed
+- **Assistant message validation**: Messages with `tool_calls` must NOT have `content` field (NVIDIA NIM requirement)
+- **Unexpected role 'user' after role 'tool'**: Insert assistant message between tool→user transitions (fixes OMP/Pawan integration)
+- `sanitize_tool_calls()` sets `content` to `null` (not empty string) when `tool_calls` present
+
 ## Recent Changes (v0.13.0)
 
 ### Fixed
