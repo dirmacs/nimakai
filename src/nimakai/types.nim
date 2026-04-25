@@ -3,7 +3,7 @@
 import std/strutils
 
 const
-  Version* = "0.13.0"
+  Version* = "0.13.2"
   GitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null || echo unknown").strip()
   BuildDate* = CompileDate & " " & CompileTime
   BaseURL* = "https://integrate.api.nvidia.com/v1/chat/completions"
