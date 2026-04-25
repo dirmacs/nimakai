@@ -421,7 +421,8 @@ pub fn fix_message_ordering(json: &mut Value) {
                         // NVIDIA NIM rejects messages with both content AND tool_calls
                         let empty_assistant = serde_json::json!({
                             "role": "assistant",
-                            "content": "Processing..."
+                            "content": "Processing...",
+                            "tool_calls": []
                         });
                         messages.insert(i + 1, empty_assistant);
                         i += 2; // Skip the inserted message
