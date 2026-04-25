@@ -14,7 +14,7 @@
 
 ---
 
-A focused, single-binary tool that continuously pings NVIDIA NIM models and reports latency metrics. Includes an 80-model tiered catalog, recommendation engine for [oh-my-opencode](https://github.com/bkataru/oh-my-opencode) routing, watch mode with alerts, CI health checks, live model discovery, and full sync mode. No bloat, no TUI framework, no telemetry. Just latency numbers.
+A focused, single-binary tool that continuously pings NVIDIA NIM models and reports latency metrics. Includes an 80-model catalog with SWE-bench scores, recommendation engine for [oh-my-opencode](https://github.com/bkataru/oh-my-opencode) routing, watch mode with alerts, CI health checks, live model discovery, and full sync mode. No bloat, no TUI framework, no telemetry. Just latency numbers.
 
 Also includes **nimaproxy** — a Rust-based key-rotation proxy for production use.
 
@@ -30,7 +30,6 @@ Also includes **nimaproxy** — a Rust-based key-rotation proxy for production u
 - **Health** — UP / TIMEOUT / OVERLOADED / ERROR / NO_KEY / NOT_FOUND
 - **Verdict** — Perfect / Normal / Slow / Spiky / Very Slow / Unstable / Not Active / Not Found
 - **Up%** — uptime percentage
-- **Tier** — S+ / S / A+ / A / A- / B+ / B / C (based on SWE-bench Verified scores)
 
 ## Install
 
@@ -45,9 +44,9 @@ Requires Nim 2.0+ and OpenSSL.
 ## Usage
 
 ```bash
-export NVIDIA_API_KEY="nvapi-..."
-
-# Continuous monitoring (S+ and S tier models by default)
+|export NVIDIA_API_KEY="nvapi-..."
+|
+# Continuous monitoring (all models by default)
 nimakai
 
 # Single round, then exit
@@ -55,9 +54,6 @@ nimakai --once
 
 # Specific models only
 nimakai -m qwen/qwen3.5-122b-a10b,qwen/qwen3.5-397b-a17b
-
-# Filter by tier
-nimakai --tier A --once
 
 # Sort by stability score
 nimakai --sort stability
@@ -73,7 +69,8 @@ nimakai --once --json
 
 ```
 nimakai                    Continuous benchmark (default)
-nimakai catalog            List all 86 known models with tiers and metadata
+nimakai catalog            List all known models with metadata
+ nimakai catalog            List all known models with metadata
 nimakai recommend          Benchmark and recommend routing changes
 nimakai watch              Monitor OMO-routed models with alerts
 nimakai check              CI health check with exit codes
@@ -118,7 +115,6 @@ Each OMO category is scored using weighted criteria:
 | `A` | Sort by average latency |
 | `P` | Sort by P95 latency |
 | `S` | Sort by stability score |
-| `T` | Sort by tier |
 | `N` | Sort by model name |
 | `U` | Sort by uptime % |
 | `1-9` | Toggle favorite on Nth model |
@@ -155,12 +151,12 @@ nimakai proxy stop
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--once` | `-1` | Single round, then exit | continuous |
-| `--models` | `-m` | Comma-separated model IDs | S/S+ tier |
+| `--models` | `-m` | Comma-separated model IDs | all models |
+ | `--models` | `-m` | Comma-separated model IDs | all models |
 | `--interval` | `-i` | Ping interval in seconds | 5 |
 | `--timeout` | `-t` | Request timeout in seconds | 15 |
 | `--json` | `-j` | JSON output | table |
-| `--tier` | | Filter by tier family (S, A, B, C) | |
-| `--sort` | | Sort: avg, p95, stability, tier, name, uptime | avg |
+ | `--sort` | | Sort: avg, p95, stability, name, uptime | avg |
 | `--opencode` | | Use models from opencode.json | |
 | `--rounds` | `-r` | Benchmark rounds for recommend | 3 |
 | `--apply` | | Apply recommendations to oh-my-opencode.json | |
@@ -193,7 +189,6 @@ Optional config at `~/.config/nimakai/config.json`:
     "spike_ms": 3000
   },
   "profiles": {
-    "work": { "interval": 10, "tier_filter": "S", "rounds": 5 },
     "fast": { "timeout": 5 }
   },
   "favorites": []
@@ -218,7 +213,7 @@ src/
     cli.nim                CLI argument parsing with profiles
     metrics.nim            Pure metric functions (avg, p50, p95, p99, jitter, stability)
     ping.nim               HTTP ping + throughput measurement
-    catalog.nim            80-model catalog with SWE-bench tiers, O(1) index
+    catalog.nim            80-model catalog with SWE-bench scores, O(1) index
     display.nim            Table/JSON rendering, ANSI helpers
     config.nim             Config file persistence + profile loading
     history.nim            JSONL history persistence + trend detection

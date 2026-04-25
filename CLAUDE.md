@@ -1,6 +1,6 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.9.3. 80-model catalog with tier labels, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.13.2. 80-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
@@ -25,7 +25,7 @@ Single Nim binary with modules in `src/`:
 src/
   nimakai.nim   — Entry point, CLI dispatch (default/watch/check/discover/sync)
   metrics.nim   — Latency ring buffer, percentiles (P50/P95/P99), jitter, stability score
-  catalog.nim   — 80-model catalog with tier labels (S+/S/A+/A/A-/B+/B/C)
+  catalog.nim   — 80-model catalog with SWE-bench scores
   ping.nim      — HTTP ping to NIM endpoint, response time measurement
   display.nim   — Terminal UI: live metrics table, health state colors
   config.nim    — Config loading from nim.cfg / CLI flags, named benchmark profiles
