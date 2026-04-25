@@ -5,7 +5,7 @@
 config       := "/opt/nimakai/nimaproxy.toml"
 binary_name  := "nimaproxy"
 binary_src   := "nimaproxy/target/release/" + binary_name
-binary_dst   := "/opt/nimakai/nimaproxy-bin"
+binary_dst   := "/usr/local/bin/nimaproxy"
 service_name := "nimaproxy"
 
 # Default recipe
@@ -105,7 +105,22 @@ watch:
 
 # Run Nim tests
 test:
-	nimble test
+	nim c -d:ssl --path:src -r tests/test_types.nim
+	nim c -d:ssl --path:src -r tests/test_catalog.nim
+	nim c -d:ssl --path:src -r tests/test_cli.nim
+	nim c -d:ssl --path:src -r tests/test_config.nim
+	nim c -d:ssl --path:src -r tests/test_discovery.nim
+	nim c -d:ssl --path:src -r tests/test_display.nim
+	nim c -d:ssl --path:src -r tests/test_history.nim
+	nim c -d:ssl --path:src -r tests/test_integration.nim
+	nim c -d:ssl --path:src -r tests/test_metrics.nim
+	nim c -d:ssl --path:src -r tests/test_opencode.nim
+	nim c -d:ssl --path:src -r tests/test_ping.nim
+	nim c -d:ssl --path:src -r tests/test_proxy.nim
+	nim c -d:ssl --path:src -r tests/test_rechistory.nim
+	nim c -d:ssl --path:src -r tests/test_recommend.nim
+	nim c -d:ssl --path:src -r tests/test_sync.nim
+	nim c -d:ssl --path:src -r tests/test_watch.nim
 
 # Run nimaproxy Rust tests (lib only, no FFI)
 test-proxy:
