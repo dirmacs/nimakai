@@ -73,7 +73,7 @@ nimakai --once --json
 
 ```
 nimakai                    Continuous benchmark (default)
-nimakai catalog            List all 46 known models with tiers and metadata
+nimakai catalog            List all 86 known models with tiers and metadata
 nimakai recommend          Benchmark and recommend routing changes
 nimakai watch              Monitor OMO-routed models with alerts
 nimakai check              CI health check with exit codes
@@ -126,7 +126,7 @@ Each OMO category is scored using weighted criteria:
 
 ## Proxy Commands (FFI Integration)
 
-nimakai v0.10.0 includes FFI integration with nimaproxy, allowing you to start/stop/query the Rust key-rotation proxy directly from the Nim CLI:
+nimakai v0.13.2 includes FFI integration with nimaproxy, allowing you to start/stop/query the Rust key-rotation proxy directly from the Nim CLI:
 
 ```bash
 # Start the proxy daemon
