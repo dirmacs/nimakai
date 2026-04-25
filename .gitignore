@@ -51,3 +51,7 @@ rustping/target/
 # Racing configs (contain API keys)
 /nimaproxy_racing.toml
 /nimaproxy.toml.test
+
+# Sensitive files
+hermes_conversation_*.json
+omp-session-*.html
