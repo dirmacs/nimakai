@@ -39,9 +39,9 @@ suite "parseDiscoverResponse":
 
 suite "diffCatalog":
   let catalog = @[
-    ModelMeta(id: "model/a", name: "Model A", tier: tS, sweScore: 65.0, ctxSize: 131072),
-    ModelMeta(id: "model/b", name: "Model B", tier: tA, sweScore: 45.0, ctxSize: 32768),
-    ModelMeta(id: "model/c", name: "Model C", tier: tB, sweScore: 25.0, ctxSize: 32768),
+    ModelMeta(id: "model/a", name: "Model A", sweScore: 65.0, ctxSize: 131072),
+    ModelMeta(id: "model/b", name: "Model B", sweScore: 45.0, ctxSize: 32768),
+    ModelMeta(id: "model/c", name: "Model C", sweScore: 25.0, ctxSize: 32768),
   ]
 
   test "all matched when identical":

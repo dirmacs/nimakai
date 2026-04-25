@@ -9,14 +9,14 @@ proc defaultConfigPath*(): string =
 
 proc loadConfigFile*(path: string = ""): tuple[
     interval: int, timeout: int, models: seq[string],
-    tierFilter: string, thresholds: Thresholds,
+    thresholds: Thresholds,
     favorites: seq[string],
-    categoryWeights: seq[tuple[category: string, weights: CategoryWeights]]] =
-  ## Load config from file. Returns defaults if file doesn't exist.
+    categoryWeights: seq[tuple[category: string, weights: CategoryWeights]]
+] =
   result.interval = DefaultInterval
   result.timeout = DefaultTimeout
   result.models = @[]
-  result.tierFilter = ""
+
   result.thresholds = DefaultThresholds
   result.favorites = @[]
   result.categoryWeights = @[]
@@ -33,8 +33,7 @@ proc loadConfigFile*(path: string = ""): tuple[
     if data.hasKey("models"):
       for m in data["models"]:
         result.models.add(m.getStr())
-    if data.hasKey("tier_filter"):
-      result.tierFilter = data["tier_filter"].getStr("")
+
     if data.hasKey("thresholds"):
       let th = data["thresholds"]
       result.thresholds.perfectAvg = th{"perfect_avg"}.getFloat(400.0)
@@ -81,7 +80,7 @@ proc saveConfigFile*(path: string = "", favorites: seq[string] = @[],
     "interval": interval,
     "timeout": timeout,
     "models": newJArray(),
-    "tier_filter": newJNull(),
+    "models": newJArray(),
     "thresholds": {
       "perfect_avg": thresholds.perfectAvg,
       "perfect_p95": thresholds.perfectP95,
@@ -99,11 +98,11 @@ type
   ProfileOverrides* = object
     interval*: int
     timeout*: int
-    tierFilter*: string
+
     rounds*: int
     hasInterval*: bool
     hasTimeout*: bool
-    hasTierFilter*: bool
+
     hasRounds*: bool
 
 proc loadProfile*(name: string, path: string = ""): ProfileOverrides =
@@ -125,9 +124,7 @@ proc loadProfile*(name: string, path: string = ""): ProfileOverrides =
     if prof.hasKey("timeout"):
       result.timeout = prof["timeout"].getInt()
       result.hasTimeout = true
-    if prof.hasKey("tier_filter"):
-      result.tierFilter = prof["tier_filter"].getStr()
-      result.hasTierFilter = true
+
     if prof.hasKey("rounds"):
       result.rounds = prof["rounds"].getInt()
       result.hasRounds = true

@@ -22,34 +22,6 @@ suite "types":
     check $vNotActive == "Not Active"
     check $vUnstable == "Unstable"
 
-  test "Tier enum string values":
-    check $tSPlus == "S+"
-    check $tS == "S"
-    check $tAPlus == "A+"
-    check $tA == "A"
-    check $tAMinus == "A-"
-    check $tBPlus == "B+"
-    check $tB == "B"
-    check $tC == "C"
-
-  test "tierFamily returns correct letter":
-    check tierFamily(tSPlus) == 'S'
-    check tierFamily(tS) == 'S'
-    check tierFamily(tAPlus) == 'A'
-    check tierFamily(tA) == 'A'
-    check tierFamily(tAMinus) == 'A'
-    check tierFamily(tBPlus) == 'B'
-    check tierFamily(tB) == 'B'
-    check tierFamily(tC) == 'C'
-
-  test "tierOrd ordering":
-    check tierOrd(tSPlus) < tierOrd(tS)
-    check tierOrd(tS) < tierOrd(tAPlus)
-    check tierOrd(tAPlus) < tierOrd(tA)
-    check tierOrd(tA) < tierOrd(tAMinus)
-    check tierOrd(tAMinus) < tierOrd(tBPlus)
-    check tierOrd(tBPlus) < tierOrd(tB)
-    check tierOrd(tB) < tierOrd(tC)
 
   test "default ModelStats has zero values":
     var s: ModelStats

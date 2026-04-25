@@ -25,45 +25,17 @@ suite "BuiltinCatalog integrity":
     for m in BuiltinCatalog:
       check m.ctxSize > 0
 
-  test "tiers are ordered by SWE score ranges":
-    for m in BuiltinCatalog:
-      case m.tier
-      of tSPlus: check m.sweScore >= 70.0
-      of tS: check m.sweScore >= 60.0 and m.sweScore < 80.0
-      of tAPlus: check m.sweScore >= 50.0 and m.sweScore < 70.0
-      of tA: check m.sweScore >= 40.0 and m.sweScore < 60.0
-      of tAMinus: check m.sweScore >= 35.0 and m.sweScore < 45.0
-      of tBPlus: check m.sweScore >= 30.0 and m.sweScore < 40.0
-      of tB: check m.sweScore >= 20.0 and m.sweScore < 35.0
-      of tC: check m.sweScore < 20.0
 
 suite "lookupMeta":
   test "finds existing model":
     let result = BuiltinCatalog.lookupMeta("z-ai/glm4.7")
     check result.isSome
     check result.get.name == "GLM 4.7"
-    check result.get.tier == tSPlus
 
   test "returns none for unknown model":
     let result = BuiltinCatalog.lookupMeta("nonexistent/model")
     check result.isNone
 
-suite "filterByTier":
-  test "filter by S returns S+ and S models":
-    let filtered = BuiltinCatalog.filterByTier("S")
-    check filtered.len > 0
-    for m in filtered:
-      check m.tier in [tSPlus, tS]
-
-  test "filter by A returns A+, A, A- models":
-    let filtered = BuiltinCatalog.filterByTier("A")
-    check filtered.len > 0
-    for m in filtered:
-      check m.tier in [tAPlus, tA, tAMinus]
-
-  test "empty filter returns all":
-    let filtered = BuiltinCatalog.filterByTier("")
-    check filtered.len == BuiltinCatalog.len
 
 suite "loadCatalog":
   test "returns at least builtin models":
@@ -83,7 +55,6 @@ suite "loadUserModels":
       {
         "id": "custom/test-model",
         "name": "Test Model",
-        "tier": "A+",
         "sweScore": 55.0,
         "ctxSize": 65536,
         "thinking": true,
@@ -97,7 +68,7 @@ suite "loadUserModels":
     check models.len == 1
     check models[0].id == "custom/test-model"
     check models[0].name == "Test Model"
-    check models[0].tier == tAPlus
+
     check abs(models[0].sweScore - 55.0) < 0.01
     check models[0].ctxSize == 65536
     check models[0].thinking == true
@@ -110,8 +81,8 @@ suite "loadUserModels":
   test "loads multiple models":
     let tmpPath = getTempDir() / "nimakai_test_models_multi.json"
     let data = %*[
-      {"id": "custom/model-a", "name": "Model A", "tier": "S+", "sweScore": 72.0},
-      {"id": "custom/model-b", "name": "Model B", "tier": "C", "sweScore": 15.0},
+      {"id": "custom/model-a", "name": "Model A", "sweScore": 72.0},
+      {"id": "custom/model-b", "name": "Model B", "sweScore": 15.0},
     ]
     writeFile(tmpPath, $data)
     defer: removeFile(tmpPath)
@@ -119,21 +90,10 @@ suite "loadUserModels":
     let models = loadUserModels(tmpPath)
     check models.len == 2
     check models[0].id == "custom/model-a"
-    check models[0].tier == tSPlus
+
     check models[1].id == "custom/model-b"
-    check models[1].tier == tC
 
-  test "defaults tier to B for unknown tier string":
-    let tmpPath = getTempDir() / "nimakai_test_models_unk.json"
-    let data = %*[
-      {"id": "custom/unknown-tier", "tier": "Z"}
-    ]
-    writeFile(tmpPath, $data)
-    defer: removeFile(tmpPath)
 
-    let models = loadUserModels(tmpPath)
-    check models.len == 1
-    check models[0].tier == tB
 
   test "loadCatalog overrides builtin model with user model":
     let tmpPath = getTempDir() / "nimakai_test_override.json"
@@ -142,7 +102,6 @@ suite "loadUserModels":
       {
         "id": "z-ai/glm4.7",
         "name": "GLM 4.7 Custom",
-        "tier": "A",
         "sweScore": 45.0,
         "ctxSize": 32768,
       }
@@ -154,7 +113,7 @@ suite "loadUserModels":
     let meta = cat.lookupMeta("z-ai/glm4.7")
     check meta.isSome
     check meta.get.name == "GLM 4.7 Custom"
-    check meta.get.tier == tA
+
     check abs(meta.get.sweScore - 45.0) < 0.01
     check meta.get.ctxSize == 32768
 
@@ -178,7 +137,7 @@ suite "buildCatalogIndex":
       check fromIndex.isSome
       check fromLinear.isSome
       check fromIndex.get.id == fromLinear.get.id
-      check fromIndex.get.tier == fromLinear.get.tier
+  
 
 suite "printCatalogJson":
   test "produces valid JSON with all models":

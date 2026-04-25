@@ -15,7 +15,6 @@ proc parseArgs*(params: seq[string]): Config =
     dryRun: false,
     apiKey: "",
     subcommand: smBenchmark,
-    tierFilter: "",
     sortColumn: scAvg,
     useOpencode: false,
     rounds: 3,
@@ -35,7 +34,6 @@ proc parseArgs*(params: seq[string]): Config =
   if fileCfg.interval != DefaultInterval: result.interval = fileCfg.interval
   if fileCfg.timeout != DefaultTimeout: result.timeout = fileCfg.timeout
   if fileCfg.models.len > 0: result.models = fileCfg.models
-  if fileCfg.tierFilter.len > 0: result.tierFilter = fileCfg.tierFilter
   result.thresholds = fileCfg.thresholds
   result.categoryWeights = fileCfg.categoryWeights
 
@@ -69,9 +67,8 @@ proc parseArgs*(params: seq[string]): Config =
   const longNoVal = @["once", "json", "quiet", "no-history", "dry-run",
                        "apply", "rollback", "opencode", "help", "version",
                        "rec-history", "throughput", "fail-if-degraded"]
-  var cliSetInterval, cliSetTimeout, cliSetTierFilter, cliSetRounds = false
-  var p = initOptParser(params, shortNoVal = shortNoVal, longNoVal = longNoVal,
-                        mode = LaxMode)
+  var cliSetInterval, cliSetTimeout, cliSetRounds = false
+  var p = initOptParser(params, shortNoVal = shortNoVal, longNoVal = longNoVal, mode = LaxMode)
   while true:
     p.next()
     case p.kind
@@ -95,15 +92,11 @@ proc parseArgs*(params: seq[string]): Config =
           result.timeout = parseInt(p.val)
           cliSetTimeout = true
         except ValueError: discard
-      of "tier":
-        result.tierFilter = p.val
-        cliSetTierFilter = true
       of "sort":
         case p.val.toLowerAscii()
         of "avg", "a": result.sortColumn = scAvg
         of "p95", "p": result.sortColumn = scP95
         of "stability", "s": result.sortColumn = scStability
-        of "tier", "t": result.sortColumn = scTier
         of "name", "n": result.sortColumn = scName
         of "uptime", "u": result.sortColumn = scUptime
         else: discard
@@ -168,8 +161,7 @@ Options:
   --interval, -i <sec>   Ping interval (default: {DefaultInterval}s)
   --timeout, -t <sec>    Request timeout (default: {DefaultTimeout}s)
   --json, -j             Output JSON
-  --tier <S|A|B|C>       Filter models by tier family
-  --sort <col>           Sort: avg, p95, stability, tier, name, uptime
+  --sort <col>           Sort: avg, p95, stability, name, uptime
   --opencode             Use models from opencode.json
   --rounds, -r <n>       Benchmark rounds for recommend (default: 3)
   --apply                Apply recommendations to oh-my-opencode.json
@@ -187,7 +179,7 @@ Options:
   --version, -v          Show version
 
 Interactive keys (continuous mode):
-  A/P/S/T/N/U            Sort by avg/p95/stability/tier/name/uptime
+  A/P/S/N/U            Sort by avg/p95/stability/name/uptime
   1-9                    Toggle favorite on Nth model
   Q                      Quit
 
@@ -196,7 +188,6 @@ Environment:
 
 Examples:
   nimakai --once
-  nimakai catalog --tier S
   nimakai -m qwen/qwen3.5-122b-a10b,qwen/qwen3.5-397b-a17b
   nimakai recommend --rounds 5 --apply
   nimakai --opencode --json
@@ -220,8 +211,6 @@ Examples:
       result.interval = prof.interval
     if prof.hasTimeout and not cliSetTimeout:
       result.timeout = prof.timeout
-    if prof.hasTierFilter and not cliSetTierFilter:
-      result.tierFilter = prof.tierFilter
     if prof.hasRounds and not cliSetRounds:
       result.rounds = prof.rounds
 

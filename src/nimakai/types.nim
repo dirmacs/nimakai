@@ -32,15 +32,6 @@ type
     vNotActive = "Not Active"
     vUnstable = "Unstable"
 
-  Tier* = enum
-    tSPlus = "S+"
-    tS = "S"
-    tAPlus = "A+"
-    tA = "A"
-    tAMinus = "A-"
-    tBPlus = "B+"
-    tB = "B"
-    tC = "C"
 
   PingResult* = object
     health*: Health
@@ -64,7 +55,6 @@ type
   ModelMeta* = object
     id*: string
     name*: string
-    tier*: Tier
     sweScore*: float
     ctxSize*: int
     outputLimit*: int
@@ -127,7 +117,6 @@ type
     scAvg = "avg"
     scP95 = "p95"
     scStability = "stability"
-    scTier = "tier"
     scUptime = "uptime"
 
   Subcommand* = enum
@@ -159,7 +148,6 @@ type
     dryRun*: bool
     apiKey*: string
     subcommand*: Subcommand
-    tierFilter*: string
     sortColumn*: SortColumn
     useOpencode*: bool
     rounds*: int
@@ -210,22 +198,4 @@ proc samples*(stats: ModelStats): seq[float] =
   for i in 0..<stats.ringLen:
     result[i] = stats.ring[i]
 
-proc tierFamily*(t: Tier): char =
-  ## Get the tier family letter (S, A, B, C).
-  case t
-  of tSPlus, tS: 'S'
-  of tAPlus, tA, tAMinus: 'A'
-  of tBPlus, tB: 'B'
-  of tC: 'C'
 
-proc tierOrd*(t: Tier): int =
-  ## Numeric ordering for tiers (lower = better).
-  case t
-  of tSPlus: 0
-  of tS: 1
-  of tAPlus: 2
-  of tA: 3
-  of tAMinus: 4
-  of tBPlus: 5
-  of tB: 6
-  of tC: 7

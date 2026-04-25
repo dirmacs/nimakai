@@ -141,7 +141,6 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
           of 'a', 'A': sortCol = scAvg
           of 'p', 'P': sortCol = scP95
           of 's', 'S': sortCol = scStability
-          of 't', 'T': sortCol = scTier
           of 'n', 'N': sortCol = scName
           of 'u', 'U': sortCol = scUptime
           of '1'..'9':
@@ -525,8 +524,6 @@ proc main() =
   case cfg.subcommand
   of smCatalog:
     var filtered = cat
-    if cfg.tierFilter.len > 0:
-      filtered = filterByTier(cat, cfg.tierFilter)
     if cfg.jsonOutput:
       printCatalogJson(filtered)
     else:
@@ -594,18 +591,25 @@ proc main() =
       for m in ocModels:
         models.add(m.id)
     if models.len == 0:
-      # Default: use catalog models filtered by tier
-      if cfg.tierFilter.len > 0:
-        let filtered = filterByTier(cat, cfg.tierFilter)
-        models = catalogModelIds(filtered)
-      else:
-        # Default subset: S+ and S tier only
-        let filtered = filterByTier(cat, "S")
-        models = catalogModelIds(filtered)
+      # Default: fetch model list from NVIDIA API
+      if cfg.apiKey.len == 0:
+        stderr.writeLine "\e[31mError: NVIDIA_API_KEY required for default model discovery\e[0m"
+        stderr.writeLine "Set NVIDIA_API_KEY or use --models to specify models"
+        quit(1)
+      let fetchResult = fetchModelsFromAPI(cfg.apiKey, cfg.timeout)
+      if fetchResult.apiError.len > 0:
+        stderr.writeLine "\e[31mError fetching models: " & fetchResult.apiError & "\e[0m"
+        quit(1)
+      # Use all fetched model IDs as the default list
+      models = @[]
+      for m in fetchResult.newModels:
+        models.add(m.id)
+      for mId in fetchResult.existingModels:
+        models.add(mId)
 
     if models.len == 0:
       stderr.writeLine "\e[31mError: no models matched the filter\e[0m"
-      stderr.writeLine "Use --models, --tier, or --opencode to specify models"
+      stderr.writeLine "Use --models or --opencode to specify models"
       quit(1)
 
     if not cfg.quiet:
