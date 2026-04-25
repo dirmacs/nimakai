@@ -28,7 +28,7 @@ src/
   ping.nim      — HTTP ping: timed GET to NIM health endpoint, parse resp.code.int
   metrics.nim   — Ring buffer (last 100 samples), P50/P95/P99, jitter (stddev),
                   stability score 0–100 = composite of P95 + jitter + spike rate + uptime
-  catalog.nim   — 80-model catalog: model IDs, tier labels (S+ down to C), context windows
+  catalog.nim   — 80-model catalog: model IDs, context windows
   display.nim   — ncurses-style terminal table: live refresh, ANSI colors per health state
   config.nim    — Load nim.cfg, parse --profile flag, profile variable overrides
   recommend.nim — Score-based recommendation: given task type → best available model
@@ -110,13 +110,12 @@ Available racing models: z-ai/glm4.7, qwen/qwen3.5-397b-a17b, mistralai/devstral
 
 Health states: `UP`, `TIMEOUT`, `OVERLOADED`, `ERROR`, `NO_KEY`, `NOT_FOUND`
 Verdict labels: `Perfect`, `Normal`, `Slow`, `Spiky`, `Very Slow`, `Unstable`, `Not Active`
-Tiers: `S+` (SWE-bench >60%) → `S` → `A+` → `A` → `A-` → `B+` → `B` → `C`
 
 ## Common Tasks
 
 **Add a new model to the catalog:**
 1. Edit `src/catalog.nim` — add entry to `MODEL_CATALOG` sequence
-2. Set tier based on SWE-bench Verified score (or reasoning equivalent)
+ 2. Set SWE-bench Verified score (or reasoning equivalent)
 3. Run `nimble test` — `test_catalog.nim` validates catalog integrity
 4. Rebuild: `nimble build`
 
@@ -135,7 +134,7 @@ Tiers: `S+` (SWE-bench >60%) → `S` → `A+` → `A` → `A-` → `B+` → `B` 
 - **Nim over Rust** — name pun (NIM + Nim = nimakai), fast compile, small binary
 - **`resp.code.int` not `parseInt($resp.code)`** — Nim's `$HttpCode` returns "200 OK" not "200"; fixed in 0.9.1
 - **Ring buffer capped at 100** — balances memory and statistical relevance
-- **Hardcoded catalog, not fetched** — NIM API doesn't expose tier/capability metadata; catalog is curated manually
+**Hardcoded catalog, not fetched** — NIM API doesn't expose capbility metadata; catalog is curated manually
 - **`malebolgia` for parallel pinging** — concurrent HTTP without full async overhead
 
 ## Integration with oh-my-opencode
