@@ -126,26 +126,32 @@ proc loadUserModels*(path: string = ""): seq[ModelMeta] =
   if not fileExists(p): return @[]
   try:
     let data = parseJson(readFile(p))
-    for item in data:
-      var m: ModelMeta
-      m.id = item["id"].getStr()
-      m.name = item{"name"}.getStr(m.id)
-      let tierStr = item{"tier"}.getStr("B")
-      case tierStr
-      of "S+": m.tier = tSPlus
-      of "S": m.tier = tS
-      of "A+": m.tier = tAPlus
-      of "A": m.tier = tA
-      of "A-": m.tier = tAMinus
-      of "B+": m.tier = tBPlus
-      of "B": m.tier = tB
-      of "C": m.tier = tC
-      else: m.tier = tB
-      m.sweScore = item{"sweScore"}.getFloat(0.0)
-      m.ctxSize = item{"ctxSize"}.getInt(131072)
-      m.thinking = item{"thinking"}.getBool(false)
-      m.multimodal = item{"multimodal"}.getBool(false)
-      result.add(m)
+    var modelsJson: JsonNode
+    if data.kind == JObject and data.hasKey("models"):
+      modelsJson = data["models"]
+    else:
+      modelsJson = data
+    if modelsJson.kind == JArray:
+      for item in modelsJson:
+        var m: ModelMeta
+        m.id = item["id"].getStr()
+        m.name = item{"name"}.getStr(m.id)
+        let tierStr = item{"tier"}.getStr("B")
+        case tierStr
+        of "S+": m.tier = tSPlus
+        of "S": m.tier = tS
+        of "A+": m.tier = tAPlus
+        of "A": m.tier = tA
+        of "A-": m.tier = tAMinus
+        of "B+": m.tier = tBPlus
+        of "B": m.tier = tB
+        of "C": m.tier = tC
+        else: m.tier = tB
+        m.sweScore = item{"sweScore"}.getFloat(0.0)
+        m.ctxSize = item{"ctxSize"}.getInt(131072)
+        m.thinking = item{"thinking"}.getBool(false)
+        m.multimodal = item{"multimodal"}.getBool(false)
+        result.add(m)
   except CatchableError:
     discard
 
