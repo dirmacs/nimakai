@@ -51,6 +51,7 @@ proc parseArgs*(params: seq[string]): Config =
     of "watch": result.subcommand = smWatch
     of "check": result.subcommand = smCheck
     of "discover": result.subcommand = smDiscover
+    of "fetch": result.subcommand = smFetch
     of "proxy":
       result.subcommand = smProxy
       # Parse the proxy action (start/stop/status) — must be the next non-flag arg
@@ -142,6 +143,7 @@ Usage: nimakai [command] [options]
 Commands:
   (default)              Continuous benchmark
   catalog                List all known models with metadata
+  fetch                  Fetch and add new models from NVIDIA API
   recommend              Benchmark and recommend routing changes
   watch                  Monitor OMO-routed models with alerts
   check                  CI health check with exit codes

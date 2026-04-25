@@ -7,7 +7,7 @@ import posix/termios as term_mod
 import malebolgia
 import nimakai/[types, ping, catalog, display, config, history, metrics,
                 opencode, recommend, rechistory, sync, watch, discovery, cli,
-                rustffi, proxyffi]
+                rustffi, proxyffi, update]
 
 # --- Terminal raw mode for interactive sorting ---
 
@@ -396,6 +396,41 @@ proc runCheck(cfg: Config, cat: seq[ModelMeta]) =
   if degraded and cfg.failIfDegraded:
     quit(1)
 
+proc runFetch(cfg: Config, cat: seq[ModelMeta]) =
+  if cfg.apiKey.len == 0:
+    stderr.writeLine "\e[31mError: NVIDIA_API_KEY required\e[0m"
+    quit(1)
+
+  if not cfg.quiet:
+    stderr.writeLine "\e[1m nimakai\e[0m v{Version}"
+    stderr.writeLine "\e[90m  fetch mode | querying NVIDIA API for latest models\e[0m"
+    stderr.writeLine ""
+
+  # Check API key format
+  if not cfg.apiKey.startsWith("nvapi-"):
+    if not cfg.quiet:
+      stderr.writeLine "\e[33mWarning: API key should start with 'nvapi-'\e[0m"
+
+  let result = fetchModelsFromAPI(cfg.apiKey, cfg.timeout)
+  
+  if result.apiError.len > 0:
+    stderr.writeLine "\e[31mError fetching models: " & result.apiError & "\e[0m"
+    quit(1)
+  
+  # Update user models.json with new models
+  let numAdded = updateUserModels(result.newModels)
+  
+  # Print results
+  printFetchResults(result, cfg.jsonOutput)
+  
+  if numAdded > 0 and not cfg.jsonOutput:
+    stderr.writeLine "\e[32m✓ Added " & $numAdded & " new models to ~/.config/nimakai/models.json\e[0m"
+    stderr.writeLine ""
+    stderr.writeLine "Next steps:"
+    stderr.writeLine "  - Review new models in your configuration"
+    stderr.writeLine "  - Run 'nimakai catalog' to see all available models"
+    stderr.writeLine "  - Use '--models' flag to include new models in benchmarks"
+
 proc runProxy(cfg: Config) =
   case cfg.proxyAction
   of paStart:
@@ -535,6 +570,10 @@ proc main() =
       echo discoveryToJson(discovered, cat)
     else:
       printDiscovery(discovered, cat)
+    return
+
+  of smFetch:
+    runFetch(cfg, cat)
     return
 
   of smProxy:
