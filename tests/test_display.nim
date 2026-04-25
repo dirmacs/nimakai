@@ -95,9 +95,9 @@ proc makeDisplayStats(id: string, pings: openArray[float], fav: bool = false): M
 
 suite "sortStats":
   let cat = @[
-    ModelMeta(id: "alpha", name: "Alpha", tier: tSPlus, sweScore: 78.0, ctxSize: 131072),
-    ModelMeta(id: "beta", name: "Beta", tier: tA, sweScore: 45.0, ctxSize: 131072),
-    ModelMeta(id: "gamma", name: "Gamma", tier: tS, sweScore: 65.0, ctxSize: 131072),
+    ModelMeta(id: "alpha", name: "Alpha", sweScore: 78.0, ctxSize: 131072),
+    ModelMeta(id: "beta", name: "Beta", sweScore: 45.0, ctxSize: 131072),
+    ModelMeta(id: "gamma", name: "Gamma", sweScore: 65.0, ctxSize: 131072),
   ]
   let th = DefaultThresholds
 
@@ -123,16 +123,6 @@ suite "sortStats":
     check stats[1].id == "beta"
     check stats[2].id == "gamma"
 
-  test "sort by tier ascending (lower tier ordinal first)":
-    var stats = @[
-      makeDisplayStats("beta", [100.0]),   # tA = ord 3
-      makeDisplayStats("gamma", [100.0]),  # tS = ord 1
-      makeDisplayStats("alpha", [100.0]),  # tSPlus = ord 0
-    ]
-    sortStats(stats, scTier, cat, th)
-    check stats[0].id == "alpha"   # S+
-    check stats[1].id == "gamma"   # S
-    check stats[2].id == "beta"    # A
 
   test "sort by uptime descending":
     var stats = @[

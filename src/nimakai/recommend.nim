@@ -143,11 +143,6 @@ proc recommend*(stats: seq[ModelStats], cat: seq[ModelMeta],
         elif diff < -5:
           parts.add(&"{-diff}% higher avg latency")
 
-      if bestMeta.isSome and currentMeta.isSome:
-        if bestMeta.get.tier != currentMeta.get.tier:
-          parts.add(&"tier {bestMeta.get.tier} vs {currentMeta.get.tier}")
-        elif bestMeta.get.tier == currentMeta.get.tier:
-          parts.add(&"same {bestMeta.get.tier} tier")
 
       let bestStab = if foundBest: bestStats.stabilityScore(th) else: -1
       let curStab = if foundCur: curStats.stabilityScore(th) else: -1

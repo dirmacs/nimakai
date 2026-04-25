@@ -104,7 +104,6 @@ suite "full recommend pipeline":
     let cat = loadCatalog()
     var bestId = ""
     for m in cat:
-      if m.tier == tSPlus:
         bestId = m.id
         break
 
@@ -216,9 +215,9 @@ suite "config → recommend weights pipeline":
     check cfg.categoryWeights[0].weights.speed == 1.0
 
     # Create two models: one fast with low SWE, one slow with high SWE
-    let fastMeta = ModelMeta(id: "fast-model", name: "Fast", tier: tB,
+    let fastMeta = ModelMeta(id: "fast-model", name: "Fast",
                              sweScore: 20.0, ctxSize: 32768)
-    let slowMeta = ModelMeta(id: "slow-model", name: "Slow", tier: tSPlus,
+    let slowMeta = ModelMeta(id: "slow-model", name: "Slow",
                              sweScore: 78.0, ctxSize: 131072)
 
     let fastStats = makeStats("fast-model", [100.0, 110.0, 105.0])

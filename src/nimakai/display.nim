@@ -62,15 +62,6 @@ proc verdictColor*(v: Verdict): string =
   of vUnstable: "\e[31;1m" & s & "\e[0m"
   of vPending: "\e[90m" & s & "\e[0m"
 
-proc tierColor*(t: Tier): string =
-  let s = $t
-  case t
-  of tSPlus: "\e[32;1m" & s & "\e[0m"
-  of tS: "\e[32m" & s & "\e[0m"
-  of tAPlus, tA: "\e[36m" & s & "\e[0m"
-  of tAMinus: "\e[33m" & s & "\e[0m"
-  of tBPlus, tB: "\e[90m" & s & "\e[0m"
-  of tC: "\e[90m" & s & "\e[0m"
 
 proc sortStats*(stats: var seq[ModelStats], col: SortColumn,
                 cat: seq[ModelMeta], th: Thresholds = DefaultThresholds) =
@@ -90,12 +81,6 @@ proc sortStats*(stats: var seq[ModelStats], col: SortColumn,
       let sa = a.stabilityScore(th)
       let sb = b.stabilityScore(th)
       return cmp(sb, sa) # descending
-    of scTier:
-      let ma = cat.lookupMeta(a.id)
-      let mb = cat.lookupMeta(b.id)
-      let ta = if ma.isSome: tierOrd(ma.get.tier) else: 99
-      let tb = if mb.isSome: tierOrd(mb.get.tier) else: 99
-      return cmp(ta, tb)
     of scUptime:
       return cmp(b.uptime(), a.uptime()) # descending
   )
@@ -105,7 +90,7 @@ proc printTable*(stats: seq[ModelStats], round: int,
                  th: Thresholds = DefaultThresholds) =
   let tw = termWidth()
   # Adapt model name column: fixed columns need ~82 chars, rest goes to model name
-  let fixedCols = 5 + 10 + 10 + 10 + 10 + 6 + 2 + 12 + 12 + 7 + 2 # prefix
+  let fixedCols = 10 + 10 + 10 + 10 + 6 + 2 + 12 + 12 + 7 + 2 # prefix
   let nameWidth = max(15, min(45, tw - fixedCols))
   let sepWidth = min(tw - 4, nameWidth + fixedCols - 2)
 
@@ -116,7 +101,6 @@ proc printTable*(stats: seq[ModelStats], round: int,
 
   let header = "  " &
     padRight("MODEL", nameWidth) &
-    padLeft("TIER", 5) &
     padLeft("LATEST", 10) &
     padLeft("AVG", 10) &
     padLeft("P95", 10) &
@@ -136,11 +120,6 @@ proc printTable*(stats: seq[ModelStats], round: int,
     let prefix = if s.favorite: "* " else: "  "
     var line = prefix & padRight(displayName, nameWidth)
 
-    # Tier column
-    if meta.isSome:
-      line &= padLeftAnsi(tierColor(meta.get.tier), 5)
-    else:
-      line &= padLeft("-", 5)
 
     if s.ringLen > 0:
       line &= padLeftAnsi(colorLatency(s.lastMs), 10)
@@ -174,7 +153,7 @@ proc printTable*(stats: seq[ModelStats], round: int,
     echo line
 
   echo ""
-  echo "\e[90m  sort: [A]vg [P]95 [S]tability [T]ier [N]ame [U]ptime | [Q]uit\e[0m"
+  echo "\e[90m  sort: [A]vg [P]95 [S]tability [N]ame [U]ptime | [Q]uit\e[0m"
   echo ""
 
 proc printJson*(stats: seq[ModelStats], round: int, cat: seq[ModelMeta],
@@ -182,12 +161,11 @@ proc printJson*(stats: seq[ModelStats], round: int, cat: seq[ModelMeta],
   var results = newJArray()
   for s in stats:
     let meta = cat.lookupMeta(s.id)
-    let tierStr = if meta.isSome: $meta.get.tier else: ""
     let sweScore = if meta.isSome: meta.get.sweScore else: 0.0
+
     results.add(%*{
       "model": s.id,
       "name": s.name,
-      "tier": tierStr,
       "swe_score": sweScore,
       "latest_ms": if s.ringLen > 0: s.lastMs else: 0.0,
       "avg_ms": s.avg(),

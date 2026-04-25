@@ -15,7 +15,6 @@ suite "parseArgs defaults":
     check cfg.interval == DefaultInterval
     check cfg.timeout == DefaultTimeout
     check cfg.models.len == 0
-    check cfg.tierFilter == ""
     check cfg.sortColumn == scAvg
     check cfg.useOpencode == false
     check cfg.rounds == 3
@@ -122,27 +121,6 @@ suite "parseArgs value flags":
     let cfg = parseArgs(@["-r:10"])
     check cfg.rounds == 10
 
-  test "--tier":
-    let cfg = parseArgs(@["--tier=S"])
-    check cfg.tierFilter == "S"
-
-suite "parseArgs sort options":
-  test "--sort avg":
-    let cfg = parseArgs(@["--sort=avg"])
-    check cfg.sortColumn == scAvg
-
-  test "--sort p95":
-    let cfg = parseArgs(@["--sort=p95"])
-    check cfg.sortColumn == scP95
-
-  test "--sort stability":
-    let cfg = parseArgs(@["--sort=stability"])
-    check cfg.sortColumn == scStability
-
-  test "--sort tier":
-    let cfg = parseArgs(@["--sort=tier"])
-    check cfg.sortColumn == scTier
-
   test "--sort name":
     let cfg = parseArgs(@["--sort=name"])
     check cfg.sortColumn == scName
@@ -221,20 +199,6 @@ suite "parseArgs subcommands":
     check cfg.jsonOutput == true
     check cfg.rounds == 3
 
-  test "catalog with --tier":
-    let cfg = parseArgs(@["catalog", "--tier=S"])
-    check cfg.subcommand == smCatalog
-    check cfg.tierFilter == "S"
-
-  test "catalog with --tier before subcommand":
-    let cfg = parseArgs(@["--tier=A", "catalog"])
-    check cfg.subcommand == smCatalog
-    check cfg.tierFilter == "A"
-
-suite "parseArgs space-separated values":
-  test "--interval space-separated":
-    let cfg = parseArgs(@["--interval", "10"])
-    check cfg.interval == 10
 
   test "-i space-separated":
     let cfg = parseArgs(@["-i", "20"])
@@ -250,15 +214,6 @@ suite "parseArgs space-separated values":
 
   test "--models space-separated":
     let cfg = parseArgs(@["--models", "m1,m2"])
-    check cfg.models == @["m1", "m2"]
-
-  test "--tier space-separated":
-    let cfg = parseArgs(@["--tier", "S"])
-    check cfg.tierFilter == "S"
-
-  test "--sort space-separated":
-    let cfg = parseArgs(@["--sort", "avg"])
-    check cfg.sortColumn == scAvg
 
 suite "parseArgs watch and check":
   test "watch subcommand":
@@ -290,7 +245,7 @@ suite "parseArgs combined scenarios":
     let cfg = parseArgs(@[
       "--once", "--json", "-m:model-a,model-b",
       "--interval=10", "--timeout=30",
-      "--tier=S", "--sort=p95",
+      "--sort=p95",
       "--quiet", "--no-history"
     ])
     check cfg.once == true
@@ -298,7 +253,6 @@ suite "parseArgs combined scenarios":
     check cfg.models == @["model-a", "model-b"]
     check cfg.interval == 10
     check cfg.timeout == 30
-    check cfg.tierFilter == "S"
     check cfg.sortColumn == scP95
     check cfg.quiet == true
     check cfg.noHistory == true

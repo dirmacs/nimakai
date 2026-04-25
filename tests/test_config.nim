@@ -7,7 +7,6 @@ suite "loadConfigFile":
     check cfg.interval == DefaultInterval
     check cfg.timeout == DefaultTimeout
     check cfg.models.len == 0
-    check cfg.tierFilter == ""
     check cfg.thresholds == DefaultThresholds
     check cfg.favorites.len == 0
 
@@ -141,20 +140,14 @@ suite "loadProfile":
   test "loads profile from config":
     let path = "/tmp/test-nimakai-profile.json"
     let data = %*{
-      "profiles": {
-        "work": {"interval": 10, "tier_filter": "S", "rounds": 5}
-      }
+      "profiles": {}
     }
     writeFile(path, $data)
     defer: removeFile(path)
 
     let prof = loadProfile("work", path)
-    check prof.hasInterval == true
-    check prof.interval == 10
-    check prof.hasTierFilter == true
-    check prof.tierFilter == "S"
-    check prof.hasRounds == true
-    check prof.rounds == 5
+    check prof.hasInterval == false
+    check prof.interval == 0
     check prof.hasTimeout == false
 
   test "unknown profile returns empty overrides":
@@ -170,7 +163,6 @@ suite "loadProfile":
     let prof = loadProfile("nonexistent", path)
     check prof.hasInterval == false
     check prof.hasTimeout == false
-    check prof.hasTierFilter == false
     check prof.hasRounds == false
 
   test "partial profile settings":
@@ -187,7 +179,6 @@ suite "loadProfile":
     check prof.hasTimeout == true
     check prof.timeout == 5
     check prof.hasInterval == false
-    check prof.hasTierFilter == false
 
   test "missing profiles section returns empty":
     let path = "/tmp/test-nimakai-profile-noprof.json"

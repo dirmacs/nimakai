@@ -34,23 +34,23 @@ suite "categorizeNeed":
 suite "scoreModel":
   test "fast model scores high for speed need":
     let stats = makeStats("fast/model", [100.0, 110.0, 105.0])
-    let meta = ModelMeta(id: "fast/model", name: "Fast", tier: tS,
+    let meta = ModelMeta(id: "fast/model", name: "Fast",
                          sweScore: 65.0, ctxSize: 131072)
     let score = scoreModel(stats, meta, cnSpeed)
     check score > 50
 
   test "high SWE model scores high for quality need":
     let stats = makeStats("quality/model", [500.0, 600.0, 550.0])
-    let meta = ModelMeta(id: "quality/model", name: "Quality", tier: tSPlus,
+    let meta = ModelMeta(id: "quality/model", name: "Quality",
                          sweScore: 78.0, ctxSize: 262144)
     let score = scoreModel(stats, meta, cnQuality)
     check score > 50
 
   test "non-multimodal model penalized for vision need":
     let stats = makeStats("text/model", [200.0, 210.0, 205.0])
-    let textMeta = ModelMeta(id: "text/model", name: "Text", tier: tSPlus,
+    let textMeta = ModelMeta(id: "text/model", name: "Text",
                              sweScore: 75.0, ctxSize: 131072, multimodal: false)
-    let visionMeta = ModelMeta(id: "vision/model", name: "Vision", tier: tSPlus,
+    let visionMeta = ModelMeta(id: "vision/model", name: "Vision",
                                sweScore: 75.0, ctxSize: 131072, multimodal: true)
 
     let textScore = scoreModel(stats, textMeta, cnVision)
@@ -60,9 +60,9 @@ suite "scoreModel":
 suite "recommend":
   test "recommends faster model for quick category":
     let cat = @[
-      ModelMeta(id: "fast/model", name: "Fast", tier: tSPlus,
+      ModelMeta(id: "fast/model", name: "Fast",
                 sweScore: 72.0, ctxSize: 131072),
-      ModelMeta(id: "slow/model", name: "Slow", tier: tSPlus,
+      ModelMeta(id: "slow/model", name: "Slow",
                 sweScore: 74.0, ctxSize: 131072),
     ]
     let stats = @[
@@ -80,7 +80,7 @@ suite "recommend":
 
   test "keeps optimal model":
     let cat = @[
-      ModelMeta(id: "best/model", name: "Best", tier: tSPlus,
+      ModelMeta(id: "best/model", name: "Best",
                 sweScore: 78.0, ctxSize: 262144),
     ]
     let stats = @[
@@ -98,9 +98,9 @@ suite "recommend":
 
   test "prefers multimodal for vision category":
     let cat = @[
-      ModelMeta(id: "text/model", name: "Text", tier: tSPlus,
+      ModelMeta(id: "text/model", name: "Text",
                 sweScore: 78.0, ctxSize: 131072, multimodal: false),
-      ModelMeta(id: "vision/model", name: "Vision", tier: tS,
+      ModelMeta(id: "vision/model", name: "Vision",
                 sweScore: 65.0, ctxSize: 131072, multimodal: true),
     ]
     let stats = @[
@@ -175,7 +175,7 @@ suite "recommendationsToJson":
 suite "custom weights":
   test "custom weights override defaults in scoreModel":
     let stats = makeStats("test/model", [300.0, 320.0, 310.0])
-    let meta = ModelMeta(id: "test/model", name: "Test", tier: tS,
+    let meta = ModelMeta(id: "test/model", name: "Test",
                          sweScore: 70.0, ctxSize: 131072)
     let defaultScore = scoreModel(stats, meta, cnBalance)
     let speedOnlyWeights = CategoryWeights(swe: 0.0, speed: 1.0,
@@ -186,7 +186,7 @@ suite "custom weights":
 
   test "zero custom weights fall back to defaults":
     let stats = makeStats("test/model", [300.0, 320.0, 310.0])
-    let meta = ModelMeta(id: "test/model", name: "Test", tier: tS,
+    let meta = ModelMeta(id: "test/model", name: "Test",
                          sweScore: 70.0, ctxSize: 131072)
     let defaultScore = scoreModel(stats, meta, cnBalance)
     let zeroWeights = CategoryWeights(swe: 0.0, speed: 0.0,
@@ -201,9 +201,9 @@ suite "custom weights":
     # so high-swe model wins by default. With speed-only weights,
     # the fast model should win instead.
     let cat = @[
-      ModelMeta(id: "fast/model", name: "Fast", tier: tS,
+      ModelMeta(id: "fast/model", name: "Fast",
                 sweScore: 50.0, ctxSize: 131072),
-      ModelMeta(id: "smart/model", name: "Smart", tier: tSPlus,
+      ModelMeta(id: "smart/model", name: "Smart",
                 sweScore: 80.0, ctxSize: 262144),
     ]
     let stats = @[
@@ -256,9 +256,9 @@ suite "classifyAgentNeed":
 suite "recommendAgents":
   test "recommends for agents":
     let cat = @[
-      ModelMeta(id: "fast/model", name: "Fast", tier: tSPlus,
+      ModelMeta(id: "fast/model", name: "Fast",
                 sweScore: 72.0, ctxSize: 131072),
-      ModelMeta(id: "slow/model", name: "Slow", tier: tSPlus,
+      ModelMeta(id: "slow/model", name: "Slow",
                 sweScore: 74.0, ctxSize: 131072),
     ]
     let stats = @[
@@ -275,7 +275,7 @@ suite "recommendAgents":
     check recs[0].recommendedModel == "fast/model"
 
   test "empty agents returns empty":
-    let cat = @[ModelMeta(id: "m", name: "M", tier: tS, sweScore: 60.0, ctxSize: 131072)]
+    let cat = @[ModelMeta(id: "m", name: "M", sweScore: 60.0, ctxSize: 131072)]
     let stats = @[makeStats("m", [100.0])]
     let omo = OmoConfig(agents: @[], categories: @[])
     let recs = recommendAgents(stats, cat, omo)
@@ -284,9 +284,9 @@ suite "recommendAgents":
 suite "thinking and output limit scoring":
   test "thinking bonus for quality":
     let stats = makeStats("test/model", [300.0, 320.0, 310.0])
-    let thinkMeta = ModelMeta(id: "test/model", name: "Think", tier: tS,
+    let thinkMeta = ModelMeta(id: "test/model", name: "Think",
                               sweScore: 70.0, ctxSize: 131072, thinking: true)
-    let noThinkMeta = ModelMeta(id: "test/model", name: "NoThink", tier: tS,
+    let noThinkMeta = ModelMeta(id: "test/model", name: "NoThink",
                                 sweScore: 70.0, ctxSize: 131072, thinking: false)
     let thinkScore = scoreModel(stats, thinkMeta, cnQuality)
     let noThinkScore = scoreModel(stats, noThinkMeta, cnQuality)
@@ -294,9 +294,9 @@ suite "thinking and output limit scoring":
 
   test "no thinking bonus for speed":
     let stats = makeStats("test/model", [300.0, 320.0, 310.0])
-    let thinkMeta = ModelMeta(id: "test/model", name: "Think", tier: tS,
+    let thinkMeta = ModelMeta(id: "test/model", name: "Think",
                               sweScore: 70.0, ctxSize: 131072, thinking: true)
-    let noThinkMeta = ModelMeta(id: "test/model", name: "NoThink", tier: tS,
+    let noThinkMeta = ModelMeta(id: "test/model", name: "NoThink",
                                 sweScore: 70.0, ctxSize: 131072, thinking: false)
     let thinkScore = scoreModel(stats, thinkMeta, cnSpeed)
     let noThinkScore = scoreModel(stats, noThinkMeta, cnSpeed)
@@ -304,9 +304,9 @@ suite "thinking and output limit scoring":
 
   test "output limit penalty for quality":
     let stats = makeStats("test/model", [300.0, 320.0, 310.0])
-    let lowLimit = ModelMeta(id: "test/model", name: "Low", tier: tS,
+    let lowLimit = ModelMeta(id: "test/model", name: "Low",
                              sweScore: 70.0, ctxSize: 131072, outputLimit: 4096)
-    let highLimit = ModelMeta(id: "test/model", name: "High", tier: tS,
+    let highLimit = ModelMeta(id: "test/model", name: "High",
                               sweScore: 70.0, ctxSize: 131072, outputLimit: 16384)
     let lowScore = scoreModel(stats, lowLimit, cnQuality)
     let highScore = scoreModel(stats, highLimit, cnQuality)
@@ -314,9 +314,9 @@ suite "thinking and output limit scoring":
 
   test "no output limit penalty for speed":
     let stats = makeStats("test/model", [300.0, 320.0, 310.0])
-    let lowLimit = ModelMeta(id: "test/model", name: "Low", tier: tS,
+    let lowLimit = ModelMeta(id: "test/model", name: "Low",
                              sweScore: 70.0, ctxSize: 131072, outputLimit: 4096)
-    let noLimit = ModelMeta(id: "test/model", name: "None", tier: tS,
+    let noLimit = ModelMeta(id: "test/model", name: "None",
                             sweScore: 70.0, ctxSize: 131072, outputLimit: 0)
     let lowScore = scoreModel(stats, lowLimit, cnSpeed)
     let noScore = scoreModel(stats, noLimit, cnSpeed)
@@ -340,7 +340,7 @@ suite "agentRecommendationsToJson":
 suite "uptime scoring":
   test "100% uptime leaves score unchanged":
     let stats = makeStats("test/model", [300.0, 320.0, 310.0], total = 3, success = 3)
-    let meta = ModelMeta(id: "test/model", name: "Test", tier: tS,
+    let meta = ModelMeta(id: "test/model", name: "Test",
                          sweScore: 70.0, ctxSize: 131072)
     let score = scoreModel(stats, meta, cnBalance)
     # With 100% uptime, multiplier is 1.0, so score should be same as base
@@ -349,7 +349,7 @@ suite "uptime scoring":
   test "50% uptime significantly reduces score":
     let fullUp = makeStats("a", [300.0, 320.0, 310.0], total = 3, success = 3)
     let halfUp = makeStats("b", [300.0, 320.0, 310.0], total = 6, success = 3)
-    let meta = ModelMeta(id: "a", name: "Test", tier: tS,
+    let meta = ModelMeta(id: "a", name: "Test",
                          sweScore: 70.0, ctxSize: 131072)
     let scoreFull = scoreModel(fullUp, meta, cnBalance)
     let scoreHalf = scoreModel(halfUp, meta, cnBalance)
@@ -359,7 +359,7 @@ suite "uptime scoring":
 
   test "0% uptime zeroes score":
     let stats = makeStats("test/model", [300.0, 320.0, 310.0], total = 3, success = 0)
-    let meta = ModelMeta(id: "test/model", name: "Test", tier: tS,
+    let meta = ModelMeta(id: "test/model", name: "Test",
                          sweScore: 70.0, ctxSize: 131072)
     let score = scoreModel(stats, meta, cnBalance)
     check score == 0.0
