@@ -1774,3 +1774,151 @@ fn log_turn_request(
     
     log_turn_event(&turn);
 }
+/// POST /v1/completions — legacy completions endpoint
+pub async fn completions(
+    State(state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    eprintln!("[nimaproxy] POST /v1/completions");
+    let model_id = if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+        v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string()
+    } else { String::new() };
+    let n = state.pool.len().min(MAX_RETRIES).max(1);
+    eprintln!("[nimaproxy] POST /v1/completions - got n={}", n);
+    for _ in 0..n {
+        let Some((key, idx)) = state.pool.next_key() else {
+            return (StatusCode::TOO_MANY_REQUESTS, "all keys rate-limited").into_response();
+        };
+        eprintln!("[nimaproxy] POST /v1/completions - about to send request");
+        let t0 = Instant::now();
+        let result = state.client.post(format!("{}/v1/completions", state.target)).header("Authorization", format!("Bearer {}", key)).header("Content-Type", "application/json").body(body.clone()).send().await;
+        match result {
+            Err(e) => {
+                if let Some(label) = state.pool.get_key_label(idx) {
+                    state.model_stats.record_with_key(&model_id, &label, t0.elapsed().as_millis() as f64, false);
+                } else {
+                    state.model_stats.record(&model_id, t0.elapsed().as_millis() as f64, false);
+                }
+                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let ok = status.is_success();
+                let ttfc_ms = t0.elapsed().as_millis() as f64;
+                let resp_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let content_type = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
+                let stream = resp.bytes_stream().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                let collected = match stream.try_collect::<Vec<Bytes>>().await {
+                    Ok(c) => c,
+                    Err(e) => { return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(); }
+                };
+                let full_body = collected.concat();
+                let (output_tokens, repetition_count, had_tool_call) = extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
+                if output_tokens > 0 || repetition_count > 0 {
+                    if let Some(label) = state.pool.get_key_label(idx) {
+                        state.model_stats.record_with_circuit_breaker(&model_id, ttfc_ms, ok, output_tokens, repetition_count, had_tool_call);
+                    } else {
+                        state.model_stats.record_with_circuit_breaker(&model_id, ttfc_ms, ok, output_tokens, repetition_count, had_tool_call);
+                    }
+                } else {
+                    if let Some(label) = state.pool.get_key_label(idx) {
+                        state.model_stats.record_with_key(&model_id, &label, ttfc_ms, ok);
+                    } else {
+                        state.model_stats.record(&model_id, ttfc_ms, ok);
+                    }
+                }
+                let body = Body::from(full_body);
+                let mut response = Response::new(body);
+                *response.status_mut() = resp_status;
+                response.headers_mut().insert("content-type", HeaderValue::from_str(&content_type).unwrap_or_else(|_| HeaderValue::from_static("application/json")));
+                if let Some(label) = state.pool.get_key_label(idx) {
+                    response.headers_mut().insert("x-key-label", HeaderValue::from_str(&label).unwrap_or_else(|_| HeaderValue::from_static("unknown")));
+                }
+                return response;
+            }
+        }
+    }
+    (StatusCode::TOO_MANY_REQUESTS, "all keys exhausted after retries").into_response()
+}
+
+/// POST /v1/embeddings — embeddings endpoint
+pub async fn embeddings(
+    State(state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    eprintln!("[nimaproxy] POST /v1/embeddings");
+    let model_id = if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+        v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string()
+    } else { String::new() };
+    let n = state.pool.len().min(MAX_RETRIES).max(1);
+    for _ in 0..n {
+        let Some((key, idx)) = state.pool.next_key() else {
+            return (StatusCode::TOO_MANY_REQUESTS, "all keys rate-limited").into_response();
+        };
+        let t0 = Instant::now();
+        let result = state.client.post(format!("{}/v1/embeddings", state.target)).header("Authorization", format!("Bearer {}", key)).header("Content-Type", "application/json").body(body.clone()).send().await;
+        match result {
+            Err(e) => {
+                if let Some(label) = state.pool.get_key_label(idx) {
+                    state.model_stats.record_with_key(&model_id, &label, t0.elapsed().as_millis() as f64, false);
+                } else {
+                    state.model_stats.record(&model_id, t0.elapsed().as_millis() as f64, false);
+                }
+                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let ok = status.is_success();
+                let ttfc_ms = t0.elapsed().as_millis() as f64;
+                let resp_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let content_type = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
+                let stream = resp.bytes_stream().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                let collected = match stream.try_collect::<Vec<Bytes>>().await {
+                    Ok(c) => c,
+                    Err(e) => { return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(); }
+                };
+                let full_body = collected.concat();
+                if let Some(label) = state.pool.get_key_label(idx) {
+                    state.model_stats.record_with_key(&model_id, &label, ttfc_ms, ok);
+                } else {
+                    state.model_stats.record(&model_id, ttfc_ms, ok);
+                }
+                let body = Body::from(full_body);
+                let mut response = Response::new(body);
+                *response.status_mut() = resp_status;
+                response.headers_mut().insert("content-type", HeaderValue::from_str(&content_type).unwrap_or_else(|_| HeaderValue::from_static("application/json")));
+                if let Some(label) = state.pool.get_key_label(idx) {
+                    response.headers_mut().insert("x-key-label", HeaderValue::from_str(&label).unwrap_or_else(|_| HeaderValue::from_static("unknown")));
+                }
+                return response;
+            }
+        }
+    }
+    (StatusCode::TOO_MANY_REQUESTS, "all keys exhausted after retries").into_response()
+}
+
+/// GET /props — tool capability discovery endpoint (for OMP compatibility)
+pub async fn props() -> Response {
+    eprintln!("[nimaproxy] GET /props");
+    let props = serde_json::json!({
+        "contextWindow": 8192,
+        "input": true,
+        "supports_developer_role": true,
+        "supports_tool_messages": true,
+        "supports_tool_calls": true,
+        "supports_embeddings": true,
+        "supports_completions": true,
+        "supported_roles": ["user", "assistant", "system", "tool", "developer", "function"],
+        "tool_capabilities": {
+            "function_calling": true,
+            "code_interpreter": false,
+            "image_generation": false
+        }
+    });
+    let body = Body::from(props.to_string());
+    let mut response = Response::new(body);
+    response.headers_mut().insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}

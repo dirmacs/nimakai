@@ -157,6 +157,9 @@ info!("Turn logging initialized");
         .route("/v1/models", get(nimaproxy::proxy::models))
         .route("/health", get(nimaproxy::proxy::health))
         .route("/stats", get(nimaproxy::proxy::stats))
+        .route("/v1/completions", post(nimaproxy::proxy::completions))
+        .route("/v1/embeddings", post(nimaproxy::proxy::embeddings))
+        .route("/props", get(nimaproxy::proxy::props))
         .fallback(fallback_handler)
         .with_state(state.clone());
 
@@ -188,7 +191,7 @@ info!("Turn logging initialized");
             state.racing_models.len(), state.racing_max_parallel, state.racing_timeout_ms, state.racing_strategy);
     }
 
-    println!("  routes : POST /v1/chat/completions GET /v1/models GET /health GET /stats");
+    println!("  routes : POST /v1/chat/completions POST /v1/completions POST /v1/embeddings GET /v1/models GET /props GET /health GET /stats");
 
     let listener = tokio::net::TcpListener::bind(&listen)
         .await

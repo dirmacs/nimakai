@@ -10,6 +10,7 @@ pub mod mock_http;
 
 pub use proxy::validate_model_exists;
 
+pub use proxy::{completions, embeddings, props};
 pub use config::{load as config_load, Config, KeyEntry, ModelParams, RoutingConfig};
 pub use key_pool::KeyPool;
 pub use model_router::{ModelRouter, Strategy};
