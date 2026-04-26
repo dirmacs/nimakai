@@ -114,9 +114,7 @@ proc printTable*(stats: seq[ModelStats], round: int,
 
   for s in stats:
     let meta = cat.lookupMeta(s.id)
-    let displayName = if s.name.len > 0: s.name
-                      elif meta.isSome: meta.get.name
-                      else: s.id
+    let displayName = s.id  # Standardize on model ID
     let prefix = if s.favorite: "* " else: "  "
     var line = prefix & padRight(displayName, nameWidth)
 
