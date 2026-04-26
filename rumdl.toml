@@ -1,0 +1,16 @@
+# rumdl configuration for nimakai
+# https://github.com/Helm-Code/rumdl
+
+[global]
+# Exclude planning directory from linting
+exclude = [".planning/**/*.md"]
+
+# Allow HTML in README.md for layout purposes
+[MD033]
+allowed-elements = ["p", "img", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "br", "div", "span"]
+
+# Increase line length to 120 for URLs and code examples
+[MD013]
+line-length = 120
+code-blocks = false
+tables = false

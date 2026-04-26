@@ -21,7 +21,7 @@ Two binaries in this repo:
 
 Single Nim binary with modules in `src/`:
 
-```
+```text
 src/
   nimakai.nim   — Entry point, CLI dispatch (default/watch/check/discover/sync)
   metrics.nim   — Latency ring buffer, percentiles (P50/P95/P99), jitter, stability score
@@ -38,7 +38,7 @@ src/
 
 Rust proxy in `nimaproxy/` subdirectory:
 
-```
+```text
 nimaproxy/
   src/
     lib.rs                 — AppState, exports
@@ -103,6 +103,7 @@ cp nimaproxy/nimaproxy.toml.example nimaproxy/nimaproxy.toml
 Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /health`, `GET /stats`
 
 **Config example:**
+
 ```toml
 listen = "127.0.0.1:8080"
 target = "https://integrate.api.nvidia.com"

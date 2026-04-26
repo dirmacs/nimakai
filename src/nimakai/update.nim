@@ -1,5 +1,5 @@
 ## Fetch and update model catalog from NVIDIA NIM API.
-import std/[httpclient, json, strutils, net, algorithm, os, options]
+import std/[httpclient, json, strutils, net, os]
 import ./types, ./catalog
 
 type
@@ -38,7 +38,7 @@ proc inferCtxSizeFromModelId*(modelId: string): int =
   return 131072
 
 proc fetchModelsFromAPI*(apiKey: string, timeout: int = 15): FetchResult =
-  ## Fetch available models from NVIDIA NIM API's /v1/models endpoint.
+  ## Fetch available models from NVIDIA NIM API.
   let sslCtx = newContext(verifyMode = CVerifyPeer)
   let client = newHttpClient(timeout = timeout * 1000, sslContext = sslCtx)
   client.headers = newHttpHeaders({
@@ -46,8 +46,8 @@ proc fetchModelsFromAPI*(apiKey: string, timeout: int = 15): FetchResult =
   })
   
   try:
-    let resp = client.get(BaseURL & "/../models")
-    let code = parseInt($resp.code)
+    let resp = client.get(ModelsURL)
+    let code = resp.code.int
     if code != 200:
       client.close()
       result.apiError = "API returned status code " & $code
@@ -119,7 +119,9 @@ proc updateUserModels*(newModels: seq[ModelMeta],
   var existingModels: seq[ModelMeta] = @[]
   if fileExists(path):
     try:
-      let data = parseJson(readFile(path))
+      let root = parseJson(readFile(path))
+      let data = if root.hasKey("models"): root["models"]
+                    else: root
       for item in data:
         var m: ModelMeta
         m.id = item["id"].getStr()

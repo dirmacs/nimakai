@@ -4,8 +4,7 @@
 import std/[os, strformat, strutils, times, options, json, sequtils]
 import std/posix
 import posix/termios as term_mod
-import malebolgia
-import nimakai/[types, ping, catalog, display, config, history, metrics,
+import nimakai/[types, catalog, display, config, history, metrics,
                 opencode, recommend, rechistory, sync, watch, discovery, cli,
                 rustffi, proxyffi, update]
 
