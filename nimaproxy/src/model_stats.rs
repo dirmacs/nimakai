@@ -51,7 +51,7 @@ impl Default for CircuitBreakerConfig {
         Self {
             max_output_tokens: 32000,            // ~32K tokens, warn at high output
             max_repetitions: 5,                  // 5+ repeated n-grams triggers degradation
-            max_consecutive_assistant_turns: 5, // 5 turns without tools = circuit break
+            max_consecutive_assistant_turns: 10, // 10 turns without tools = circuit break
         }
     }
 }
