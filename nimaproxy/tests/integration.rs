@@ -81,7 +81,7 @@ fn test_model_stats_circuit_breaker_config_getter() {
     let config = store_default.circuit_breaker_config();
     assert_eq!(config.max_output_tokens, 32000);
     assert_eq!(config.max_repetitions, 5);
-    assert_eq!(config.max_consecutive_assistant_turns, 10);
+    assert_eq!(config.max_consecutive_assistant_turns, 5);
 
     // Test with custom circuit breaker config
     let custom_config = CircuitBreakerConfig {

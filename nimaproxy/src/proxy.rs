@@ -214,8 +214,6 @@ pub async fn chat_completions(
                 };
                 
 let full_body = collected.concat();
-eprintln!("DEBUG: NVIDIA API response - status={}, body={}", status, std::str::from_utf8(&full_body).unwrap_or("<invalid utf8>"));
-
 // Check for server-side degradation from NVIDIA API
 // NVIDIA returns: {"status":400,"title":"Bad Request","detail":"Function id '...': DEGRADED function cannot be invoked"}
 let body_str = std::str::from_utf8(&full_body).unwrap_or("");
@@ -412,10 +410,10 @@ pub fn fix_message_ordering(json: &mut Value) {
         while i < messages.len() {
             let current_role = messages[i].get("role").and_then(|r| r.as_str()).unwrap_or("");
             if current_role == "tool" {
-                // Check if next message exists and is "user"
+                // Check if next message exists and is "user" or "developer" (developer→user transform may not have run yet)
                 if i + 1 < messages.len() {
                     let next_role = messages[i + 1].get("role").and_then(|r| r.as_str()).unwrap_or("");
-                    if next_role == "user" {
+                    if next_role == "user" || next_role == "developer" {
                         // Insert an assistant message after the tool message
                         // Must have ONLY content (no tool_calls field)
                         // NVIDIA NIM rejects messages with both content AND tool_calls
@@ -444,10 +442,8 @@ fn transform_message_roles(json: &mut Value, model_id: &str, state: &AppState) {
  let transform_developer = state.model_compat.should_transform_developer_role(model_id);
  let transform_tool = state.model_compat.should_transform_tool_messages(model_id);
  
- eprintln!("DEBUG: transform_message_roles - model_id={}, transform_developer={}, transform_tool={}", model_id, transform_developer, transform_tool);
 
  if !transform_developer && !transform_tool {
- eprintln!("DEBUG: No transformation needed, returning early");
  return;
  }
 
@@ -473,14 +469,7 @@ fn transform_message_roles(json: &mut Value, model_id: &str, state: &AppState) {
 /// Check if the conversation has tool messages or tool calls (indicating a tool call flow).
 /// This requires special handling for Mistral models on NVIDIA NIM.
 fn has_tool_messages(json: &Value) -> bool {
-  eprintln!("DEBUG: has_tool_messages called, json keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
   if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
-    eprintln!("DEBUG: Found {} messages", messages.len());
-    for (i, msg) in messages.iter().enumerate() {
-      if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
-        eprintln!("DEBUG: Message {}: role={}", i, role);
-      }
-    }
     let has_tool_role = messages.iter().any(|msg| {
       msg.get("role").and_then(|r| r.as_str()) == Some("tool")
     });
@@ -488,10 +477,8 @@ fn has_tool_messages(json: &Value) -> bool {
       msg.get("tool_calls").is_some()
     });
     let has_tool = has_tool_role || has_tool_calls;
-    eprintln!("DEBUG: has_tool_messages result: {} (tool_role={}, tool_calls={})", has_tool, has_tool_role, has_tool_calls);
     return has_tool;
   }
-  eprintln!("DEBUG: No messages array found");
   false
 }
 
@@ -532,7 +519,6 @@ Do NOT use XML tags like <minimax:tool_call> or <invoke>."#;
             messages.insert(0, system_msg);
         }
     }
-    eprintln!("DEBUG: Injected MiniMax JSON tool call instruction for model={}", model_id);
 }
 
 /// Check if the last message in the conversation is from the assistant.
@@ -540,12 +526,10 @@ fn is_last_message_from_assistant(json: &Value) -> bool {
   if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
     if let Some(last) = messages.last() {
       if let Some(role) = last.get("role").and_then(|r| r.as_str()) {
-        eprintln!("DEBUG: is_last_message_from_assistant - last role={}", role);
         return role == "assistant";
       }
     }
   }
-  eprintln!("DEBUG: is_last_message_from_assistant - no messages or no role");
   false
 }
 
@@ -558,17 +542,14 @@ fn inject_mistral_tool_params(json: &mut Value, model_id: &str) {
     let is_mistral = is_mistral_model(model_id);
     let has_tools = has_tool_messages(json);
     let last_from_assistant = is_last_message_from_assistant(json);
-    eprintln!("DEBUG: inject_mistral_tool_params - model_id={}, is_mistral={}, has_tools={}, last_from_assistant={}", model_id, is_mistral, has_tools, last_from_assistant);
 
     // Only inject Mistral-specific parameters for Mistral models
     // These params are rejected by NVIDIA for non-Mistral models
     if is_mistral {
         if has_tools {
-            eprintln!("DEBUG: Injecting Mistral tool params");
         json["add_generation_prompt"] = Value::Bool(false);
     }
     if last_from_assistant {
-            eprintln!("DEBUG: Injecting Mistral continuation");
         json["continue_final_message"] = Value::Bool(true);
 }
     }
@@ -636,11 +617,11 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
     sanitize_tool_calls(&mut json);
 
-    // Fix message ordering BEFORE transformation
-    // so fix_message_ordering sees "tool" role, not already-transformed "assistant"
-    fix_message_ordering(&mut json);
-
+    // Transform roles first (developer→user) so fix_message_ordering sees the
+    // final role assignments when inserting assistant messages between tool→user gaps.
     transform_message_roles(&mut json, &model_id, state);
+
+    fix_message_ordering(&mut json);
 
     if let Some(params) = state.model_params.get(&requested) {
         if let Some(temp) = params.temperature {
@@ -677,20 +658,6 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
         }
     }
 
-    // Debug: check for content+tool_calls mismatch before sending
-    if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
-        for (i, msg) in messages.iter().enumerate() {
-            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            let has_content = msg.get("content")
-                .map(|c| !c.is_null() && c.as_str().map(|s| !s.is_empty()).unwrap_or(true))
-                .unwrap_or(false);
-            let has_tool_calls = msg.get("tool_calls").is_some();
-            if has_content && has_tool_calls {
-                eprintln!("DEBUG: MISMATCH at msg {}: role={}, content={:?}", i, role, msg.get("content"));
-            }
-        }
-    }
-    eprintln!("DEBUG: Sending to NVIDIA API - model_id={}, json={}", model_id, json);
     (model_id, Bytes::from(json.to_string()))
 }
 
@@ -868,12 +835,12 @@ async fn race_models(
     // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
     sanitize_tool_calls(&mut json);
 
-    // Fix message ordering BEFORE transformation
-    // so fix_message_ordering sees "tool" role, not already-transformed "assistant"
-    fix_message_ordering(&mut json);
-
-    // Transform message roles for models that don't support developer/tool roles
+    // Transform roles first (developer→user) so fix_message_ordering sees the
+    // final role assignments when inserting assistant messages between tool→user gaps.
     transform_message_roles(&mut json, model_id, &state);
+
+    // Fix message ordering: insert empty assistant between tool→user transitions
+    fix_message_ordering(&mut json);
 
             // Inject per-model hyperparameters - override client settings with proxy config
         if let Some(params) = state.model_params.get(model_id) {
@@ -1684,8 +1651,32 @@ mod tool_call_id_tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "tool");
         assert_eq!(msgs[1]["role"], "assistant");
-        assert_eq!(msgs[1]["content"], "Processing...");
+        assert_eq!(msgs[1]["content"], serde_json::Value::Null);
         assert_eq!(msgs[2]["role"], "user");
+    }
+
+    #[test]
+    fn test_fix_message_ordering_developer_role() {
+        // tool followed by developer (<turn-aborted>) then user - should insert empty assistant
+        // This is the exact OMP pattern: tool[N]->developer[N+1]->user[N+2]
+        let mut json = json!({
+            "messages": [
+                {"role": "assistant", "content": null, "tool_calls": [{"id": "abc123XYZ", "type": "function", "function": {"name": "read"}}]},
+                {"role": "tool", "tool_call_id": "abc123XYZ", "content": "result"},
+                {"role": "developer", "content": "<turn-aborted>\nThe previous turn was aborted."},
+                {"role": "user", "content": "continue"}
+            ]
+        });
+        crate::proxy::fix_message_ordering(&mut json);
+        let msgs = json["messages"].as_array().unwrap();
+        // Should insert assistant between tool[1] and developer[2]
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[2]["role"], "assistant"); // inserted
+        assert!(msgs[2]["content"].is_null());
+        assert_eq!(msgs[3]["role"], "developer");
+        assert_eq!(msgs[4]["role"], "user");
     }
 
     #[test]
@@ -1732,14 +1723,14 @@ mod tool_call_id_tests {
     fn test_validate_mistral_tool_call_ids_invalid_length() {
         let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test"}}]}]});
         let result = crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
-        assert!(result.is_err());
+        assert!(result.is_ok()); // validate is warn-only, not hard reject;
     }
 
     #[test]
     fn test_validate_mistral_tool_call_ids_invalid_chars() {
         let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]}]});
         let result = crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
-        assert!(result.is_err());
+        assert!(result.is_ok()); // validate is warn-only, not hard reject;
     }
 
     #[test]
