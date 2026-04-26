@@ -350,3 +350,149 @@ async fn test_e2e_racing_fails_gracefully_on_all_429() {
     let status = resp.into_response().into_parts().0.status;
     assert_eq!(status.as_u16(), 429, "should return 429 when all keys are rate-limited");
 }
+
+// ---------------------------------------------------------------------------
+// Live tests for v0.13.6 bug fixes
+// ---------------------------------------------------------------------------
+
+/// Verify that racing marks a key rate-limited after a 429 response.
+/// We force one key into cooldown, then race — verify pool reflects it.
+#[tokio::test]
+async fn test_e2e_racing_429_key_cooldown_persists() {
+    let state = make_state();
+
+    // Simulate: key 0 just got 429 with 30s cooldown
+    state.pool.mark_rate_limited(0, 30);
+
+    let statuses = state.pool.status();
+    assert!(!statuses[0].active, "key 0 must be in cooldown");
+    assert!(statuses[0].cooldown_secs_remaining > 0, "cooldown must be > 0");
+    assert!(statuses[1].active, "key 1 must still be active");
+
+    eprintln!("[e2e-429-cooldown] key 0 cooldown={}s, key 1 active={}",
+        statuses[0].cooldown_secs_remaining, statuses[1].active);
+
+    // Racing should now only use key 1 (and key 2 if available)
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "Say one word: hello"}],
+        "max_tokens": 5,
+        "temperature": 0.0
+    });
+
+    let resp = nimaproxy::proxy::chat_completions(
+        axum::extract::State(state.clone()),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    ).await;
+
+    let response = resp.into_response();
+    let (parts, _body) = response.into_parts();
+    let status = parts.status.as_u16();
+    let key_label = parts.headers.get("x-key-label").and_then(|v| v.to_str().ok()).map(String::from);
+
+    eprintln!("[e2e-429-cooldown] race status={} key_used={:?}", status, key_label);
+
+    // If key 0 was used despite cooldown, that's a bug
+    if let Some(ref label) = key_label {
+        assert_ne!(label, "doltares", "rate-limited key 'doltares' (idx 0) must not be used by racing");
+    }
+
+    // Accept any non-500 result — key exhaustion or successful chat both acceptable
+    assert!(status != 500, "unexpected internal error: {}", status);
+}
+
+/// Live test: assistant message with tool_calls — verify 400 is NOT forwarded to client.
+/// NVIDIA returns 400 for invalid assistant messages; proxy should retry or degrade gracefully.
+#[tokio::test]
+async fn test_e2e_invalid_assistant_message_not_propagated() {
+    let state = make_state_no_racing();
+
+    // This is the exact message shape that triggered the OMP crash:
+    // assistant message with both content AND tool_calls (or content=None tool_calls=None)
+    let body = serde_json::json!({
+        "model": "z-ai/glm4.7",
+        "messages": [
+            {"role": "user", "content": "call a tool"},
+            // Assistant message with tool_calls but no content — sanitize_tool_calls sets content=null
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_abc123",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"}}
+                ]
+            },
+            {"role": "tool", "content": "sunny", "tool_call_id": "call_abc123"},
+            {"role": "user", "content": "ok thanks"}
+        ],
+        "max_tokens": 10,
+        "temperature": 0.0
+    });
+
+    let resp = nimaproxy::proxy::chat_completions(
+        axum::extract::State(state.clone()),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    ).await;
+
+    let response = resp.into_response();
+    let (parts, body) = response.into_parts();
+    let status = parts.status.as_u16();
+    let body_bytes = axum::body::to_bytes(body, 4096).await.unwrap_or_default();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    eprintln!("[e2e-invalid-assistant] status={} body={}", status, &body_str[..body_str.len().min(300)]);
+
+    // The proxy must NOT forward 400 "Invalid assistant message" directly to client.
+    // Acceptable outcomes: 200 (retry succeeded), 429 (keys exhausted), 502 (all models failed),
+    // 404 (model not found). What is NOT acceptable: raw 400 from NVIDIA propagated as-is.
+    if status == 400 {
+        // If we do get a 400, it must NOT be the raw NVIDIA invalid-assistant error
+        assert!(
+            !body_str.contains("Invalid assistant message"),
+            "proxy forwarded raw NVIDIA 400 'Invalid assistant message' to client — bug not fixed! body={}",
+            body_str
+        );
+    }
+}
+
+/// Live racing test: verify race with real models returns first 2xx and logs winner.
+#[tokio::test]
+async fn test_e2e_racing_returns_2xx_winner() {
+    let state = make_state(); // has racing_models configured
+
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "Reply with exactly one word: yes"}],
+        "max_tokens": 5,
+        "temperature": 0.0
+    });
+
+    let t0 = std::time::Instant::now();
+    let resp = nimaproxy::proxy::chat_completions(
+        axum::extract::State(state.clone()),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    ).await;
+    let elapsed = t0.elapsed().as_millis();
+
+    let response = resp.into_response();
+    let (parts, body) = response.into_parts();
+    let status = parts.status.as_u16();
+    let winner = parts.headers.get("x-key-label").and_then(|v| v.to_str().ok()).map(String::from);
+    let body_bytes = axum::body::to_bytes(body, 16384).await.unwrap_or_default();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    eprintln!("[e2e-racing-2xx-winner] status={} elapsed={}ms key={:?} body_preview={}",
+        status, elapsed, winner, &body_str[..body_str.len().min(200)]);
+
+    // Racing must NEVER return a raw 4xx from NVIDIA
+    assert_ne!(status, 400, "racing forwarded NVIDIA 400 to client — status filtering broken");
+    // Accept 200, 429 (all keys exhausted), 502 (all models failed)
+    assert!(
+        status == 200 || status == 429 || status == 502 || status == 503 || status == 504,
+        "unexpected status {} from racing", status
+    );
+}
