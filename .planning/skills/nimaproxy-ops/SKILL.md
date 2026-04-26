@@ -55,7 +55,7 @@ Deep-dive analysis using parallel subagents to trace root causes.
 
    **Agent 1 — Function Analysis:**
    ```
-   Assignment: Grep /opt/nimakai/src/proxy.rs for these functions:
+   Assignment: Grep /opt/nimakai/nimaproxy/src/proxy.rs for these functions:
    - fix_message_ordering
    - sanitize_tool_calls
    - transform_message_roles
@@ -93,7 +93,7 @@ Deep-dive analysis using parallel subagents to trace root causes.
 
    Use `grep` on proxy.rs with context to trace:
    ```bash
-   grep -n -A 10 -B 5 "error_pattern" /opt/nimakai/src/proxy.rs
+   grep -n -A 10 -B 5 "error_pattern" /opt/nimakai/nimaproxy/src/proxy.rs
    ```
 
 ### Output
@@ -123,7 +123,7 @@ Build, deploy, and verify nimaproxy updates.
    ```bash
    curl -s http://localhost:8080/health | jq .
    ```
-   Confirm `"status": "ok"` or equivalent healthy response.
+   Confirm `"status": "UP"` or equivalent healthy response.
 
 3. **Check service restarted cleanly**
    ```bash
