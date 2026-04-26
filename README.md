@@ -67,7 +67,7 @@ nimakai --once --json
 
 ## Commands
 
-```
+```text
 nimakai                    Continuous benchmark (default)
 nimakai catalog            List all known models with metadata
  nimakai catalog            List all known models with metadata
@@ -136,10 +136,12 @@ nimakai proxy stop
 ```
 
 **Requirements:**
+
 - `libnimaproxy.so` must be in the same directory as nimakai binary, or `LD_LIBRARY_PATH` must be set
 - nimaproxy config file with API keys (see nimaproxy section below)
 
 **Status output shows:**
+
 - Overall health status
 - Active key count
 - Routing and racing configuration
@@ -205,7 +207,7 @@ History is persisted to `~/.local/share/nimakai/history.jsonl` (30-day auto-prun
 
 ### nimakai (Nim)
 
-```
+```text
 src/
   nimakai.nim              Entry point, main loop, SIGINT handler
   nimakai/
@@ -243,7 +245,7 @@ tests/
 
 ### nimaproxy (Rust)
 
-```
+```text
 nimaproxy/
   Cargo.toml               lib + bin + tests
   nimaproxy.toml           Config (NOT committed - contains API keys)
@@ -280,12 +282,14 @@ cp nimaproxy.toml.example nimaproxy.toml
 ```
 
 **Endpoints:**
+
 - `GET /health` — Key pool status
 - `GET /stats` — Per-model latency stats
 - `GET /v1/models` — Passthrough to NVIDIA
 - `POST /v1/chat/completions` — Proxy with key rotation
 
 **Features:**
+
 - Round-robin key rotation across multiple API keys
 - Automatic 429 handling with per-key cooldown
 - Latency-aware model routing (`"model": "auto"`)
@@ -293,6 +297,7 @@ cp nimaproxy.toml.example nimaproxy.toml
 - `x-key-label` response header: tracks which key was used for rotation debugging
 
 **Model Routing (V2):**
+
 ```toml
 [routing]
 strategy = "latency_aware"
@@ -304,9 +309,11 @@ models = [
   "nvidia/mistralai/devstral-2-123b-instruct-2512",
 ]
 ```
+
 When a request arrives with `"model": "auto"`, the proxy picks the best model from this list. Untried models (< 3 samples) get priority. Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skipped.
 
 **Model Racing (Speculative Execution):**
+
 ```toml
 [racing]
 enabled = true
@@ -324,9 +331,11 @@ max_parallel = 8
 timeout_ms = 15000
 strategy = "complete"
 ```
+
 Fires N parallel requests to N models, returns first response. Trades N×token budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429 rate-limit collisions. Models are selected in round-robin order via `racing_cursor` to prevent a single fast model from dominating and breaking inference loops. Dead models (≥20 consecutive failures or 0 samples) are filtered out automatically.
 
 **Model Compatibility (Developer Role Transformation):**
+
 ```toml
 [model_compat]
 # Models that support the 'developer' role (don't need transformation)

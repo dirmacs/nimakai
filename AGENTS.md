@@ -22,7 +22,7 @@ nimakai proxy stop
 
 ### nimakai (Nim)
 
-```
+```text
 src/
   nimakai.nim   — CLI entry: parse args, dispatch to subcommands
   ping.nim      — HTTP ping: timed GET to NIM health endpoint, parse resp.code.int
@@ -40,7 +40,7 @@ tests/          — 15 test files, one per module (test_metrics.nim, test_catalo
 
 ### nimaproxy (Rust)
 
-```
+```text
 nimaproxy/
   Cargo.toml               lib + bin + tests
   nimaproxy.toml           Config (NOT committed - contains API keys)
@@ -114,18 +114,21 @@ Verdict labels: `Perfect`, `Normal`, `Slow`, `Spiky`, `Very Slow`, `Unstable`, `
 ## Common Tasks
 
 **Add a new model to the catalog:**
+
 1. Edit `src/catalog.nim` — add entry to `MODEL_CATALOG` sequence
- 2. Set SWE-bench Verified score (or reasoning equivalent)
+2. Set SWE-bench Verified score (or reasoning equivalent)
 3. Run `nimble test` — `test_catalog.nim` validates catalog integrity
 4. Rebuild: `nimble build`
 
 **Add a new subcommand:**
+
 1. Add proc in the relevant module (e.g., `discovery.nim`)
 2. Add CLI dispatch case in `src/nimakai.nim`
 3. Add test file `tests/test_<name>.nim`
 4. Register test in `nimakai.nimble` task block
 
 **Change stability score formula:**
+
 - Formula in `src/metrics.nim` — `calcStability()` proc
 - Re-run `nimble test` to catch regressions in `test_metrics.nim`
 
@@ -149,19 +152,25 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 ## nimaproxy v0.13.1 Critical Fixes
 
 ### Assistant Message Validation
+
 NVIDIA NIM API requires assistant messages to have either `content` OR `tool_calls`, not both:
+
 - **Issue**: `fix_message_ordering()` inserted messages with both `content` AND `tool_calls: []`
 - **Fix**: Removed `tool_calls` from inserted messages
 - **Impact**: Resolves OMP/Pawan integration errors when tool→user transitions occur
 
 ### Content Field Sanitization
+
 When `tool_calls` is present, `content` must be `null` (not empty string):
+
 - **Issue**: `sanitize_tool_calls()` set empty string `content: ""` for messages with `tool_calls`
 - **Fix**: Sets `content` to `serde_json::Value::Null` instead
 - **Impact**: Prevents "Assistant message must have either content or tool_calls, but not both" errors
 
 ### Message Ordering
+
 Inserts empty assistant messages between `tool` and `user` roles to satisfy NVIDIA validation:
+
 - Runs before `transform_message_roles()` in both `resolve_model()` and `race_models()`
 - Handles all tool→user transitions in conversation history
 - Ensures compatibility with OMP, Pawan, and similar frameworks

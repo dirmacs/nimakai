@@ -9,21 +9,25 @@
 ## Features
 
 ### 🔑 Key Rotation
+
 - Automatic API key rotation on rate limits (429)
 - Configurable cooldown periods
 - Per-key failure tracking
 
 ### 🎯 Latency-Aware Routing
+
 - Real-time model selection based on P95 latency
 - Circuit breaker for degraded models
 - Round-robin and latency-aware strategies
 
 ### 🏎️ Racing Mode (Speculative Execution)
+
 - Fire N parallel requests, return first response
 - Trade token budget for minimum P50 latency
 - Configurable timeout and parallelism
 
 ### 🛡️ Production Ready
+
 - 313+ tests with ~92% coverage
 - Graceful error handling and retry logic
 - Comprehensive metrics and health checks
@@ -107,7 +111,7 @@ curl http://localhost:8080/stats
 
 ## Architecture
 
-```
+```text
 Client → nimaproxy → NVIDIA NIM API
          ├─ Key rotation
          ├─ Latency routing
@@ -134,6 +138,7 @@ cargo tarpaulin --out Html
 ## Recent Changes (v0.13.1)
 
 ### Fixed
+
 - **Assistant message validation**: Messages with `tool_calls` must NOT have `content` field (NVIDIA NIM requirement)
 - **Unexpected role 'user' after role 'tool'**: Insert assistant message between tool→user transitions (fixes OMP/Pawan integration)
 - `sanitize_tool_calls()` sets `content` to `null` (not empty string) when `tool_calls` present
@@ -141,11 +146,13 @@ cargo tarpaulin --out Html
 ## Recent Changes (v0.13.0)
 
 ### Fixed
+
 - **tool_call_id forwarding**: Strips `tool_call_id` from assistant messages to prevent Pydantic errors
 - **DEGRADED model handling**: Auto-retries with different model when NVIDIA marks model as degraded
 - **Live test robustness**: Graceful handling of 429/502/503 errors
 
 ### Added
+
 - 17 new tests for coverage gaps and error paths
 - Improved circuit breaker and degradation tracking
 - Enhanced connection error handling (BAD_GATEWAY)
@@ -154,7 +161,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](../LICENSE) for details.
 
 ## Contributing
 
@@ -168,4 +175,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 - [nimakai](../) - NVIDIA NIM latency benchmarker
 - [aegis](https://github.com/dirmacs/aegis) - Config manager for NIM models
+
+```text
 ```

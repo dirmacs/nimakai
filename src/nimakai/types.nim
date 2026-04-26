@@ -7,6 +7,7 @@ const
   GitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null || echo unknown").strip()
   BuildDate* = CompileDate & " " & CompileTime
   BaseURL* = "https://integrate.api.nvidia.com/v1/chat/completions"
+  ModelsURL* = "https://integrate.api.nvidia.com/v1/models"
   DefaultTimeout* = 15
   DefaultInterval* = 5
   MaxSamples* = 100
