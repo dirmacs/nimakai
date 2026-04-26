@@ -95,6 +95,7 @@ models = [
 ```
 
 Available racing models (current pool, 9 total): minimaxai/minimax-m2.5, minimaxai/minimax-m2.7, qwen/qwen3.5-122b-a10b, qwen/qwen3.5-397b-a17b, nvidia/nemotron-3-super-120b-a12b, z-ai/glm4.7, z-ai/glm5, z-ai/glm-5.1, mistralai/mistral-large-3-675b-instruct-2512
+
 ## Metrics Reference
 
 | Metric | How Computed |
