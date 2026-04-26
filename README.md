@@ -161,7 +161,6 @@ nimakai proxy stop
 |------|-------|-------------|---------|
 | `--once` | `-1` | Single round, then exit | continuous |
 | `--models` | `-m` | Comma-separated model IDs | all models |
- | `--models` | `-m` | Comma-separated model IDs | all models |
 | `--interval` | `-i` | Ping interval in seconds | 5 |
 | `--timeout` | `-t` | Request timeout in seconds | 15 |
 | `--json` | `-j` | JSON output | table |

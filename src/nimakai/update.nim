@@ -82,16 +82,16 @@ proc fetchModelsFromAPI*(apiKey: string, timeout: int = 15): FetchResult =
 
           # Check for thinking models
           meta.thinking = containsIgnoreCase(modelId, "thinking") or
-          containsIgnoreCase(meta.name, "thinking") or
-          containsIgnoreCase(modelId, "reasoning") or
-          containsIgnoreCase(meta.name, "reasoning")
+            containsIgnoreCase(meta.name, "thinking") or
+            containsIgnoreCase(modelId, "reasoning") or
+            containsIgnoreCase(meta.name, "reasoning")
 
           # Check for multimodal models
           meta.multimodal = containsIgnoreCase(modelId, "vision") or
-          containsIgnoreCase(meta.name, "vision") or
-          containsIgnoreCase(modelId, "vl") or
-          containsIgnoreCase(meta.name, "vl") or
-          containsIgnoreCase(meta.name, "multimodal")
+            containsIgnoreCase(meta.name, "vision") or
+            containsIgnoreCase(modelId, "vl") or
+            containsIgnoreCase(meta.name, "vl") or
+            containsIgnoreCase(meta.name, "multimodal")
 
           meta.sweScore = 0.0
           meta.outputLimit = 0
@@ -100,7 +100,12 @@ proc fetchModelsFromAPI*(apiKey: string, timeout: int = 15): FetchResult =
         else:
           result.existingModels.add(modelId)
 
-      result.allModels = discoveredIds
+      # Deduplicate model IDs before assigning to allModels
+      var uniqueIds: seq[string] = @[]
+      for id in discoveredIds:
+        if id notin uniqueIds:
+          uniqueIds.add(id)
+      result.allModels = uniqueIds
       client.close()
     else:
       client.close()
