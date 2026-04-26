@@ -224,6 +224,10 @@ if status == 400 && (body_str.contains("DEGRADED") || body_str.contains("degrade
     // Continue retry with a different model
     continue;
 }
+if status == 400 && (body_str.contains("Invalid assistant message") || body_str.contains("invalid assistant")) {
+    eprintln!("[nimaproxy] INVALID-ASSISTANT: model '{}' rejected message structure (400): {} — retrying with next key", model_id, &body_str[..body_str.len().min(200)]);
+    continue;
+}
 
                 let (output_tokens, repetition_count, had_tool_call) = extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
                 
@@ -320,23 +324,42 @@ if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mu
  }
  }
 
- // Sanitize tools array (tool definitions)
+ // Sanitize tools array (tool definitions) — fix schema fields that break Jinja templates
+ // NVIDIA models crash with 500 "tool_use:98" when tool.function.description is null/undefined
+ // or when tool.function.parameters is missing/null (template does `description + " "` → boom)
  if let Some(tools) = json.get_mut("tools").and_then(|t| t.as_array_mut()) {
- // Filter out tools with empty function names
- tools.retain(|tool| {
- if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
- !name.is_empty()
- } else {
- // Keep if no name field (shouldn't happen but be safe)
- true
- }
- });
- // If all tools were removed, remove the tools field entirely
- if tools.is_empty() {
- if let Some(obj) = json.as_object_mut() {
- obj.remove("tools");
- }
- }
+     // First pass: fix null/missing description and parameters before filtering
+     // NVIDIA Jinja templates do string concat on description → null/undefined causes 500 "tool_use:98"
+     for tool in tools.iter_mut() {
+         if let Some(func) = tool.get_mut("function").and_then(|f| f.as_object_mut()) {
+             match func.get("description") {
+                 None | Some(Value::Null) => {
+                     func.insert("description".to_string(), Value::String(String::new()));
+                 }
+                 _ => {}
+             }
+             match func.get("parameters") {
+                 None | Some(Value::Null) => {
+                     func.insert("parameters".to_string(), serde_json::json!({"type": "object", "properties": {}}));
+                 }
+                 _ => {}
+             }
+         }
+     }
+     // Second pass: filter out tools with empty function names
+     tools.retain(|tool| {
+         if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+             !name.is_empty()
+         } else {
+             true
+         }
+     });
+     // If all tools were removed, remove the tools field entirely
+     if tools.is_empty() {
+         if let Some(obj) = json.as_object_mut() {
+             obj.remove("tools");
+         }
+     }
  }
 }
 /// Validate tool call IDs for Mistral models.
@@ -894,6 +917,7 @@ async fn race_models(
         let (key, key_idx) = key.unwrap();
         let key_label = state.pool.get_key_label(key_idx);
 
+        let key_idx_for_spawn = key_idx;
         let handle = tokio::spawn(async move {
             let key_label = key_label;
 
@@ -919,6 +943,12 @@ async fn race_models(
                     }
 
                     let status = resp.status();
+                    let retry_after_secs: u64 = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(60);
                     let content_type = resp
                         .headers()
                         .get("content-type")
@@ -945,7 +975,7 @@ async fn race_models(
                                 .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                         );
                     }
-                    Ok::<Response, String>(response)
+                    Ok::<(Response, u16, usize, u64), String>((response, status.as_u16(), key_idx_for_spawn, retry_after_secs))
                 }
                 Ok(Err(e)) => {
                     if let Some(ref label) = key_label {
@@ -953,7 +983,7 @@ async fn race_models(
                     } else {
                         state_clone.model_stats.record(&model_id_clone, timeout_ms_for_model as f64, false);
                     }
-                    Err(e.to_string())
+                    Err(format!("request error: {}", e))
                 }
                 Err(_) => {
                     if let Some(ref label) = key_label {
@@ -961,7 +991,7 @@ async fn race_models(
                     } else {
                         state_clone.model_stats.record(&model_id_clone, timeout_ms_for_model as f64, false);
                     }
-                    Err("timeout".to_string())
+                    Err(format!("timeout after {}ms", timeout_ms_for_model))
                 }
             }
         });
@@ -985,7 +1015,19 @@ let mut last_error = None;
 while !pending.is_empty() {
 let ((model_id, result), _idx, remaining) = select_all(pending).await;
 match result {
-Ok(Ok(response)) => return response,
+Ok(Ok((response, status_code, key_idx, retry_after_secs))) => {
+    if status_code == 429 {
+        state.pool.mark_rate_limited(key_idx, retry_after_secs);
+        eprintln!("[racing] {} → 429, key {} rate-limited {}s, trying next", model_id, key_idx, retry_after_secs);
+        last_error = Some(format!("429 rate-limited (key {})", key_idx));
+    } else if status_code >= 400 {
+        eprintln!("[racing] {} → HTTP {}, skipping (not propagating 4xx/5xx to client)", model_id, status_code);
+        last_error = Some(format!("HTTP {} from {}", status_code, model_id));
+    } else {
+        eprintln!("[racing] {} → HTTP {} (winner)", model_id, status_code);
+        return response;
+    }
+}
 Ok(Err(e)) => {
 eprintln!("[racing] {} failed: {}", model_id, e);
 last_error = Some(e);

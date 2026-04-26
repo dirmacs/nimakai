@@ -155,6 +155,7 @@ info!("Turn logging initialized");
         .route("/v1/chat/completions", post(nimaproxy::proxy::chat_completions))
         .route("/test-post", post(nimaproxy::proxy::chat_completions))
         .route("/v1/models", get(nimaproxy::proxy::models))
+        .route("/models", get(nimaproxy::proxy::models)) // alias: OMP polls /models without /v1/ prefix
         .route("/health", get(nimaproxy::proxy::health))
         .route("/stats", get(nimaproxy::proxy::stats))
         .route("/v1/completions", post(nimaproxy::proxy::completions))

@@ -651,3 +651,160 @@ async fn test_proxy_with_empty_messages() {
     mock.assert();
     assert!(status.as_u16() >= 200 && status.as_u16() < 600);
 }
+
+
+// ============================================================================
+// Racing status-filter tests: verify 4xx/429 are skipped, not forwarded to client
+// ============================================================================
+
+/// Create a racing state with TWO keys so one can be rate-limited and the other used.
+fn make_racing_state_two_keys(api_url: String) -> Arc<AppState> {
+    let key_entries = vec![
+        KeyEntry { key: "key-a".to_string(), label: Some("key-a".to_string()) },
+        KeyEntry { key: "key-b".to_string(), label: Some("key-b".to_string()) },
+    ];
+    AppState::new(
+        key_entries,
+        api_url,
+        None,
+        ModelStatsStore::new(100.0),
+        vec!["model-a".to_string(), "model-b".to_string()],
+        2,
+        8000,
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+    )
+}
+
+/// Racing: when one model returns 400, the proxy must NOT forward it immediately.
+/// The race must exhaust all models; since the only model returns 400, we get BAD_GATEWAY.
+/// Critically: we do NOT get 400 propagated to the client.
+#[tokio::test]
+async fn test_racing_skips_400_does_not_propagate_to_client() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    // Both paths return 400 Invalid assistant message
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(400)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"Invalid assistant message: content=None tool_calls=None"}}"}"#)
+        .expect_at_least(1)
+        .create();
+
+    let state = make_racing_state(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = nimaproxy::proxy::chat_completions(
+        axum::extract::State(state),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    ).await;
+
+    let response = resp.into_response();
+    let status = response.status().as_u16();
+    eprintln!("[racing-400-skip] got status {}", status);
+
+    // Must NOT be 400 — proxy must not forward NVIDIA's 400 to the client.
+    // With all models returning 400, we expect BAD_GATEWAY (502).
+    assert_ne!(status, 400, "proxy must not forward NVIDIA 400 to client — races should be skipped");
+    assert!(status == 502 || status == 504 || status == 400,
+        "expected 502/504 when all racers fail, got {}", status);
+}
+
+/// Racing: when a model returns 429, the key that got 429 must be marked rate-limited.
+/// Verify via pool status after the race completes.
+#[tokio::test]
+async fn test_racing_429_marks_key_rate_limited() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    // Return 429 with Retry-After: 30 for all requests
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "30")
+        .with_body(r#"{"error":{"message":"Rate limit exceeded"}}"}"#)
+        .expect_at_least(1)
+        .create();
+
+    let state = make_racing_state_two_keys(server.url());
+
+    // Verify both keys active before the race
+    let pre = state.pool.status();
+    assert!(pre[0].active && pre[1].active, "both keys should be active before race");
+
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = nimaproxy::proxy::chat_completions(
+        axum::extract::State(state.clone()),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    ).await;
+
+    let status = resp.into_response().status().as_u16();
+    eprintln!("[racing-429-key-mark] got status {}", status);
+
+    // After the race, at least one key should be rate-limited (cooldown > 0)
+    let post = state.pool.status();
+    let rate_limited: Vec<_> = post.iter().filter(|s| !s.active).collect();
+    eprintln!("[racing-429-key-mark] rate-limited keys after race: {}", rate_limited.len());
+    assert!(!rate_limited.is_empty(), "racing 429 must mark the key as rate-limited (cooldown > 0)");
+    // The cooldown should be around 30s (from Retry-After header)
+    let cd = rate_limited[0].cooldown_secs_remaining;
+    assert!(cd > 0 && cd <= 30, "cooldown should be ≤30s, got {}s", cd);
+}
+
+/// Racing: one model returns 400, another returns 200 — the 200 must win.
+/// Uses two mock routes on one server: /model-a gets 400, /model-b gets 200.
+/// We can't route by path in racing (all go to /v1/chat/completions),
+/// so we use a sequence mock: first call 400, second call 200.
+#[tokio::test]
+async fn test_racing_skips_4xx_and_returns_first_2xx() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    // First request → 400, second request → 200
+    // Racing fires both concurrently; the 400 must be skipped, 200 returned
+    let _mock400 = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(400)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"Invalid assistant message"}}"}"#)
+        .create();
+    let _mock200 = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"choices":[{"message":{"role":"assistant","content":"hello"}}]}"}"#)
+        .create();
+
+    let state = make_racing_state_two_keys(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 5
+    });
+
+    let resp = nimaproxy::proxy::chat_completions(
+        axum::extract::State(state),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    ).await;
+
+    let status = resp.into_response().status().as_u16();
+    eprintln!("[racing-4xx-skip-2xx-win] got status {}", status);
+    // The 200 racer must win; 400 must be discarded
+    assert_eq!(status, 200, "racing must return 200 when one racer succeeds; got {}", status);
+}
