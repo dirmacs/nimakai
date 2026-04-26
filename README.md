@@ -127,7 +127,7 @@ Each OMO category is scored using weighted criteria:
 
 ## Proxy Commands (FFI Integration)
 
-nimakai v0.13.2 includes FFI integration with nimaproxy, allowing you
+nimakai v0.13.1 includes FFI integration with nimaproxy, allowing you
 to start/stop/query the Rust key-rotation proxy directly from the Nim
 CLI:
 
@@ -266,9 +266,11 @@ nimaproxy/
     model_router.rs        Latency-aware model selection
     proxy.rs               HTTP handlers
   tests/
-    integration.rs         12 integration tests
-    e2e_live.rs            6 E2E tests with real NVIDIA API
+    integration.rs         45 integration tests
+    e2e_live.rs            11 E2E tests with real NVIDIA API
     stress_test.rs         25-turn live stress test
+    coverage_gaps.rs       14 coverage gap tests
+    proxy_error_paths.rs   19 proxy error path tests
 ```
 
 ## nimaproxy — Key-Rotation Proxy
@@ -355,7 +357,7 @@ supports_developer_role = []
 
 # Models that support tool messages (don't need transformation)
 # All models NOT in this list will have 'tool' role transformed to 'assistant'
-supports_tool_messages = []
+supports_tool_messages = ["all"]
 ```
 
 Transforms OpenAI-style `developer` and `tool` roles to `user` and
