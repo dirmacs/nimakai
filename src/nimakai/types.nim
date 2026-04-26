@@ -3,7 +3,7 @@
 import std/strutils
 
 const
-  Version* = "0.13.2"
+  Version* = "0.14.0"
   GitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null || echo unknown").strip()
   BuildDate* = CompileDate & " " & CompileTime
   BaseURL* = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -120,6 +120,17 @@ type
     scStability = "stability"
     scUptime = "uptime"
 
+  PagerState* = object
+    enabled*: bool           ## true when pagination is active
+    page*: int              ## 0-indexed current page
+    pageSize*: int          ## rows per page (computed from terminal height)
+
+  FilterState* = object
+    active*: bool          ## true when user is typing a filter
+    query*: string         ## current filter string
+
+  CursorState* = object
+    row*: int              ## 0-indexed selected row in the filtered+sorted list
   Subcommand* = enum
     smBenchmark = "benchmark"
     smCatalog = "catalog"
@@ -166,6 +177,9 @@ type
     proxyConfigPath*: string
     proxyPort*: int
 
+    pagination*: PagerState       ## Pagination state
+    filter*: FilterState           ## Filter/search state
+    cursor*: CursorState           ## Cursor navigation state
 const DefaultThresholds* = Thresholds(
   perfectAvg: 400.0,
   perfectP95: 800.0,
@@ -186,6 +200,21 @@ proc padLeft*(s: string, width: int): string =
   if s.len >= width: s[0..<width]
   else: ' '.repeat(width - s.len) & s
 
+proc pageCount*(total: int, pageSize: int): int =
+  ## Number of pages needed for total items.
+  if pageSize <= 0 or total <= 0: return 1
+  (total + pageSize - 1) div pageSize
+
+proc clampPage*(page: int, total: int, pageSize: int): int =
+  ## Clamp page index to valid range.
+  let pages = pageCount(total, pageSize)
+  max(0, min(page, pages - 1))
+
+proc pageSlice*(total: int, page: int, pageSize: int): tuple[start: int, stop: int] =
+  ## Return (start, stop) indices (stop is exclusive) for a page.
+  let s = page * pageSize
+  let e = min(s + pageSize, total)
+  (s, e)
 proc addSample*(stats: var ModelStats, ms: float) =
   ## Add a latency sample to the ring buffer.
   stats.ring[stats.ringPos] = ms

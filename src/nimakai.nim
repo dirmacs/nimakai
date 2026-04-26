@@ -80,6 +80,10 @@ proc validateModels(models: seq[string], cat: seq[ModelMeta]) =
       msg &= "\e[0m"
       stderr.writeLine msg
 
+proc computePageSize(): int =
+  ## Rows available for model list: terminal height minus header/footer lines.
+  max(5, termHeight() - 8)
+
 proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
   var stats: seq[ModelStats] = @[]
   for m in cfg.models:
@@ -89,12 +93,21 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
     if m in favorites: s.favorite = true
     stats.add(s)
 
-  var sortCol = cfg.sortColumn
-  var round = 0
+  var sortCol   = cfg.sortColumn
+  var round     = 0
+  var pager     = cfg.pagination
+  var filterSt  = cfg.filter
+  var cursorRow = 0  # 0-indexed cursor in the current visible+paged view
   let interactive = not cfg.once and not cfg.jsonOutput and isatty(0.cint) != 0
+
+  # State machine modes
+  var showHelp   = false
+  var showDetail = false
+  var detailIdx  = -1  # absolute index in stats[] for detail view
 
   if interactive:
     enableRawMode()
+    pager.pageSize = computePageSize()
 
   try:
     while true:
@@ -103,12 +116,12 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
       # Rust-accelerated concurrent ping
       var modelIds: seq[string] = @[]
       for s in stats: modelIds.add(s.id)
-      let results = rustPingBatch(cfg.apiKey, modelIds, cfg.timeout)
+      let pingResults = rustPingBatch(cfg.apiKey, modelIds, cfg.timeout)
 
-      for i in 0..<min(results.len, stats.len):
-        let pr = results[i]
+      for i in 0..<min(pingResults.len, stats.len):
+        let pr = pingResults[i]
         stats[i].totalPings += 1
-        stats[i].lastMs = pr.ms
+        stats[i].lastMs     = pr.ms
         stats[i].lastHealth = pr.health
         if pr.health == hUp:
           stats[i].successPings += 1
@@ -120,9 +133,25 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
       if cfg.jsonOutput:
         printJson(stats, round, cat, cfg.thresholds)
       else:
-        if round > 1 or not cfg.once:
-          stdout.write "\e[2J\e[H"
-        printTable(stats, round, cat, sortCol, cfg.thresholds)
+        stdout.write "\e[2J\e[H"
+        if showHelp:
+          printHelp()
+        elif showDetail and detailIdx >= 0 and detailIdx < stats.len:
+          printModelDetail(stats[detailIdx], cat, cfg.thresholds)
+        else:
+          # Compute page size each render (handles terminal resize)
+          if interactive:
+            pager.pageSize = computePageSize()
+          # Clamp cursor to visible list bounds
+          let visible = filterStats(stats, filterSt.query)
+          let visLen = visible.len
+          if visLen > 0:
+            cursorRow = max(0, min(cursorRow, visLen - 1))
+          # Clamp page
+          if pager.enabled and pager.pageSize > 0:
+            pager.page = clampPage(pager.page, visLen, pager.pageSize)
+          printTable(stats, round, cat, sortCol, cfg.thresholds,
+                     pager, filterSt, if interactive: cursorRow else: -1)
 
       # Persist to history
       if not cfg.noHistory:
@@ -131,34 +160,136 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
       if cfg.once:
         break
 
-      # Wait for interval, checking for interactive input
+      # Wait for interval, processing interactive input
       let deadline = epochTime() + cfg.interval.float
       while epochTime() < deadline:
         if interactive:
           let key = tryReadKey()
-          case key
-          of 'a', 'A': sortCol = scAvg
-          of 'p', 'P': sortCol = scP95
-          of 's', 'S': sortCol = scStability
-          of 'n', 'N': sortCol = scName
-          of 'u', 'U': sortCol = scUptime
-          of '1'..'9':
-            let idx = ord(key) - ord('1')
-            if idx < stats.len:
-              stats[idx].favorite = not stats[idx].favorite
-              # Persist favorites
-              var favs: seq[string] = @[]
-              for s in stats:
-                if s.favorite: favs.add(s.id)
-              saveFavorites("", favs)
-          of 'q', 'Q':
-            disableRawMode()
-            quit(0)
-          else: discard
-        sleep(50)
+          if key == '\0':
+            sleep(30)
+          else:
+            # Dismiss overlays first
+            if showHelp or showDetail:
+              showHelp   = false
+              showDetail = false
+              detailIdx  = -1
+              # Force immediate redraw
+              let deadline2 = epochTime() + 0.05
+              while epochTime() < deadline2: sleep(10)
+              break
+
+            # Filter mode: capture printable chars
+            if filterSt.active:
+              if key == '\e':
+                filterSt.active = false
+                filterSt.query  = ""
+                cursorRow = 0
+              elif key == '\x7f' or key == '\b':  # backspace
+                if filterSt.query.len > 0:
+                  filterSt.query = filterSt.query[0..^2]
+                  cursorRow = 0
+              elif key >= ' ' and key <= '~':  # printable ASCII
+                filterSt.query &= key
+                cursorRow = 0
+              break
+
+            # Normal mode key dispatch
+            case key
+            of 'a', 'A': sortCol = scAvg
+            of 'p', 'P': sortCol = scP95
+            of 's', 'S': sortCol = scStability
+            of 'n', 'N': sortCol = scName
+            of 'u', 'U': sortCol = scUptime
+            of 'j':
+              # cursor down
+              let vis = filterStats(stats, filterSt.query)
+              cursorRow = min(cursorRow + 1, max(0, vis.len - 1))
+              # If paginated, advance page when cursor exits page
+              if pager.enabled and pager.pageSize > 0:
+                let (s, e) = pageSlice(vis.len, pager.page, pager.pageSize)
+                if cursorRow >= e and pager.page < pageCount(vis.len, pager.pageSize) - 1:
+                  inc pager.page
+                  cursorRow = e
+            of 'k':
+              # cursor up
+              cursorRow = max(cursorRow - 1, 0)
+              if pager.enabled and pager.pageSize > 0:
+                let (s, _) = pageSlice(filterStats(stats, filterSt.query).len, pager.page, pager.pageSize)
+                if cursorRow < s and pager.page > 0:
+                  dec pager.page
+                  cursorRow = s - 1
+            of '\r', '\n':  # Enter — detail view
+              let vis = filterStats(stats, filterSt.query)
+              if pager.enabled and pager.pageSize > 0:
+                let (s, _) = pageSlice(vis.len, pager.page, pager.pageSize)
+                let absRow = s + cursorRow
+                if absRow < vis.len:
+                  # Find index in stats
+                  for si, st in stats:
+                    if st.id == vis[absRow].id:
+                      detailIdx = si
+                      break
+              else:
+                if cursorRow < vis.len:
+                  for si, st in stats:
+                    if st.id == vis[cursorRow].id:
+                      detailIdx = si
+                      break
+              if detailIdx >= 0:
+                showDetail = true
+            of 't', 'T':
+              pager.enabled = not pager.enabled
+              if pager.enabled:
+                pager.pageSize = computePageSize()
+                pager.page = 0
+              cursorRow = 0
+            of '<', '[':  # prev page
+              if pager.enabled and pager.page > 0:
+                dec pager.page
+                cursorRow = 0
+            of '>', ']':  # next page
+              if pager.enabled:
+                let vis = filterStats(stats, filterSt.query)
+                let maxPage = pageCount(vis.len, pager.pageSize) - 1
+                if pager.page < maxPage:
+                  inc pager.page
+                  cursorRow = 0
+            of '/':
+              filterSt.active = true
+            of '\e':  # Esc: clear filter
+              filterSt.active = false
+              filterSt.query  = ""
+              cursorRow = 0
+            of '?':
+              showHelp = true
+            of '1'..'9':
+              let vis = filterStats(stats, filterSt.query)
+              let idx = ord(key) - ord('1')
+              let absIdx =
+                if pager.enabled and pager.pageSize > 0:
+                  let (s, _) = pageSlice(vis.len, pager.page, pager.pageSize)
+                  s + idx
+                else:
+                  idx
+              if absIdx < vis.len:
+                # Find in stats and toggle
+                for si, st in stats:
+                  if st.id == vis[absIdx].id:
+                    stats[si].favorite = not stats[si].favorite
+                    break
+                var favs: seq[string] = @[]
+                for st in stats:
+                  if st.favorite: favs.add(st.id)
+                saveFavorites("", favs)
+            of 'q', 'Q':
+              disableRawMode()
+              quit(0)
+            else: discard
+            break  # redraw after any key
+        else:
+          sleep(50)
   finally:
     disableRawMode()
-
 proc runRecommend(cfg: Config, cat: seq[ModelMeta]) =
   if cfg.rollback:
     discard rollbackOmo()
