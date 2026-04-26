@@ -80,7 +80,6 @@ proc saveConfigFile*(path: string = "", favorites: seq[string] = @[],
     "interval": interval,
     "timeout": timeout,
     "models": newJArray(),
-    "models": newJArray(),
     "thresholds": {
       "perfect_avg": thresholds.perfectAvg,
       "perfect_p95": thresholds.perfectP95,

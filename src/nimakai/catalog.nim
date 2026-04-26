@@ -183,14 +183,13 @@ proc printCatalog*(catalog: seq[ModelMeta]) =
 
   let header = "  " &
     padRight("MODEL", 35) &
-    padLeft("TIER", 5) &
     padLeft("SWE%", 7) &
     padLeft("CTX", 8) &
     "  " &
     padRight("CAPS", 12) &
     padRight("ID", 45)
   echo "\e[1;90m" & header & "\e[0m"
-  echo "\e[90m  " & "-".repeat(112) & "\e[0m"
+  echo "\e[90m  " & "-".repeat(107) & "\e[0m"
 
   var sorted = catalog
   sorted.sort(proc(a, b: ModelMeta): int =
