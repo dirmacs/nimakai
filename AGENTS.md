@@ -1,12 +1,12 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.13.1. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.13.0. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.13.2 includes critical fixes for NVIDIA NIM assistant message validation and OMP/Pawan integration.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.13.7 includes critical fixes for NVIDIA NIM assistant message validation and OMP/Pawan integration.
 
-## FFI Integration (v0.13.1)
+## FFI Integration (v0.13.0)
 
-nimakai v0.13.1 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
+nimakai v0.13.0 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
 
 ```bash
 nimakai proxy start --proxy-config /path/to/nimaproxy.toml --proxy-port 8080
@@ -67,10 +67,10 @@ Trades N×token budget for min(P50 latency).
 ```toml
 [racing]
 enabled = true
-models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
-max_parallel = 3
-timeout_ms = 8000
-strategy = "complete"
+models = ["minimaxai/minimax-m2.5", "minimaxai/minimax-m2.7", "qwen/qwen3.5-122b-a10b",
+  "qwen/qwen3.5-397b-a17b", "nvidia/nemotron-3-super-120b-a12b", "z-ai/glm4.7",
+  "z-ai/glm5", "z-ai/glm-5.1", "mistralai/mistral-large-3-675b-instruct-2512"]
+max_parallel = 9
 ```
 
 ## Model Routing (V2)
@@ -87,15 +87,14 @@ Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skip
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "nvidia/meta/llama-3.3-70b-instruct",
-  "nvidia/qwen/qwen2.5-coder-32b-instruct",
-  "nvidia/moonshotai/kimi-k2-instruct",
-  "nvidia/mistralai/devstral-2-123b-instruct-2512",
+  "meta/llama-3.3-70b-instruct",
+  "qwen/qwen2.5-coder-32b-instruct",
+  "moonshotai/kimi-k2-instruct",
+  "mistralai/mistral-large-3-675b-instruct-2512",
 ]
 ```
 
-Available racing models: z-ai/glm4.7, qwen/qwen3.5-397b-a17b, mistralai/devstral-2-123b-instruct-2512, moonshotai/kimi-k2-instruct, minimaxai/minimax-m2.7
-
+Available racing models (current pool, 9 total): minimaxai/minimax-m2.5, minimaxai/minimax-m2.7, qwen/qwen3.5-122b-a10b, qwen/qwen3.5-397b-a17b, nvidia/nemotron-3-super-120b-a12b, z-ai/glm4.7, z-ai/glm5, z-ai/glm-5.1, mistralai/mistral-large-3-675b-instruct-2512
 ## Metrics Reference
 
 | Metric | How Computed |
@@ -149,7 +148,7 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 # → {"primary": "nvidia/devstral-2-123b", "fallback": "stepfun-ai/step-3.5-flash"}
 ```
 
-## nimaproxy v0.13.2 Critical Fixes
+## nimaproxy v0.13.7 Critical Fixes (cumulative)
 
 ### Assistant Message Validation
 
