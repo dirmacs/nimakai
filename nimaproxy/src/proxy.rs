@@ -422,7 +422,6 @@ pub fn fix_message_ordering(json: &mut Value) {
                         let empty_assistant = serde_json::json!({
                             "role": "assistant",
                             "content": "Processing...",
-                            "tool_calls": []
                         });
                         messages.insert(i + 1, empty_assistant);
                         i += 2; // Skip the inserted message
@@ -678,6 +677,19 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
         }
     }
 
+    // Debug: check for content+tool_calls mismatch before sending
+    if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
+        for (i, msg) in messages.iter().enumerate() {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            let has_content = msg.get("content")
+                .map(|c| !c.is_null() && c.as_str().map(|s| !s.is_empty()).unwrap_or(true))
+                .unwrap_or(false);
+            let has_tool_calls = msg.get("tool_calls").is_some();
+            if has_content && has_tool_calls {
+                eprintln!("DEBUG: MISMATCH at msg {}: role={}, content={:?}", i, role, msg.get("content"));
+            }
+        }
+    }
     eprintln!("DEBUG: Sending to NVIDIA API - model_id={}, json={}", model_id, json);
     (model_id, Bytes::from(json.to_string()))
 }
