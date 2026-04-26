@@ -3,6 +3,26 @@ import nimakai/types
 import nimakai/proxyffi
 import nimakai/cli
 
+proc getConfigPath(): string =
+  ## Returns path to nimaproxy.toml relative to the repo root.
+  ## Falls back to NIMAPROXY_CONFIG env var if set.
+  let envPath = getEnv("NIMAPROXY_CONFIG", "")
+  if envPath.len > 0:
+    return envPath
+  # getAppDir() at runtime points to the directory of the compiled test binary,
+  # which nim places in nimcache or the tests/ dir. Traverse up to repo root.
+  let binDir = getAppDir()
+  # tests/ binary is typically in nimcache/tests/ or tests/
+  # Walk up until we find a nimaproxy/ directory
+  var candidate = binDir
+  for _ in 0..4:
+    if dirExists(candidate / "nimaproxy"):
+      return candidate / "nimaproxy" / "nimaproxy.toml"
+    candidate = candidate.parentDir()
+  # Last resort: relative from cwd (works when run from repo root)
+  return "nimaproxy" / "nimaproxy.toml"
+
+
 suite "Proxy FFI Tests":
   setup:
     # Ensure proxy is stopped before each test
@@ -15,7 +35,7 @@ suite "Proxy FFI Tests":
     sleep(100)
 
   test "proxyStart spawns daemon successfully":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+    let configPath = getConfigPath()
     let port = 8080
     
     let result = proxyStart(configPath, port)
@@ -28,7 +48,7 @@ suite "Proxy FFI Tests":
     check fileExists("/tmp/nimaproxy.pid")
 
   test "proxyHealth returns UP when daemon is running":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+    let configPath = getConfigPath()
     let port = 8080
 
     discard proxyStart(configPath, port)
@@ -40,7 +60,7 @@ suite "Proxy FFI Tests":
     check health.status == "UP"
 
   test "proxyStats returns valid statistics":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+    let configPath = getConfigPath()
     let port = 8080
 
     discard proxyStart(configPath, port)
@@ -55,7 +75,7 @@ suite "Proxy FFI Tests":
     check stats.racingTimeoutMs >= 0
 
   test "proxyStop kills running daemon":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+    let configPath = getConfigPath()
     let port = 8080
     
     discard proxyStart(configPath, port)
@@ -79,7 +99,7 @@ suite "Proxy FFI Tests":
     check isNone(healthOpt)
 
   test "proxyStart with port 0 uses config default":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+    let configPath = getConfigPath()
 
     let result = proxyStart(configPath, 0)
     check result == 0
@@ -92,7 +112,7 @@ suite "Proxy FFI Tests":
     check health.status == "UP"
 
   test "proxyStart with custom port override":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+    let configPath = getConfigPath()
     let customPort = 9090
 
     let result = proxyStart(configPath, customPort)
@@ -106,7 +126,7 @@ suite "Proxy FFI Tests":
     check health.status == "UP"
 
 test "proxyStats includes racing configuration":
-  let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+  let configPath = getConfigPath()
   let port = 8080
 
   discard proxyStart(configPath, port)
@@ -124,7 +144,7 @@ test "proxyStats includes racing configuration":
   check stats.racingTimeoutMs >= 0
 
   test "proxyStop is idempotent":
-    let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+    let configPath = getConfigPath()
     let port = 8080
     
     discard proxyStart(configPath, port)
@@ -149,7 +169,7 @@ test "proxyStats includes racing configuration":
     check result != 0
 
 test "proxyStats returns empty arrays when no requests made":
-  let configPath = "/opt/nimakai/nimaproxy/nimaproxy.toml"
+  let configPath = getConfigPath()
   let port = 9095
 
   let startResult = proxyStart(configPath, port)

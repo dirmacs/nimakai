@@ -2,10 +2,10 @@
 # Self-contained build: binary + .so files in same directory, no LD_LIBRARY_PATH needed
 
 # Config
-config       := "/opt/nimakai/nimaproxy.toml"
+config       := "nimaproxy.toml"
 binary_name  := "nimaproxy"
 binary_src   := "nimaproxy/target/release/" + binary_name
-binary_dst   := "/usr/local/bin/nimaproxy-bin"
+binary_dst   := "/usr/local/bin/nimaproxy"
 service_name := "nimaproxy"
 
 # Default recipe
