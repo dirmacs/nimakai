@@ -8,9 +8,9 @@ const NVIDIA_API_BASE: &str = "https://integrate.api.nvidia.com";
 
 fn get_test_keys() -> Vec<(String, String)> {
     vec![
-        ("REDACTED_KEY_1".to_string(), "doltares".to_string()),
-        ("REDACTED_KEY_2".to_string(), "ares".to_string()),
-        ("REDACTED_KEY_3".to_string(), "dirmacs".to_string()),
+        ("nvapi-YOUR_FIRST_KEY_HERE".to_string(), "key1".to_string()),
+        ("nvapi-YOUR_SECOND_KEY_HERE".to_string(), "key2".to_string()),
+        ("nvapi-YOUR_THIRD_KEY_HERE".to_string(), "key3".to_string()),
     ]
 }
 
@@ -135,9 +135,9 @@ async fn test_e2e_key_pool_status() {
     let statuses = state.pool.status();
     assert_eq!(statuses.len(), 3);
 
-    assert_eq!(statuses[0].label, "doltares");
-    assert_eq!(statuses[1].label, "ares");
-    assert_eq!(statuses[2].label, "dirmacs");
+    assert_eq!(statuses[0].label, "key1");
+    assert_eq!(statuses[1].label, "key2");
+    assert_eq!(statuses[2].label, "key3");
     
     state.pool.mark_rate_limited(0, 60);
     
@@ -395,7 +395,7 @@ async fn test_e2e_racing_429_key_cooldown_persists() {
 
     // If key 0 was used despite cooldown, that's a bug
     if let Some(ref label) = key_label {
-        assert_ne!(label, "doltares", "rate-limited key 'doltares' (idx 0) must not be used by racing");
+        assert_ne!(label, "key1", "rate-limited key 'key1' (idx 0) must not be used by racing");
     }
 
     // Accept any non-500 result — key exhaustion or successful chat both acceptable

@@ -201,7 +201,7 @@ pub extern "C" fn proxy_start_with_pid_file(
 
     let port_cstr    = CString::new(port.to_string()).unwrap();
     let config_cstr  = CString::new(path).unwrap();
-    let bin_path     = CString::new("/opt/nimakai/nimaproxy-bin").unwrap();
+    let bin_path     = CString::new(std::env::var("NIMAPROXY_BIN").unwrap_or_else(|_| "nimaproxy".to_string())).unwrap();
     let cf_flag      = CString::new("--config").unwrap();
     let pt_flag      = CString::new("--port").unwrap();
     let pid_flag     = CString::new("--pid-file").unwrap();
@@ -412,7 +412,7 @@ mod ffi_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::TempDir;
 
-    const NVIDIA_API_KEY: &str = "REDACTED_KEY_1";
+    const NVIDIA_API_KEY: &str = "nvapi-YOUR_TEST_KEY_HERE";
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
