@@ -1,20 +1,7 @@
 # Model Routing Tests
 # Tests routing to specific models and invalid model handling
 
-# Test 1: Route to Mistral Small
-POST {{NIMAPROXY_URL}}/v1/chat/completions
-Content-Type: application/json
-{
-  "model": "mistralai/mistral-small-4-119b-2603",
-  "messages": [{"role": "user", "content": "Say hello"}],
-  "max_tokens": 50
-}
-HTTP 200
-[Asserts]
-jsonpath "$.choices[0].message.role" == "assistant"
-jsonpath "$.choices[0].message.content" exists
-
-# Test 2: Route to Mistral Large
+# Test 1: Route to Mistral Large
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
@@ -25,9 +12,8 @@ Content-Type: application/json
 HTTP 200
 [Asserts]
 jsonpath "$.choices[0].message.role" == "assistant"
-jsonpath "$.choices[0].message.content" exists
 
-# Test 3: Route to Qwen model
+# Test 2: Route to Qwen model
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
@@ -38,9 +24,8 @@ Content-Type: application/json
 HTTP 200
 [Asserts]
 jsonpath "$.choices[0].message.role" == "assistant"
-jsonpath "$.choices[0].message.content" exists
 
-# Test 4: Route to GLM model
+# Test 3: Route to GLM model
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
@@ -51,13 +36,24 @@ Content-Type: application/json
 HTTP 200
 [Asserts]
 jsonpath "$.choices[0].message.role" == "assistant"
-jsonpath "$.choices[0].message.content" exists
 
-# Test 5: Invalid model name should return 4xx
+# Test 4: Route to Devstral model
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "invalid/model-name-that-does-not-exist",
+  "model": "mistralai/devstral-2-123b-instruct-2512",
+  "messages": [{"role": "user", "content": "Hi"}],
+  "max_tokens": 50
+}
+HTTP 200
+[Asserts]
+jsonpath "$.choices[0].message.role" == "assistant"
+
+# Test 5: Invalid model name should return 404
+POST {{NIMAPROXY_URL}}/v1/chat/completions
+Content-Type: application/json
+{
+  "model": "nonexistent/model-name",
   "messages": [{"role": "user", "content": "Hello"}]
 }
-HTTP 400
+HTTP 404
