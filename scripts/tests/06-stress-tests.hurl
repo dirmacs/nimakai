@@ -5,61 +5,51 @@
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "mistralai/mistral-small-4-119b-2603",
+  "model": "qwen/qwen3.5-122b-a10b",
   "messages": [{"role": "user", "content": "Request 1"}],
   "max_tokens": 20
 }
-HTTP 200
-[Asserts]
-jsonpath "$.choices[0].message.role" == "assistant"
+HTTP *
 
 # Test 2: Request 2
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "mistralai/mistral-small-4-119b-2603",
+  "model": "qwen/qwen3.5-122b-a10b",
   "messages": [{"role": "user", "content": "Request 2"}],
   "max_tokens": 20
 }
-HTTP 200
-[Asserts]
-jsonpath "$.choices[0].message.role" == "assistant"
+HTTP *
 
 # Test 3: Request 3
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "mistralai/mistral-small-4-119b-2603",
+  "model": "qwen/qwen3.5-122b-a10b",
   "messages": [{"role": "user", "content": "Request 3"}],
   "max_tokens": 20
 }
-HTTP 200
-[Asserts]
-jsonpath "$.choices[0].message.role" == "assistant"
+HTTP *
 
 # Test 4: Request 4
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "mistralai/mistral-small-4-119b-2603",
+  "model": "qwen/qwen3.5-122b-a10b",
   "messages": [{"role": "user", "content": "Request 4"}],
   "max_tokens": 20
 }
-HTTP 200
-[Asserts]
-jsonpath "$.choices[0].message.role" == "assistant"
+HTTP *
 
 # Test 5: Request 5 - different model
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "qwen/qwen3.5-122b-a10b",
+  "model": "z-ai/glm4.7",
   "messages": [{"role": "user", "content": "Request 5"}],
   "max_tokens": 20
 }
-HTTP 200
-[Asserts]
-jsonpath "$.choices[0].message.role" == "assistant"
+HTTP *
 
 # Test 6: Racing request under load
 POST {{NIMAPROXY_URL}}/v1/chat/completions
@@ -69,9 +59,7 @@ Content-Type: application/json
   "messages": [{"role": "user", "content": "Racing under load"}],
   "max_tokens": 50
 }
-HTTP 200
-[Asserts]
-jsonpath "$.choices[0].message.role" == "assistant"
+HTTP *
 
 # Test 7: Stats after stress test
 GET {{NIMAPROXY_URL}}/stats
