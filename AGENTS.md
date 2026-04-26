@@ -1,12 +1,12 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.13.0. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.13.1. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.13.1 includes critical fixes for NVIDIA NIM assistant message validation and OMP/Pawan integration.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.13.2 includes critical fixes for NVIDIA NIM assistant message validation and OMP/Pawan integration.
 
-## FFI Integration (v0.13.0)
+## FFI Integration (v0.13.1)
 
-nimakai v0.13.0 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
+nimakai v0.13.1 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
 
 ```bash
 nimakai proxy start --proxy-config /path/to/nimaproxy.toml --proxy-port 8080
@@ -149,7 +149,7 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 # → {"primary": "nvidia/devstral-2-123b", "fallback": "stepfun-ai/step-3.5-flash"}
 ```
 
-## nimaproxy v0.13.1 Critical Fixes
+## nimaproxy v0.13.2 Critical Fixes
 
 ### Assistant Message Validation
 
