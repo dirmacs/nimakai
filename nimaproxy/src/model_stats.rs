@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
+use tracing::debug;
 
 const RING_SIZE: usize = 100;
 
@@ -50,7 +51,7 @@ impl Default for CircuitBreakerConfig {
         Self {
             max_output_tokens: 32000,            // ~32K tokens, warn at high output
             max_repetitions: 5,                  // 5+ repeated n-grams triggers degradation
-            max_consecutive_assistant_turns: 10, // 10 turns without tools = circuit break
+            max_consecutive_assistant_turns: 5, // 5 turns without tools = circuit break
         }
     }
 }
@@ -157,7 +158,7 @@ impl ModelEntry {
         timeout.max(1000) // minimum 1s timeout
     }
 
- pub fn is_degraded(&self, spike_threshold_ms: f64, cb_config: &CircuitBreakerConfig) -> bool {
+pub fn is_degraded(&self, model_id: &str, spike_threshold_ms: f64, cb_config: &CircuitBreakerConfig) -> bool {
  // Server-side degradation (NVIDIA-declared) takes precedence
  if self.server_degraded {
  return true;
@@ -177,11 +178,17 @@ impl ModelEntry {
  if cb_config.max_repetitions > 0 && self.repetition_count >= cb_config.max_repetitions {
  return true;
  }
- if cb_config.max_consecutive_assistant_turns > 0
- && self.consecutive_assistant_turns >= cb_config.max_consecutive_assistant_turns
- {
- return true;
- }
+    if cb_config.max_consecutive_assistant_turns > 0
+        && self.consecutive_assistant_turns >= cb_config.max_consecutive_assistant_turns
+    {
+        debug!(
+            "Circuit breaker triggered for model '{}': consecutive_assistant_turns={} >= max_consecutive_assistant_turns={}",
+            model_id,
+            self.consecutive_assistant_turns,
+            cb_config.max_consecutive_assistant_turns
+        );
+        return true;
+    }
  false
  }
  
@@ -348,7 +355,7 @@ impl ModelStatsStore {
  // Use total (includes failures) not ring_len (only successes) to properly detect untried state
  if e.total == 0 || e.total < 3 {
      untried.push(m);
- } else if e.is_degraded(threshold, &self.circuit_breaker) {
+ } else if e.is_degraded(m, threshold, &self.circuit_breaker) {
  degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
  } else {
  ok.push((m, e.avg_ms().unwrap_or(f64::MAX)));
@@ -396,7 +403,7 @@ impl ModelStatsStore {
  if e.consecutive_failures >= 20 && all_keys_failed {
  continue;
  }
- if e.ring_len >= 3 && e.is_degraded(threshold, &self.circuit_breaker) {
+ if e.is_degraded(m, threshold, &self.circuit_breaker) {
  continue;
  }
  ranked.push((m, e.avg_ms()));
@@ -433,7 +440,7 @@ impl ModelStatsStore {
                 success_rate: e.success_rate(),
                 sample_count: e.ring_len,
                 consecutive_failures: e.consecutive_failures,
-                degraded: e.is_degraded(threshold, &self.circuit_breaker),
+                degraded: e.is_degraded(id, threshold, &self.circuit_breaker),
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -544,7 +551,7 @@ mod tests {
         entry.consecutive_failures = 3;
         let cb = CircuitBreakerConfig::default();
 
-        assert!(entry.is_degraded(3000.0, &cb));
+        assert!(entry.is_degraded("test-model", 3000.0, &cb));
     }
 
     #[test]
@@ -556,7 +563,7 @@ mod tests {
         entry.push(5000.0);
         let cb = CircuitBreakerConfig::default();
 
-        assert!(entry.is_degraded(3000.0, &cb));
+        assert!(entry.is_degraded("test-model", 3000.0, &cb));
     }
 
     #[test]
@@ -567,7 +574,7 @@ mod tests {
         entry.push(550.0);
         let cb = CircuitBreakerConfig::default();
 
-        assert!(!entry.is_degraded(3000.0, &cb));
+        assert!(!entry.is_degraded("test-model", 3000.0, &cb));
     }
 
     #[test]
@@ -580,7 +587,7 @@ mod tests {
             max_consecutive_assistant_turns: 0,
         };
 
-        assert!(entry.is_degraded(3000.0, &cb));
+        assert!(entry.is_degraded("test-model", 3000.0, &cb));
     }
 
     #[test]
@@ -593,7 +600,7 @@ mod tests {
             max_consecutive_assistant_turns: 0,
         };
 
-        assert!(entry.is_degraded(3000.0, &cb));
+        assert!(entry.is_degraded("test-model", 3000.0, &cb));
     }
 
     #[test]
@@ -606,7 +613,7 @@ mod tests {
             max_consecutive_assistant_turns: 10,
         };
 
-        assert!(entry.is_degraded(3000.0, &cb));
+        assert!(entry.is_degraded("test-model", 3000.0, &cb));
     }
 
     #[test]
@@ -621,7 +628,7 @@ mod tests {
             max_consecutive_assistant_turns: 0,
         };
 
-        assert!(!entry.is_degraded(3000.0, &cb));
+        assert!(!entry.is_degraded("test-model", 3000.0, &cb));
     }
 
     #[test]
@@ -1125,11 +1132,11 @@ mod getter_tests {
          let mut entry = ModelEntry::new();
  
          // Initially not degraded
-         assert!(!entry.is_degraded(3000.0, &cb_config));
+         assert!(!entry.is_degraded("test-model", 3000.0, &cb_config));
  
          // Set output token count above threshold
          entry.output_token_count = 150;
-         assert!(entry.is_degraded(3000.0, &cb_config), "Should be degraded due to token count");
+         assert!(entry.is_degraded("test-model", 3000.0, &cb_config), "Should be degraded due to token count");
 }
  
  // Test 20: Best model with all degraded using consecutive failures
@@ -1187,13 +1194,13 @@ mod getter_tests {
  let cb_config = CircuitBreakerConfig::default();
  
  // Initially not degraded
- assert!(!entry.is_degraded(3000.0, &cb_config));
+ assert!(!entry.is_degraded("test-model", 3000.0, &cb_config));
  
  // Mark as server degraded
  entry.mark_server_degraded();
  
  // Should be degraded even with good latency and no failures
- assert!(entry.is_degraded(3000.0, &cb_config));
+ assert!(entry.is_degraded("test-model", 3000.0, &cb_config));
  }
  
  #[test]

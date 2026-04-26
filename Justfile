@@ -5,7 +5,7 @@
 config       := "/opt/nimakai/nimaproxy.toml"
 binary_name  := "nimaproxy"
 binary_src   := "nimaproxy/target/release/" + binary_name
-binary_dst   := "/usr/local/bin/nimaproxy"
+binary_dst   := "/usr/local/bin/nimaproxy-bin"
 service_name := "nimaproxy"
 
 # Default recipe
