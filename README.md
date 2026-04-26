@@ -164,7 +164,7 @@ nimakai proxy stop
 | `--interval` | `-i` | Ping interval in seconds | 5 |
 | `--timeout` | `-t` | Request timeout in seconds | 15 |
 | `--json` | `-j` | JSON output | table |
- | `--sort` | | Sort: avg, p95, stability, name, uptime | avg |
+| `--sort` | | Sort: avg, p95, stability, name, uptime | avg |
 | `--opencode` | | Use models from opencode.json | |
 | `--rounds` | `-r` | Benchmark rounds for recommend | 3 |
 | `--apply` | | Apply recommendations to oh-my-opencode.json | |
