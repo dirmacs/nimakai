@@ -50,8 +50,8 @@ Requires Nim 2.0+ and OpenSSL.
 ## Usage
 
 ```bash
-|export NVIDIA_API_KEY="nvapi-..."
-|
+export NVIDIA_API_KEY="nvapi-..."
+
 # Continuous monitoring (all models by default)
 nimakai
 
@@ -76,7 +76,7 @@ nimakai --once --json
 ```text
 nimakai                    Continuous benchmark (default)
 nimakai catalog            List all known models with metadata
- nimakai catalog            List all known models with metadata
+nimakai catalog            List all known models with metadata
 nimakai recommend          Benchmark and recommend routing changes
 nimakai watch              Monitor OMO-routed models with alerts
 nimakai check              CI health check with exit codes
