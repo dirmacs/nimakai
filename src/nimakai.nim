@@ -600,11 +600,7 @@ proc main() =
         stderr.writeLine "\e[31mError fetching models: " & fetchResult.apiError & "\e[0m"
         quit(1)
       # Use all fetched model IDs as the default list
-      models = @[]
-      for m in fetchResult.newModels:
-        models.add(m.id)
-      for mId in fetchResult.existingModels:
-        models.add(mId)
+ models = fetchResult.allModels
 
     if models.len == 0:
       stderr.writeLine "\e[31mError: no models matched the filter\e[0m"
