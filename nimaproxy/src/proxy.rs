@@ -949,6 +949,13 @@ async fn race_models(
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.parse::<u64>().ok())
                         .unwrap_or(60);
+
+                    // For 4xx/5xx: buffer body now (stream will be consumed) so we can log it
+                    if status.as_u16() != 429 && status.as_u16() >= 400 {
+                        let body_bytes = resp.bytes().await.unwrap_or_default();
+                        let body_str = String::from_utf8_lossy(&body_bytes);
+                        return Err(format!("HTTP {} from {}: {}", status.as_u16(), model_id_clone, &body_str[..body_str.len().min(400)]));
+                    }
                     let content_type = resp
                         .headers()
                         .get("content-type")
@@ -1020,9 +1027,6 @@ Ok(Ok((response, status_code, key_idx, retry_after_secs))) => {
         state.pool.mark_rate_limited(key_idx, retry_after_secs);
         eprintln!("[racing] {} → 429, key {} rate-limited {}s, trying next", model_id, key_idx, retry_after_secs);
         last_error = Some(format!("429 rate-limited (key {})", key_idx));
-    } else if status_code >= 400 {
-        eprintln!("[racing] {} → HTTP {}, skipping (not propagating 4xx/5xx to client)", model_id, status_code);
-        last_error = Some(format!("HTTP {} from {}", status_code, model_id));
     } else {
         eprintln!("[racing] {} → HTTP {} (winner)", model_id, status_code);
         return response;
