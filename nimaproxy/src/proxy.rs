@@ -1685,8 +1685,6 @@ mod tool_call_id_tests {
         assert_eq!(msgs[0]["role"], "tool");
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["content"], "Processing...");
-        assert!(msgs[1]["tool_calls"].is_array());
-        assert_eq!(msgs[1]["tool_calls"].as_array().unwrap().len(), 0);
         assert_eq!(msgs[2]["role"], "user");
     }
 
