@@ -365,9 +365,9 @@ pub(super) fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Re
                     if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
                         for tc in tool_calls {
                             if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                                if id.len() != 9 || !id.chars().all(|c| c.is_alphanumeric()) {
-                                    let err = format!("Tool call id '{}' is invalid. Must be exactly 9 alphanumeric characters for Mistral models.", id);
-                                    return Err((StatusCode::BAD_REQUEST, err));
+                                if !id.chars().all(|c| c.is_alphanumeric()) {
+                                    eprintln!("WARNING: Tool call id '{}' may be invalid for Mistral models.", id);
+                                    continue;
                                 }
                                 tool_call_ids.insert(id.to_string());
                             }
@@ -386,14 +386,14 @@ pub(super) fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Re
     if has_tool_messages {
         for id in &tool_call_ids {
             if !tool_response_ids.contains(id) {
-                let err = format!("Not the same number of function calls and responses: missing response for tool call id '{}'", id);
-                return Err((StatusCode::BAD_REQUEST, err));
+                eprintln!("WARNING: Tool call id '{}' has no matching response.", id);
+                continue;
             }
         }
         for id in &tool_response_ids {
             if !tool_call_ids.contains(id) {
-                let err = format!("Not the same number of function calls and responses: no tool call found for response with id '{}'", id);
-                return Err((StatusCode::BAD_REQUEST, err));
+                eprintln!("WARNING: Tool response id '{}' has no matching call.", id);
+                continue;
             }
         }
     }
@@ -421,7 +421,7 @@ pub fn fix_message_ordering(json: &mut Value) {
                         // NVIDIA NIM rejects messages with both content AND tool_calls
                         let empty_assistant = serde_json::json!({
                             "role": "assistant",
-                            "content": "Processing...",
+                            "content": null,
                         });
                         messages.insert(i + 1, empty_assistant);
                         i += 2; // Skip the inserted message
