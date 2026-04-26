@@ -127,7 +127,7 @@ Each OMO category is scored using weighted criteria:
 
 ## Proxy Commands (FFI Integration)
 
-nimakai v0.13.1 includes FFI integration with nimaproxy, allowing you
+nimakai v0.13.0 includes FFI integration with nimaproxy, allowing you
 to start/stop/query the Rust key-rotation proxy directly from the Nim
 CLI:
 
@@ -232,11 +232,11 @@ src/
     watch.nim              Watch mode alerting (down/recovered/degraded)
     discovery.nim          Live model discovery from NVIDIA API
 tests/
-    test_types.nim         9 tests
+    test_types.nim         6 tests
     test_metrics.nim       41 tests
-    test_display.nim       32 tests
+    test_display.nim       31 tests
     test_ping.nim          15 tests
-    test_catalog.nim       22 tests
+    test_catalog.nim       17 tests
     test_config.nim        12 tests
     test_opencode.nim      5 tests
     test_recommend.nim     34 tests
@@ -246,8 +246,8 @@ tests/
     test_watch.nim         8 tests
     test_integration.nim   12 tests
     test_discovery.nim     9 tests
-    test_cli.nim           72 tests
-```
+    test_cli.nim           62 tests
+    test_proxy.nim         11 tests
 
 ### nimaproxy (Rust)
 
@@ -261,16 +261,24 @@ nimaproxy/
     lib.rs                 Exports modules + AppState
     main.rs                Binary entry point
     config.rs              TOML config parsing
+    turn_log.rs             Request logging and query analysis
     key_pool.rs            Key rotation, rate-limit tracking
     model_stats.rs          Per-model latency tracking
     model_router.rs        Latency-aware model selection
     proxy.rs               HTTP handlers
   tests/
     integration.rs         45 integration tests
-    e2e_live.rs            11 E2E tests with real NVIDIA API
-    stress_test.rs         25-turn live stress test
+    e2e_live.rs            14 E2E tests with real NVIDIA API
+    stress_test.rs         1 live stress test
     coverage_gaps.rs       14 coverage gap tests
-    proxy_error_paths.rs   19 proxy error path tests
+    proxy_error_paths.rs   22 proxy error path tests
+    live_chat.rs          5 live chat tests
+    live_key_rotation.rs  2 key rotation tests
+    live_routing.rs       2 routing tests
+    live_conversation.rs  2 conversation tests
+    live_streaming.rs     2 streaming tests
+    live_circuit_breaker.rs 2 circuit breaker tests
+    live_tool_calls.rs    7 tool call tests
 ```
 
 ## nimaproxy — Key-Rotation Proxy
@@ -294,6 +302,7 @@ cp nimaproxy.toml.example nimaproxy.toml
 - `GET /health` — Key pool status
 - `GET /stats` — Per-model latency stats
 - `GET /v1/models` — Passthrough to NVIDIA
+- `GET /models` — Alias (without /v1/ prefix)
 - `POST /v1/chat/completions` — Proxy with key rotation
 
 **Features:**
@@ -311,10 +320,10 @@ cp nimaproxy.toml.example nimaproxy.toml
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "nvidia/meta/llama-3.3-70b-instruct",
-  "nvidia/qwen/qwen2.5-coder-32b-instruct",
-  "nvidia/moonshotai/kimi-k2-instruct",
-  "nvidia/mistralai/devstral-2-123b-instruct-2512",
+  "moonshotai/kimi-k2-instruct",
+  "qwen/qwen3.5-122b-a10b",
+  "mistralai/mistral-large-3-675b-instruct-2512",
+  "z-ai/glm4.7",
 ]
 ```
 
@@ -326,16 +335,16 @@ When a request arrives with `"model": "auto"`, the proxy picks the best model fr
 [racing]
 enabled = true
 models = [
-  "moonshotai/kimi-k2",
   "minimaxai/minimax-m2.5",
-  "qwen/qwen3-next-80b-a3b-thinking",
-  "stepfun-ai/step-3.5-flash",
+  "minimaxai/minimax-m2.7",
   "qwen/qwen3.5-122b-a10b",
-  "qwen/qwen3-coder-480b-a35b-instruct",
-  "google/gemma-3-27b-it",
-  "qwen/qwen2.5-coder-32b-instruct",
+  "qwen/qwen3.5-397b-a17b",
+  "nvidia/nemotron-3-super-120b-a12b",
+  "z-ai/glm4.7",
+  "z-ai/glm5",
+  "z-ai/glm-5.1",
 ]
-max_parallel = 8
+max_parallel = 9
 timeout_ms = 15000
 strategy = "complete"
 ```

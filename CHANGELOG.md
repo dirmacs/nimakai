@@ -2,6 +2,73 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.13.7] - 2026-04-27
+
+### Fixed (nimaproxy)
+
+- **Racing error body logging**: Non-429 4xx/5xx responses now buffer and log body before discarding,
+  so journal shows exact NVIDIA error instead of just status code
+- **Racing pool pruned**: Removed `qwen3-coder-480b-a35b-instruct` (persistent 500s) and
+  `devstral-2-123b-instruct-2512` (persistent 400s) from racing pool — neither model
+  ever won a race; both burned key quota via cascading 429s
+- Racing pool: 11 → 9 models
+
+## [0.13.6] - 2026-04-27
+
+### Fixed (nimaproxy)
+
+- **Racing 4xx/5xx propagation**: Racing no longer forwards 4xx/5xx to client; only 2xx responses win
+- **Racing 429 key-marking**: 429 now correctly calls `mark_rate_limited()` on the originating key
+  (previously `key_idx` was captured incorrectly in spawn closure)
+- **400 Invalid assistant message retry**: `resolve_model` now retries on
+  "Invalid assistant message" 400 (same retry path as DEGRADED model errors)
+- **Tool schema sanitization**: `sanitize_tool_calls()` two-pass fix — null/missing
+  `description` → `""`, null/missing `parameters` → `{"type":"object","properties":{}}`;
+  prevents NVIDIA Jinja 500 `tool_use:98` crash
+
+### Added (nimaproxy)
+
+- **GET /models alias**: Added route without `/v1/` prefix — OMP polls `/models` for discovery
+- **mock + live tests**: 22 proxy_error_paths tests, 14 e2e_live tests
+
+## [0.13.5] - 2026-04-26
+
+### Fixed (nimaproxy)
+
+- **RUST_LOG scope**: Narrowed to `nimaproxy=info,warn` to suppress third-party DEBUG noise
+- Fixed hurl test `05-error-handling.hurl` Test 4 failure
+- Removed all DEBUG `eprintln!` statements from proxy.rs
+
+## [0.13.4] - 2026-04-26
+
+### Fixed (nimaproxy)
+
+- **tool→developer ordering**: Fixed `fix_message_ordering` running after `transform_message_roles`
+  (now runs before) so developer role inserted between tool→user transitions is seen correctly
+- Removed remaining DEBUG logging from proxy.rs
+
+## [0.13.3] - 2026-04-26
+
+### Changed (nimaproxy)
+
+- Raised `max_consecutive_assistant_turns` default from 5 to 10 in circuit breaker
+
+## [0.13.2] - 2026-04-25
+
+### Fixed (nimaproxy)
+
+- **Pipeline reorder**: `transform_message_roles` now runs BEFORE `fix_message_ordering`
+- **content=null for tool_calls**: `fix_message_ordering` inserts `{"role":"assistant","content":null}`
+- Deployed as production binary
+
+## [0.13.1] - 2026-04-25
+
+### Fixed (nimaproxy)
+
+- **Assistant message validation**: Messages with `tool_calls` must NOT have `content` field (NVIDIA NIM requirement)
+- **Unexpected role 'user' after role 'tool'**: Insert assistant message between tool→user transitions
+- `sanitize_tool_calls()` sets `content` to `null` (not empty string) when `tool_calls` present
+
 ## [0.13.0] - 2026-04-24
 
 ### Added (nimaproxy)
