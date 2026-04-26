@@ -28,7 +28,7 @@
 
 ### 🛡️ Production Ready
 
-- 313+ tests with ~92% coverage
+- 364+ tests with ~92% coverage
 - Graceful error handling and retry logic
 - Comprehensive metrics and health checks
 
@@ -126,38 +126,41 @@ Client → nimaproxy → NVIDIA NIM API
 cargo test
 
 # Run specific test suite
-cargo test --lib          # Library tests (224)
+cargo test --lib          # Library tests (246)
 cargo test --test integration  # Integration tests (45)
-cargo test --test proxy_error_paths  # Error paths (19)
+cargo test --test proxy_error_paths  # Error paths (22)
 cargo test --test coverage_gaps  # Coverage gaps (14)
+cargo test --test e2e_live  # E2E live (14)
 
 # Run with coverage
 cargo tarpaulin --out Html
+
+# Live API tests (racing suites)
+cargo test --test live_chat         # Live chat (5)
+cargo test --test live_key_rotation # Live key rotation (2)
+cargo test --test live_conversation # Live conversation (2)
+cargo test --test live_routing      # Live routing (2)
+cargo test --test live_streaming    # Live streaming (2)
+cargo test --test live_circuit_breaker # Live circuit breaker (2)
+cargo test --test live_tool_calls   # Live tool calls (7)
+                                     # Total live tests: 24
 ```
 
-## Recent Changes (v0.13.1)
+## Recent Changes (v0.13.7)
 
 ### Fixed
 
-- **Assistant message validation**: Messages with `tool_calls` must NOT have `content` field (NVIDIA NIM requirement)
-- **Unexpected role 'user' after role 'tool'**: Insert assistant message between tool→user transitions (fixes OMP/Pawan integration)
-- `sanitize_tool_calls()` sets `content` to `null` (not empty string) when `tool_calls` present
-
-## Recent Changes (v0.13.0)
-
-### Fixed
-
-- **tool_call_id forwarding**: Strips `tool_call_id` from assistant messages to prevent Pydantic errors
-- **DEGRADED model handling**: Auto-retries with different model when NVIDIA marks model as degraded
-- **Live test robustness**: Graceful handling of 429/502/503 errors
+- **Racing 4xx/5xx**: Non-2xx responses skipped in racing; only first 2xx wins
+- **Racing 429 key-marking**: 429 correctly marks originating key rate-limited
+- **400 retry**: `resolve_model` retries on "Invalid assistant message" 400
+- **Tool schema sanitization**: Null `description`/`parameters` → valid defaults; prevents NVIDIA Jinja `tool_use:98` 500
+- **Error body logging**: 4xx/5xx bodies now logged to journal for debuggability
 
 ### Added
 
-- 17 new tests for coverage gaps and error paths
-- Improved circuit breaker and degradation tracking
-- Enhanced connection error handling (BAD_GATEWAY)
+- `GET /models` route alias (OMP polls without `/v1/` prefix)
 
-See [CHANGELOG.md](CHANGELOG.md) for full details.
+See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## License
 

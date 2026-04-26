@@ -28,6 +28,7 @@ tests/test_rechistory
 tests/test_watch
 tests/test_integration
 tests/test_discovery
+tests/test_proxy
 tests/test_cli
 
 # Nimble
@@ -55,3 +56,8 @@ rustping/target/
 # Sensitive files
 hermes_conversation_*.json
 omp-session-*.html
+
+
+# Deagle graph database
+.deagle/
+nimaproxy/.deagle/
