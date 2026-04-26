@@ -9,8 +9,12 @@ exclude = [".planning/**/*.md"]
 [MD033]
 allowed-elements = ["p", "img", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "br", "div", "span"]
 
-# Increase line length to 120 for URLs and code examples
+# Increase line length to 250 to accommodate long URLs and code examples
 [MD013]
-line-length = 120
+line-length = 250
 code-blocks = false
 tables = false
+
+# Disable MD041 - README uses HTML <h1> which is valid
+[MD041]
+enabled = false

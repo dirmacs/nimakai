@@ -14,7 +14,13 @@
 
 ---
 
-A focused, single-binary tool that continuously pings NVIDIA NIM models and reports latency metrics. Includes an 80-model catalog with SWE-bench scores, recommendation engine for [oh-my-opencode](https://github.com/bkataru/oh-my-opencode) routing, watch mode with alerts, CI health checks, live model discovery, and full sync mode. No bloat, no TUI framework, no telemetry. Just latency numbers.
+A focused, single-binary tool that continuously pings NVIDIA NIM models and
+reports latency metrics. Includes an 80-model catalog with SWE-bench scores,
+recommendation engine for
+[oh-my-opencode](https://github.com/bkataru/oh-my-opencode)
+routing, watch mode with alerts, CI health checks, live model discovery, and
+full sync mode. No bloat, no TUI framework, no telemetry. Just latency
+numbers.
 
 Also includes **nimaproxy** — a Rust-based key-rotation proxy for production use.
 
@@ -122,7 +128,9 @@ Each OMO category is scored using weighted criteria:
 
 ## Proxy Commands (FFI Integration)
 
-nimakai v0.13.2 includes FFI integration with nimaproxy, allowing you to start/stop/query the Rust key-rotation proxy directly from the Nim CLI:
+nimakai v0.13.2 includes FFI integration with nimaproxy, allowing you
+to start/stop/query the Rust key-rotation proxy directly from the Nim
+CLI:
 
 ```bash
 # Start the proxy daemon
@@ -332,7 +340,12 @@ timeout_ms = 15000
 strategy = "complete"
 ```
 
-Fires N parallel requests to N models, returns first response. Trades N×token budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429 rate-limit collisions. Models are selected in round-robin order via `racing_cursor` to prevent a single fast model from dominating and breaking inference loops. Dead models (≥20 consecutive failures or 0 samples) are filtered out automatically.
+Fires N parallel requests to N models, returns first response. Trades N×token
+budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429
+rate-limit collisions. Models are selected in round-robin order via
+`racing_cursor` to prevent a single fast model from dominating and breaking
+inference loops. Dead models (≥20 consecutive failures or 0 samples) are
+filtered out automatically.
 
 **Model Compatibility (Developer Role Transformation):**
 
@@ -347,7 +360,11 @@ supports_developer_role = []
 supports_tool_messages = []
 ```
 
-Transforms OpenAI-style `developer` and `tool` roles to `user` and `assistant` for models that don't support them. This fixes 400 "Unknown message role" errors when using OMP or other agents that send developer role messages. By default, all models have roles transformed (empty lists = transform all).
+Transforms OpenAI-style `developer` and `tool` roles to `user` and
+`assistant` for models that don't support them. This fixes 400 "Unknown
+message role" errors when using OMP or other agents that send developer
+role messages. By default, all models have roles transformed (empty lists =
+transform all).
 
 ## License
 
