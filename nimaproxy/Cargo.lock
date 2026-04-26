@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "nimaproxy"
-version = "0.13.1"
+version = "0.13.7"
 dependencies = [
  "axum",
  "bytes",
