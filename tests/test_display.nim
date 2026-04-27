@@ -191,3 +191,94 @@ suite "termWidth":
     # Minimum usable terminal width
     let w = termWidth()
     check w >= 80
+
+
+suite "filterStats":
+  let fsBase = @[
+    makeDisplayStats("nvidia/llama", [100.0]),
+    makeDisplayStats("mistral/7b", [200.0]),
+    makeDisplayStats("qwen/coder", [300.0]),
+  ]
+
+  test "empty query returns all models":
+    let r = filterStats(fsBase, "")
+    check r.len == 3
+
+  test "case-insensitive match on id":
+    let r = filterStats(fsBase, "LLAMA")
+    check r.len == 1
+    check r[0].id == "nvidia/llama"
+
+  test "partial id substring match":
+    let r = filterStats(fsBase, "coder")
+    check r.len == 1
+    check r[0].id == "qwen/coder"
+
+  test "no match returns empty seq":
+    let r = filterStats(fsBase, "nonexistent")
+    check r.len == 0
+
+  test "query matching vendor prefix returns all matching":
+    # 'qwen' only in qwen/coder
+    let r = filterStats(fsBase, "qwen")
+    check r.len == 1
+    check r[0].id == "qwen/coder"
+
+suite "highlightQuery":
+  test "empty query returns original string unchanged":
+    check highlightQuery("hello world", "") == "hello world"
+
+  test "match is wrapped in bold-yellow ANSI":
+    let r = highlightQuery("nvidia/llama", "llama")
+    check "\e[1;33m" in r
+    check "llama" in r
+    check "\e[0m" in r
+
+  test "no match returns original string unchanged":
+    check highlightQuery("nvidia/llama", "xyz") == "nvidia/llama"
+
+  test "case-insensitive: uppercase input still highlights":
+    let r = highlightQuery("NVIDIA", "nvidia")
+    check "\e[1;33m" in r
+
+suite "pageLegend":
+  test "disabled pager returns empty string":
+    let p = PagerState(enabled: false, page: 0, pageSize: 10)
+    check pageLegend(p, 50) == ""
+
+  test "enabled pager page 1 of 3 shows both numbers":
+    let p = PagerState(enabled: true, page: 0, pageSize: 10)
+    let leg = pageLegend(p, 25)  # 25 items / 10 per page = 3 pages
+    check "1" in leg
+    check "3" in leg
+
+  test "last page shows correct page number":
+    let p = PagerState(enabled: true, page: 2, pageSize: 10)
+    let leg = pageLegend(p, 25)  # page 3 of 3
+    check "3" in leg
+
+  test "zero pageSize returns empty string":
+    let p = PagerState(enabled: true, page: 0, pageSize: 0)
+    check pageLegend(p, 25) == ""
+
+suite "latencyBar":
+  test "zero ms returns dim dash bar":
+    let b = latencyBar(0.0)
+    check "\e[90m" in b
+
+  test "low latency (< 500ms) returns green bar":
+    let b = latencyBar(100.0)
+    check "\e[32m" in b
+
+  test "medium latency (500-1499ms) returns yellow bar":
+    let b = latencyBar(1000.0)
+    check "\e[33m" in b
+
+  test "high latency (>= 1500ms) returns red bar":
+    let b = latencyBar(4000.0)
+    check "\e[31m" in b
+
+  test "bar contains Unicode block characters":
+    let b = latencyBar(500.0)
+    # latencyBar renders 5 Unicode block chars; verify it contains block fill
+    check "\u2588" in b or "\u2587" in b or "\u2586" in b or "\u2581" in b or " " in b

@@ -43,7 +43,7 @@ proc parseDiscoverResponse*(body: string): seq[DiscoveredModel] =
   ## Useful for testing without network access.
   try:
     let data = parseJson(body)
-    if data.hasKey("data"):
+    if data.kind == JObject and data.hasKey("data"):
       for item in data["data"]:
         result.add(DiscoveredModel(
           id: item["id"].getStr(),
@@ -121,3 +121,21 @@ proc discoveryToJson*(discovered: seq[DiscoveredModel],
     "missing_models": diff.missingModels,
   }
   $j
+
+
+proc syncFromProxy*(proxyPort: int = 8080, timeoutMs: int = 3000): seq[DiscoveredModel] =
+  ## Fetch models from a locally-running nimaproxy /v1/models endpoint.
+  ## Returns empty on any error (proxy not running is the common case).
+  let client = newHttpClient(timeout = timeoutMs)
+  try:
+    let url = "http://127.0.0.1:" & $proxyPort & "/v1/models"
+    let resp = client.get(url)
+    let code = resp.code.int
+    if code != 200:
+      client.close()
+      return @[]
+    result = parseDiscoverResponse(resp.body)
+    client.close()
+  except CatchableError:
+    try: client.close()
+    except CatchableError: discard

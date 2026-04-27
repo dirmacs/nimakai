@@ -88,3 +88,68 @@ suite "diffCatalog":
     check diff.newModels.len == 2
     check diff.matchedModels.len == 0
     check diff.missingModels.len == 0
+
+
+suite "parseDiscoverResponse fuzz and edge cases":
+  test "returns empty for empty string input":
+    let models = parseDiscoverResponse("")
+    check models.len == 0
+
+  test "returns empty when root is a JSON array (no data key)":
+    let models = parseDiscoverResponse("[]")
+    check models.len == 0
+
+  test "returns empty when data is empty array":
+    let body = $(%*{"data": []})
+    let models = parseDiscoverResponse(body)
+    check models.len == 0
+
+  test "entry with empty string id is preserved":
+    # id explicitly set to empty string
+    let body = $(%*{"data": [{"id": "", "owned_by": "org-x"}]})
+    let models = parseDiscoverResponse(body)
+    check models.len == 1
+    check models[0].id == ""
+    check models[0].ownedBy == "org-x"
+
+  test "handles extra unknown fields gracefully":
+    let body = $(%*{
+      "data": [{"id": "model/z", "owned_by": "org", "created": 42, "extra": "ignored"}]
+    })
+    let models = parseDiscoverResponse(body)
+    check models.len == 1
+    check models[0].id == "model/z"
+    check models[0].created == 42
+
+  test "returns empty for truncated/malformed JSON":
+    let models = parseDiscoverResponse("{\"data\": [{\"id\"")
+    check models.len == 0
+
+  test "large batch parses all entries":
+    var items = newJArray()
+    for i in 0..<50:
+      items.add(%*{"id": "model/" & $i, "owned_by": "org", "created": i})
+    let body = $(%*{"data": items})
+    let models = parseDiscoverResponse(body)
+    check models.len == 50
+    check models[0].id == "model/0"
+    check models[49].id == "model/49"
+
+suite "diffCatalog edge cases":
+  test "duplicated discovered IDs: matched twice, catalog-missing stays zero":
+    let cat2 = @[ModelMeta(id: "model/a", name: "A", sweScore: 50.0, ctxSize: 131072)]
+    let disc2 = @[
+      DiscoveredModel(id: "model/a"),
+      DiscoveredModel(id: "model/a"),
+    ]
+    let diff2 = diffCatalog(disc2, cat2)
+    check diff2.missingModels.len == 0
+    check diff2.newModels.len == 0
+
+  test "single model in both returns one matched":
+    let cat3 = @[ModelMeta(id: "solo", name: "Solo", sweScore: 0.0, ctxSize: 131072)]
+    let disc3 = @[DiscoveredModel(id: "solo")]
+    let diff3 = diffCatalog(disc3, cat3)
+    check diff3.matchedModels == @["solo"]
+    check diff3.newModels.len == 0
+    check diff3.missingModels.len == 0
