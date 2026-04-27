@@ -1,12 +1,12 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.13.0. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.14.0. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.13.7 includes critical fixes for NVIDIA NIM assistant message validation and OMP/Pawan integration.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.14.0 includes critical fixes for NVIDIA NIM assistant message validation and OMP/Pawan integration.
 
-## FFI Integration (v0.13.0)
+## FFI Integration (v0.14.0)
 
-nimakai v0.13.0 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
+nimakai v0.14.0 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
 
 ```bash
 nimakai proxy start --proxy-config /path/to/nimaproxy.toml --proxy-port 8080
@@ -25,17 +25,17 @@ nimakai proxy stop
 ```text
 src/
   nimakai.nim   — CLI entry: parse args, dispatch to subcommands
-  ping.nim      — HTTP ping: timed GET to NIM health endpoint, parse resp.code.int
-  metrics.nim   — Ring buffer (last 100 samples), P50/P95/P99, jitter (stddev),
-                  stability score 0–100 = composite of P95 + jitter + spike rate + uptime
-  catalog.nim   — 80-model catalog: model IDs, context windows
-  display.nim   — ncurses-style terminal table: live refresh, ANSI colors per health state
-  config.nim    — Load nim.cfg, parse --profile flag, profile variable overrides
-  recommend.nim — Score-based recommendation: given task type → best available model
-  discovery.nim — discoverModels() via NVIDIA API, diffCatalog() vs hardcoded catalog
-  history.nim   — Persist latency samples to disk, read/display trends with --days flag
-
-tests/          — 15 test files, one per module (test_metrics.nim, test_catalog.nim, etc.)
+  nimakai/
+    ping.nim      — HTTP ping: timed GET to NIM health endpoint, parse resp.code.int
+    metrics.nim   — Ring buffer (last 100 samples), P50/P95/P99, jitter (stddev),
+                    stability score 0–100 = composite of P95 + jitter + spike rate + uptime
+    catalog.nim   — 80-model catalog: model IDs, context windows
+    display.nim   — ncurses-style terminal table: live refresh, ANSI colors per health state
+    config.nim    — Load nim.cfg, parse --profile flag, profile variable overrides
+    recommend.nim — Score-based recommendation: given task type → best available model
+    discovery.nim — discoverModels() via NVIDIA API, diffCatalog() vs hardcoded catalog; syncFromProxy()
+    history.nim   — Persist latency samples to disk, read/display trends with --days flag
+tests/          — 16 test files, one per module (test_metrics.nim, test_catalog.nim, etc.)
 ```
 
 ### nimaproxy (Rust)
