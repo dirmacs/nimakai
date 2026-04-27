@@ -39,6 +39,11 @@ proc tryReadKey(): char =
   let n = read(0.cint, addr buf[0], 1)
   if n > 0: buf[0] else: '\0'
 
+
+proc safeProxyHealth(): Option[ProxyHealth] =
+  ## Wraps proxyHealth() to swallow dynlib errors when libnimaproxy.so absent.
+  try: proxyHealth()
+  except CatchableError: none(ProxyHealth)
 # --- Main ---
 
 proc editDistance(a, b: string): int =
@@ -109,6 +114,24 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
     enableRawMode()
     pager.pageSize = computePageSize()
 
+  template doRenderTui() =
+    ## Re-render the TUI immediately without triggering a new ping round.
+    stdout.write "\e[2J\e[H"
+    if showHelp:
+      printHelp()
+    elif showDetail and detailIdx >= 0 and detailIdx < stats.len:
+      printModelDetail(stats[detailIdx], cat, cfg.thresholds)
+    else:
+      pager.pageSize = computePageSize()
+      let visTui = filterStats(stats, filterSt.query)
+      let visLenTui = visTui.len
+      if visLenTui > 0:
+        cursorRow = max(0, min(cursorRow, visLenTui - 1))
+      if pager.enabled and pager.pageSize > 0:
+        pager.page = clampPage(pager.page, visLenTui, pager.pageSize)
+      printTable(stats, round, cat, sortCol, cfg.thresholds,
+                 pager, filterSt, cursorRow, safeProxyHealth())
+
   try:
     while true:
       inc round
@@ -173,10 +196,8 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
               showHelp   = false
               showDetail = false
               detailIdx  = -1
-              # Force immediate redraw
-              let deadline2 = epochTime() + 0.05
-              while epochTime() < deadline2: sleep(10)
-              break
+              doRenderTui()
+              continue
 
             # Filter mode: capture printable chars
             if filterSt.active:
@@ -191,7 +212,8 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
               elif key >= ' ' and key <= '~':  # printable ASCII
                 filterSt.query &= key
                 cursorRow = 0
-              break
+              doRenderTui()
+              continue
 
             # Normal mode key dispatch
             case key
@@ -285,7 +307,9 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
               disableRawMode()
               quit(0)
             else: discard
-            break  # redraw after any key
+            sortStats(stats, sortCol, cat, cfg.thresholds)
+            doRenderTui()
+            continue
         else:
           sleep(50)
   finally:

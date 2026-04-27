@@ -158,7 +158,8 @@ proc printTable*(stats: seq[ModelStats], round: int,
                  th: Thresholds = DefaultThresholds,
                  pager: PagerState = PagerState(),
                  filterSt: FilterState = FilterState(),
-                 cursorRow: int = -1) =
+                 cursorRow: int = -1,
+                 proxyStatus: Option[ProxyHealth] = none(ProxyHealth)) =
   ## Render the benchmark table with optional pagination, filter highlight,
   ## cursor highlight, and full footer key legend.
   let tw = termWidth()
@@ -282,6 +283,14 @@ proc printTable*(stats: seq[ModelStats], round: int,
                   (if visible.len == 1: "" else: "s") & "\e[0m"
 
   echo "  " & pagePart & " | " & filterPart & " | " & countPart
+  if proxyStatus.isSome:
+    let ph = proxyStatus.get
+    let proxyColor = if ph.status == "running": "\e[32m" else: "\e[33m"
+    let keysStr = $ph.activeKeys & " key" & (if ph.activeKeys == 1: "" else: "s")
+    let routeStr = if ph.routingEnabled: "routing" else: "no-routing"
+    let raceStr  = if ph.racingEnabled:  " racing" else: ""
+    echo "  " & proxyColor & "[proxy " & ph.status & "]\e[0m " &
+         "\e[90m" & keysStr & " | " & routeStr & raceStr & "\e[0m"
   echo ""
 
 # ── Help overlay ─────────────────────────────────────────────────────────────
