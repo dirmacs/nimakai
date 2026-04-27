@@ -1,13 +1,13 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.13.1. 80-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.14.0. 80-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
 ```bash
 cd nimakai
 nimble build                       # → ./nimakai binary
-nimble test                        # runs 15 test suites
+nimble test                        # runs 16 test suites
 
 # One-liner rebuild and run
 nimble build && ./nimakai
@@ -23,15 +23,26 @@ Single Nim binary with modules in `src/`:
 
 ```text
 src/
-  nimakai.nim   — Entry point, CLI dispatch (default/watch/check/discover/sync)
-  metrics.nim   — Latency ring buffer, percentiles (P50/P95/P99), jitter, stability score
-  catalog.nim   — 80-model catalog with SWE-bench scores
-  ping.nim      — HTTP ping to NIM endpoint, response time measurement
-  display.nim   — Terminal UI: live metrics table, health state colors
-  config.nim    — Config loading from nim.cfg / CLI flags, named benchmark profiles
-  recommend.nim — oh-my-opencode model routing recommendation engine
-  discovery.nim — Live model discovery vs. catalog diff (discover subcommand)
-  history.nim   — Latency history storage and trend display
+  nimakai.nim   — Entry point, CLI dispatch, main loop, SIGINT handler
+  nimakai/
+    types.nim      — Types, enums, constants
+    cli.nim        — CLI argument parsing with profiles
+    metrics.nim    — Ring buffer, P50/P95/P99, jitter, stability score
+    ping.nim       — HTTP ping + throughput measurement
+    catalog.nim    — 80-model catalog with SWE-bench scores
+    display.nim    — Table/JSON rendering, ANSI helpers, proxy footer
+    config.nim     — Config file persistence + profile loading
+    history.nim    — JSONL history persistence + trend detection
+    opencode.nim   — OpenCode + oh-my-opencode integration
+    recommend.nim  — Recommendation engine
+    rechistory.nim — Recommendation history tracking (JSONL)
+    sync.nim       — Backup, apply, rollback for OMO config
+    watch.nim      — Watch mode alerting
+    discovery.nim  — Live model discovery from NVIDIA API; syncFromProxy()
+    proxyffi.nim   — Nim FFI bindings to libnimaproxy.so
+    rustffi.nim    — Rust FFI bridge for concurrent HTTP pinging
+    update.nim     — Fetch and update model catalog from NVIDIA NIM API
+tests/          — 16 test files
 ```
 
 ### nimaproxy (Rust)
@@ -48,9 +59,18 @@ nimaproxy/
     model_router.rs       — Latency-aware routing
     proxy.rs              — HTTP handlers
   tests/
-    integration.rs       — 18 tests
-    e2e_live.rs           — 6 live API tests
-    stress_test.rs         — 25-turn live stress test
+    integration.rs       — 45 tests
+    e2e_live.rs           — 14 live API tests
+    stress_test.rs         — 1 live stress test
+    coverage_gaps.rs       — 14 coverage gap tests
+    proxy_error_paths.rs   — 22 proxy error path tests
+    live_chat.rs           — 5 live chat tests
+    live_key_rotation.rs   — 2 key rotation tests
+    live_routing.rs        — 2 routing tests
+    live_conversation.rs   — 2 conversation tests
+    live_streaming.rs      — 2 streaming tests
+    live_circuit_breaker.rs — 2 circuit breaker tests
+    live_tool_calls.rs     — 7 tool call tests
 ```
 
 ## Key Rules
@@ -116,10 +136,10 @@ label = "production"
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "nvidia/meta/llama-3.3-70b-instruct",
-  "nvidia/qwen/qwen2.5-coder-32b-instruct",
-  "nvidia/moonshotai/kimi-k2-instruct",
-  "nvidia/mistralai/devstral-2-123b-instruct-2512",
+  "meta/llama-3.3-70b-instruct",
+  "qwen/qwen2.5-coder-32b-instruct",
+  "moonshotai/kimi-k2-instruct",
+  "mistralai/devstral-2-123b-instruct-2512",
 ]
 
 [racing]
