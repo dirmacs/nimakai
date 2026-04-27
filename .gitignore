@@ -2,6 +2,18 @@
 nimcache/
 src/nimcache/
 /nimakai
+# Compiled module binaries (Nim produces these when test files import modules directly)
+src/nimakai/catalog
+src/nimakai/config
+src/nimakai/types
+src/nimakai/display
+src/nimakai/metrics
+src/nimakai/discovery
+src/nimakai/history
+src/nimakai/recommend
+src/nimakai/ping
+src/nimakai/cli
+
 *.exe
 *.dll
 *.so

@@ -123,11 +123,18 @@ Each OMO category is scored using weighted criteria:
 | `N` | Sort by model name |
 | `U` | Sort by uptime % |
 | `1-9` | Toggle favorite on Nth model |
+| `j` / `k` | Cursor down / up |
+| `T` | Toggle pagination |
+| `[` / `]` | Previous / next page |
+| `/` | Enter filter mode (type to filter models) |
+| `Esc` | Exit filter mode / clear filter |
+| `Enter` | Detail view for selected model |
+| `?` | Show key bindings help overlay |
 | `Q` | Quit |
 
 ## Proxy Commands (FFI Integration)
 
-nimakai v0.13.0 includes FFI integration with nimaproxy, allowing you
+nimakai v0.14.0 includes FFI integration with nimaproxy, allowing you
 to start/stop/query the Rust key-rotation proxy directly from the Nim
 CLI:
 
@@ -234,7 +241,7 @@ src/
 tests/
     test_types.nim         6 tests
     test_metrics.nim       41 tests
-    test_display.nim       31 tests
+    test_display.nim       49 tests
     test_ping.nim          15 tests
     test_catalog.nim       17 tests
     test_config.nim        12 tests
@@ -245,9 +252,9 @@ tests/
     test_rechistory.nim    9 tests
     test_watch.nim         8 tests
     test_integration.nim   12 tests
-    test_discovery.nim     9 tests
+    test_discovery.nim     18 tests
     test_cli.nim           62 tests
-    test_proxy.nim         11 tests
+    test_proxy.nim         9 tests
 
 ### nimaproxy (Rust)
 

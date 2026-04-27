@@ -2,6 +2,24 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.14.0] - 2026-04-27
+
+### Added (nimakai)
+
+- **Responsive TUI key handling**: All inner-loop `break` statements replaced with `doRenderTui() + continue`; sort keys (A/P/S/N/U), filter mode, cursor (j/k), pagination (T/[/]) and overlay dismiss now respond instantly without waiting for the next ping cycle
+- **`safeProxyHealth()` wrapper**: Swallows dynlib errors when `libnimaproxy.so` is absent; TUI starts cleanly without the proxy running
+- **Proxy status footer**: `printTable` gains optional `proxyStatus: Option[ProxyHealth]` parameter (default `none`); renders active key count, routing, and racing status in footer when proxy is running
+- **`syncFromProxy()`**: New exported proc in `discovery.nim` — fetches `/v1/models` from a locally running nimaproxy instance (3 s timeout, silent on error)
+
+### Fixed (nimakai)
+
+- **`parseDiscoverResponse` AssertionDefect**: Guarded `hasKey` call behind `data.kind == JObject` check; non-object JSON roots (arrays, null) no longer crash the parser
+
+### Tests
+
+- 17 new tests in `test_discovery.nim`: fuzz inputs (empty string, array root, truncated JSON, 50-entry batch), `diffCatalog` edge cases
+- 22 new tests in `test_display.nim`: `filterStats`, `highlightQuery`, `pageLegend`, `latencyBar` suites
+
 ## [0.13.7] - 2026-04-27
 
 ### Fixed (nimaproxy)
