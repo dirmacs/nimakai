@@ -238,6 +238,9 @@ src/
     sync.nim               Backup, apply, rollback for OMO config
     watch.nim              Watch mode alerting (down/recovered/degraded)
     discovery.nim          Live model discovery from NVIDIA API
+    proxyffi.nim   — Nim FFI bindings to libnimaproxy.so
+    rustffi.nim    — Rust FFI bridge for concurrent HTTP pinging
+    update.nim     — Fetch and update model catalog from NVIDIA NIM API
 tests/
     test_types.nim         6 tests
     test_metrics.nim       41 tests
@@ -254,7 +257,7 @@ tests/
     test_integration.nim   12 tests
     test_discovery.nim     18 tests
     test_cli.nim           62 tests
-    test_proxy.nim         9 tests
+    test_proxy.nim         11 tests
 
 ### nimaproxy (Rust)
 

@@ -55,9 +55,18 @@ nimaproxy/
     model_router.rs        Latency-aware model selection + unit tests
     proxy.rs               HTTP handlers
   tests/
-    integration.rs         18 integration tests
-    e2e_live.rs            6 E2E tests with real NVIDIA API (z-ai/glm4.7 model)
-    stress_test.rs         25-turn live stress test (key rotation + racing validation)
+    integration.rs         45 integration tests
+    e2e_live.rs            14 E2E tests with real NVIDIA API
+    stress_test.rs         1 live stress test
+    coverage_gaps.rs       14 coverage gap tests
+    proxy_error_paths.rs   22 proxy error path tests
+    live_chat.rs           5 live chat tests
+    live_key_rotation.rs   2 key rotation tests
+    live_routing.rs        2 routing tests
+    live_conversation.rs   2 conversation tests
+    live_streaming.rs      2 streaming tests
+    live_circuit_breaker.rs 2 circuit breaker tests
+    live_tool_calls.rs     7 tool call tests
 
 ## Racing (Speculative Execution)
 
@@ -137,7 +146,7 @@ Verdict labels: `Perfect`, `Normal`, `Slow`, `Spiky`, `Very Slow`, `Unstable`, `
 - **Nim over Rust** — name pun (NIM + Nim = nimakai), fast compile, small binary
 - **`resp.code.int` not `parseInt($resp.code)`** — Nim's `$HttpCode` returns "200 OK" not "200"; fixed in 0.9.1
 - **Ring buffer capped at 100** — balances memory and statistical relevance
-**Hardcoded catalog, not fetched** — NIM API doesn't expose capbility metadata; catalog is curated manually
+- **Hardcoded catalog, not fetched** — NIM API doesn't expose capbility metadata; catalog is curated manually
 - **`malebolgia` for parallel pinging** — concurrent HTTP without full async overhead
 
 ## Integration with oh-my-opencode

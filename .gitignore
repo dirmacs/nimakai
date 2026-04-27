@@ -13,6 +13,13 @@ src/nimakai/history
 src/nimakai/recommend
 src/nimakai/ping
 src/nimakai/cli
+src/nimakai/opencode
+src/nimakai/rechistory
+src/nimakai/sync
+src/nimakai/watch
+src/nimakai/proxyffi
+src/nimakai/rustffi
+src/nimakai/update
 
 *.exe
 *.dll
