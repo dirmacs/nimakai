@@ -50,6 +50,7 @@ proc parseArgs*(params: seq[string]): Config =
     of "check": result.subcommand = smCheck
     of "discover": result.subcommand = smDiscover
     of "fetch": result.subcommand = smFetch
+    of "proxy-discover": result.subcommand = smProxyDiscover
     of "proxy":
       result.subcommand = smProxy
       # Parse the proxy action (start/stop/status) — must be the next non-flag arg
