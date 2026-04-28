@@ -143,6 +143,7 @@ type
     smDiscover = "discover"
     smProxy = "proxy"
     smFetch = "fetch"
+    smProxyDiscover = "proxy-discover"
 
   ProxyAction* = enum
     paStart = "start"

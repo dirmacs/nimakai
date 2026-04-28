@@ -34,6 +34,11 @@ proc proxyHealth*(): Option[ProxyHealth] =
   except:
     return none(ProxyHealth)
 
+proc safeProxyHealth*(): Option[ProxyHealth] =
+  ## Wraps proxyHealth() to swallow dynlib errors when libnimaproxy.so absent.
+  try: proxyHealth()
+  except CatchableError: none(ProxyHealth)
+
 proc proxyStats*(): Option[ProxyStats] =
   let raw = c_proxy_stats()
   if raw.isNil:

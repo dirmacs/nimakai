@@ -26,6 +26,11 @@ src/nimakai/update
 *.so
 *.dylib
 
+# Rust/Cargo build artifacts (nimaproxy)
+nimaproxy/target/
+nimaproxy/*.a
+nimaproxy/*.lib
+
 # OMP temp directory
 .opencode/
 

@@ -40,10 +40,6 @@ proc tryReadKey(): char =
   if n > 0: buf[0] else: '\0'
 
 
-proc safeProxyHealth(): Option[ProxyHealth] =
-  ## Wraps proxyHealth() to swallow dynlib errors when libnimaproxy.so absent.
-  try: proxyHealth()
-  except CatchableError: none(ProxyHealth)
 # --- Main ---
 
 proc editDistance(a, b: string): int =
@@ -105,6 +101,13 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
   var cursorRow = 0  # 0-indexed cursor in the current visible+paged view
   let interactive = not cfg.once and not cfg.jsonOutput and isatty(0.cint) != 0
 
+  # Sync proxy models at startup (non-blocking; graceful when proxy absent)
+  if not cfg.quiet:
+    let proxyModels = syncFromProxy(timeoutMs = 2000)
+    if proxyModels.len > 0:
+      let diff = diffCatalog(proxyModels, cat)
+      stderr.writeLine &"\e[90m  proxy: {proxyModels.len} models | {diff.matchedModels.len} matched, {diff.newModels.len} new\e[0m"
+
   # State machine modes
   var showHelp   = false
   var showDetail = false
@@ -114,7 +117,7 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
     enableRawMode()
     pager.pageSize = computePageSize()
 
-  template doRenderTui() =
+  proc doRenderTui() =
     ## Re-render the TUI immediately without triggering a new ping round.
     stdout.write "\e[2J\e[H"
     if showHelp:
@@ -729,6 +732,16 @@ proc main() =
 
   of smProxy:
     runProxy(cfg)
+    return
+
+  of smProxyDiscover:
+    let discovered = syncFromProxy()
+    if discovered.len == 0:
+      echo "No proxy models found (proxy may not be running)"
+    else:
+      echo &"Proxy models ({discovered.len}):"
+      for d in discovered:
+        echo &"  {d.id}"
     return
 
   of smBenchmark:

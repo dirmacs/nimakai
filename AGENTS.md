@@ -31,7 +31,7 @@ src/
                     stability score 0–100 = composite of P95 + jitter + spike rate + uptime
     catalog.nim   — 80-model catalog: model IDs, context windows
     display.nim   — ncurses-style terminal table: live refresh, ANSI colors per health state
-    config.nim    — Load nim.cfg, parse --profile flag, profile variable overrides
+    config.nim    — Load nimakai.cfg, parse --profile flag, profile variable overrides
     recommend.nim — Score-based recommendation: given task type → best available model
     discovery.nim — discoverModels() via NVIDIA API, diffCatalog() vs hardcoded catalog; syncFromProxy()
     history.nim   — Persist latency samples to disk, read/display trends with --days flag
@@ -186,6 +186,6 @@ Inserts empty assistant messages between `tool` and `user` roles to satisfy NVID
 
 ## Environment
 
-- `NVIDIA_API_KEY` — required for NIM endpoint access; can also be set in `nim.cfg`
+- `NVIDIA_API_KEY` — required for NIM endpoint access; can also be set in `nimakai.cfg`
 - `RUST_LOG` equivalent: `nimakai --verbose` flag
-- Config file: `nim.cfg` in cwd, or `~/.config/nimakai/nim.cfg`
+- Config file: `nimakai.cfg` in cwd, or `~/.config/nimakai/nimakai.cfg`
