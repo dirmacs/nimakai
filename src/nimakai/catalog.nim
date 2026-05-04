@@ -5,10 +5,16 @@ import std/[json, os, options, strutils, algorithm, tables]
 import ./types
 
 const BuiltinCatalog*: seq[ModelMeta] = @[
+  ModelMeta(id: "deepseek-ai/deepseek-v4-pro", name: "DeepSeek V4 Pro", sweScore: 83.0, ctxSize: 16384, thinking: true, multimodal: false),
+  ModelMeta(id: "mistralai/mistral-medium-3.5-128b", name: "Mistral Medium 3.5 128B", sweScore: 82.0, ctxSize: 131072, thinking: false, multimodal: false),
+  ModelMeta(id: "deepseek-ai/deepseek-v4-flash", name: "DeepSeek V4 Flash", sweScore: 81.5, ctxSize: 16384, thinking: true, multimodal: false),
+  ModelMeta(id: "minimaxai/minimax-m2.7", name: "MiniMax M2.7", sweScore: 79.0, ctxSize: 204800, thinking: false, multimodal: false),
   ModelMeta(id: "minimaxai/minimax-m2.5", name: "MiniMax M2.5", sweScore: 80.2, ctxSize: 204800, thinking: false, multimodal: false),
   ModelMeta(id: "z-ai/glm5", name: "GLM 5", sweScore: 77.8, ctxSize: 131072, thinking: false, multimodal: false),
+  ModelMeta(id: "z-ai/glm-5.1", name: "GLM 5.1", sweScore: 77.5, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "moonshotai/kimi-k2.5", name: "Kimi K2.5", sweScore: 76.8, ctxSize: 131072, thinking: true, multimodal: true),
   ModelMeta(id: "stepfun-ai/step-3.5-flash", name: "Step 3.5 Flash", sweScore: 74.4, ctxSize: 262144, thinking: false, multimodal: false),
+  ModelMeta(id: "moonshotai/kimi-k2.6", name: "Kimi K2.6", sweScore: 77.0, ctxSize: 131072, thinking: true, multimodal: true),
   ModelMeta(id: "minimaxai/minimax-m2.1", name: "MiniMax M2.1", sweScore: 74.0, ctxSize: 204800, thinking: false, multimodal: false),
   ModelMeta(id: "z-ai/glm4.7", name: "GLM 4.7", sweScore: 73.8, ctxSize: 204800, thinking: true, multimodal: false),
   ModelMeta(id: "deepseek-ai/deepseek-v3.2", name: "DeepSeek V3.2", sweScore: 73.1, ctxSize: 163840, thinking: false, multimodal: false),
@@ -38,9 +44,6 @@ const BuiltinCatalog*: seq[ModelMeta] = @[
   ModelMeta(id: "qwen/qwq-32b", name: "QwQ 32B", sweScore: 50.0, ctxSize: 131072, thinking: true, multimodal: false),
 
   ModelMeta(id: "nvidia/llama-3.3-nemotron-super-49b-v1.5", name: "Nemotron Super 49B", sweScore: 49.0, ctxSize: 131072, thinking: false, multimodal: false),
-  ModelMeta(id: "mistralai/mistral-medium-3.5-128b", name: "Mistral Medium 3.5 128B", sweScore: 82.0, ctxSize: 131072, thinking: false, multimodal: false),
-  ModelMeta(id: "deepseek-ai/deepseek-v4-flash", name: "DeepSeek V4 Flash", sweScore: 81.5, ctxSize: 16384, thinking: true, multimodal: false),
-  ModelMeta(id: "deepseek-ai/deepseek-v4-pro", name: "DeepSeek V4 Pro", sweScore: 83.0, ctxSize: 16384, thinking: true, multimodal: false),
   ModelMeta(id: "mistralai/mistral-medium-3-instruct", name: "Mistral Medium 3", sweScore: 48.0, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "qwen/qwen2.5-coder-32b-instruct", name: "Qwen2.5 Coder 32B", sweScore: 46.0, ctxSize: 32768, thinking: false, multimodal: false),
   ModelMeta(id: "mistralai/magistral-small-2506", name: "Magistral Small", sweScore: 45.0, ctxSize: 32768, thinking: false, multimodal: false),
@@ -48,6 +51,7 @@ const BuiltinCatalog*: seq[ModelMeta] = @[
   ModelMeta(id: "meta/llama-3.1-405b-instruct", name: "Llama 3.1 405B", sweScore: 44.0, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "deepseek-ai/deepseek-r1-distill-qwen-32b", name: "R1 Distill 32B", sweScore: 43.9, ctxSize: 131072, thinking: true, multimodal: false),
   ModelMeta(id: "nvidia/nemotron-3-nano-30b-a3b", name: "Nemotron Nano 30B", sweScore: 43.0, ctxSize: 131072, thinking: false, multimodal: false),
+  ModelMeta(id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", name: "Nemotron Nano Omni Reasoning", sweScore: 44.0, ctxSize: 131072, thinking: true, multimodal: false),
   ModelMeta(id: "nvidia/nemotron-4-340b-instruct", name: "Nemotron 4 340B", sweScore: 41.0, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "google/gemma-4-31b-it", name: "Gemma 4 31B", sweScore: 40.0, ctxSize: 262144, thinking: false, multimodal: true),
   ModelMeta(id: "openai/gpt-oss-20b", name: "GPT OSS 20B", sweScore: 42.0, ctxSize: 131072, thinking: false, multimodal: false),
@@ -58,6 +62,7 @@ const BuiltinCatalog*: seq[ModelMeta] = @[
   ModelMeta(id: "meta/llama-3.1-70b-instruct", name: "Llama 3.1 70B", sweScore: 37.0, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "nvidia/llama-3.1-nemotron-51b-instruct", name: "Nemotron 51B", sweScore: 36.0, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "stockmark/stockmark-2-100b-instruct", name: "Stockmark 100B", sweScore: 36.0, ctxSize: 32768, thinking: false, multimodal: false),
+  ModelMeta(id: "mistralai/mistral-small-4-119b-2603", name: "Mistral Small 4 119B", sweScore: 35.0, ctxSize: 131072, thinking: false, multimodal: false),
 
   ModelMeta(id: "mistralai/codestral-22b-instruct-v0.1", name: "Codestral 22B", sweScore: 34.0, ctxSize: 32768, thinking: false, multimodal: false),
   ModelMeta(id: "mistralai/ministral-14b-instruct-2512", name: "Ministral 14B", sweScore: 34.0, ctxSize: 262144, thinking: false, multimodal: false),
@@ -216,6 +221,6 @@ proc printCatalog*(catalog: seq[ModelMeta]) =
       padLeft(ctxStr, 8) &
       "  " &
       padRight(caps.strip(), 12) &
-      "\e[90m" & padRight(m.id, 45) & "\e[0m"
+      "  " & "\e[90m" & padRight(m.id, 45) & "\e[0m"
 
   echo ""

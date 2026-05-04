@@ -163,11 +163,27 @@ proc printTable*(stats: seq[ModelStats], round: int,
   ## Render the benchmark table with optional pagination, filter highlight,
   ## cursor highlight, and full footer key legend.
   let tw = termWidth()
-  # Fixed columns: LATEST(10) AVG(10) P95(10) JITTER(10) STAB(6)
-  #                2-gap BAR(7) HEALTH(12) VERDICT(12) UP%(7) prefix(2) = 88
-  let fixedCols = 10 + 10 + 10 + 10 + 6 + 2 + 7 + 12 + 12 + 7 + 2
-  let nameWidth = max(15, min(50, tw - fixedCols))
-  let sepWidth  = min(tw - 4, nameWidth + fixedCols - 2)
+
+  # ── Responsive column layout ──
+  # Full:  MODEL│LATEST│AVG│P95│JITTER│STAB│BAR│HEALTH│VERDICT│UP%
+  # Compact (< 100 cols): MODEL│LATEST│AVG│P95│HEALTH│VERDICT
+  const ColSep = "│"
+  let useCompact = tw < 100
+
+  let (nameWidth, fixedCols, sepExtra, colWidths, colLabels) =
+    if useCompact:
+      let fw = 7 + 7 + 7 + 8 + 8      # LATEST AVG P95 HEALTH VERDICT
+      let se = 5                       # 5 separators between 6 columns
+      let nw = max(15, min(50, tw - fw - se - 2))
+      (nw, fw, se, @[7, 7, 7, 8, 8], @["LATEST", "AVG", "P95", "HEALTH", "VERDICT"])
+    else:
+      let fw = 8 + 8 + 8 + 8 + 5 + 6 + 10 + 10 + 6   # all fixed columns
+      let se = 9                                        # 9 separators between 10 cols
+      let nw = max(15, min(50, tw - fw - se - 2))
+      (nw, fw, se, @[8, 8, 8, 8, 5, 6, 10, 10, 6],
+       @["LATEST", "AVG", "P95", "JITTER", "STAB", "BAR", "HEALTH", "VERDICT", "UP%"])
+
+  let sepWidth = min(tw - 2, nameWidth + fixedCols + sepExtra)
 
   # ── Header ──
   let filterNote = if filterSt.active or filterSt.query.len > 0:
@@ -191,19 +207,13 @@ proc printTable*(stats: seq[ModelStats], round: int,
     showStats = visible
 
   # ── Column header ──
-  let hdr = "  " &
-    padRight("MODEL",  nameWidth) &
-    padLeft("LATEST",  10) &
-    padLeft("AVG",     10) &
-    padLeft("P95",     10) &
-    padLeft("JITTER",  10) &
-    padLeft("STAB",     6) &
-    "  " & padRight("BAR", 7) &
-    padRight("HEALTH",  12) &
-    padRight("VERDICT", 12) &
-    padLeft("UP%",       7)
+  var hdr = "  " & padRight("MODEL", nameWidth)
+  for i, label in colLabels:
+    let w = colWidths[i]
+    let isLeft = label in ["LATEST", "AVG", "P95", "UP%"]
+    hdr &= ColSep & (if isLeft: padLeft(label, w) else: padRight(label, w))
   echo "\e[1;90m" & hdr & "\e[0m"
-  echo "\e[90m  " & "-".repeat(sepWidth) & "\e[0m"
+  echo "\e[90m  " & "─".repeat(sepWidth) & "\e[0m"
 
   # ── Rows ──
   for i, s in showStats:
@@ -218,37 +228,59 @@ proc printTable*(stats: seq[ModelStats], round: int,
     let prefix = if s.favorite: "\e[33m*\e[0m " else: "  "
     var line = rowBg & prefix & padRightAnsi(displayName, nameWidth)
 
+    # LATEST
     if s.ringLen > 0:
-      line &= padLeftAnsi(colorLatency(s.lastMs), 10)
-      line &= padLeftAnsi(colorLatency(s.avg()),  10)
-      line &= padLeftAnsi(colorLatency(s.p95()),  10)
-      line &= padLeftAnsi(&"\e[90m{s.jitter():.0f}ms\e[0m", 10)
+      line &= ColSep & padLeftAnsi(colorLatency(s.lastMs), colWidths[0])
     else:
-      line &= padLeft("-", 10)
-      line &= padLeft("-", 10)
-      line &= padLeft("-", 10)
-      line &= padLeft("-", 10)
+      line &= ColSep & padLeft("-", colWidths[0])
 
-    let stab = s.stabilityScore(th)
-    if stab >= 0:
-      let sc = if stab >= 80: "\e[32m"
-               elif stab >= 50: "\e[33m"
-               else: "\e[31m"
-      line &= padLeftAnsi(sc & $stab & "\e[0m", 6)
+    # AVG
+    if s.ringLen > 0:
+      line &= ColSep & padLeftAnsi(colorLatency(s.avg()), colWidths[1])
     else:
-      line &= padLeft("-", 6)
+      line &= ColSep & padLeft("-", colWidths[1])
 
-    # Latency bar
-    let bar = if s.ringLen > 0: latencyBar(s.avg()) else: "\e[90m─────\e[0m"
-    line &= "  " & padRightAnsi(bar, 7)
+    # P95
+    if s.ringLen > 0:
+      line &= ColSep & padLeftAnsi(colorLatency(s.p95()), colWidths[2])
+    else:
+      line &= ColSep & padLeft("-", colWidths[2])
 
-    line &= padRightAnsi(healthIcon(s.lastHealth), 12)
-    line &= padRightAnsi(verdictColor(s.verdict(th)), 12)
+    if not useCompact:
+      # JITTER
+      if s.ringLen > 0:
+        line &= ColSep & padLeftAnsi(&"\e[90m{s.jitter():.0f}ms\e[0m", colWidths[3])
+      else:
+        line &= ColSep & padLeft("-", colWidths[3])
 
-    let up = &"{s.uptime():.0f}%"
-    if   s.uptime() >= 90: line &= padLeftAnsi("\e[32m" & up & "\e[0m", 7)
-    elif s.uptime() >= 50: line &= padLeftAnsi("\e[33m" & up & "\e[0m", 7)
-    else:                  line &= padLeftAnsi("\e[31m" & up & "\e[0m", 7)
+      # STAB
+      let stab = s.stabilityScore(th)
+      if stab >= 0:
+        let sc = if stab >= 80: "\e[32m"
+                 elif stab >= 50: "\e[33m"
+                 else: "\e[31m"
+        line &= ColSep & padLeftAnsi(sc & $stab & "\e[0m", colWidths[4])
+      else:
+        line &= ColSep & padLeft("-", colWidths[4])
+
+      # BAR
+      let bar = if s.ringLen > 0: latencyBar(s.avg()) else: "\e[90m─────\e[0m"
+      line &= ColSep & padRightAnsi(bar, colWidths[5])
+
+      # HEALTH
+      line &= ColSep & padRightAnsi(healthIcon(s.lastHealth), colWidths[6])
+      # VERDICT
+      line &= ColSep & padRightAnsi(verdictColor(s.verdict(th)), colWidths[7])
+      # UP%
+      let up = &"{s.uptime():.0f}%"
+      if   s.uptime() >= 90: line &= ColSep & padLeftAnsi("\e[32m" & up & "\e[0m", colWidths[8])
+      elif s.uptime() >= 50: line &= ColSep & padLeftAnsi("\e[33m" & up & "\e[0m", colWidths[8])
+      else:                  line &= ColSep & padLeftAnsi("\e[31m" & up & "\e[0m", colWidths[8])
+    else:
+      # Compact mode: HEALTH (index 3 in compact)
+      line &= ColSep & padRightAnsi(healthIcon(s.lastHealth), colWidths[3])
+      # VERDICT (index 4 in compact)
+      line &= ColSep & padRightAnsi(verdictColor(s.verdict(th)), colWidths[4])
 
     line &= rowReset
     echo line
@@ -260,14 +292,17 @@ proc printTable*(stats: seq[ModelStats], round: int,
 
   # ── Footer: two-line key legend ──
   # Line 1: sorting + navigation
-  echo "\e[90m  sort:[A]vg [P]95 [S]tab [N]ame [U]ptime | " &
-       "[j][k] cursor | [Enter] detail | [1-9] fav | [?] help | [Q]uit\e[0m"
+  let sortHelp = if useCompact:
+    "sort:[A]vg [P]95 [N]ame | [j][k] cursor | [Enter] detail | [1-9] fav | [?] help | [Q]uit"
+  else:
+    "sort:[A]vg [P]95 [S]tab [N]ame [U]ptime | [j][k] cursor | [Enter] detail | [1-9] fav | [?] help | [Q]uit"
+  echo "\e[90m  " & sortHelp & "\e[0m"
 
   # Line 2: pagination + filter + count
   let pagePart =
     if pager.enabled:
       let pages = if pager.pageSize > 0: pageCount(visible.len, pager.pageSize) else: 1
-      "\e[90m[<]/[>] page " & $( pager.page + 1) & "/" & $pages & " | [T] page-off\e[0m"
+      "\e[90m[<]/[>] page " & $(pager.page + 1) & "/" & $pages & " | [T] page-off\e[0m"
     else:
       "\e[90m[T] enable pagination\e[0m"
 
