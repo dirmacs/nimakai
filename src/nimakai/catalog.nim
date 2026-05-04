@@ -38,9 +38,9 @@ const BuiltinCatalog*: seq[ModelMeta] = @[
   ModelMeta(id: "qwen/qwq-32b", name: "QwQ 32B", sweScore: 50.0, ctxSize: 131072, thinking: true, multimodal: false),
 
   ModelMeta(id: "nvidia/llama-3.3-nemotron-super-49b-v1.5", name: "Nemotron Super 49B", sweScore: 49.0, ctxSize: 131072, thinking: false, multimodal: false),
-ModelMeta(id: "mistralai/mistral-medium-3.5-128b", name: "Mistral Medium 3.5 128B", sweScore: 82.0, ctxSize: 131072, thinking: false, multimodal: false),
-ModelMeta(id: "deepseek-ai/deepseek-v4-flash", name: "DeepSeek V4 Flash", sweScore: 81.5, ctxSize: 16384, thinking: true, multimodal: false),
-ModelMeta(id: "deepseek-ai/deepseek-v4-pro", name: "DeepSeek V4 Pro", sweScore: 83.0, ctxSize: 16384, thinking: true, multimodal: false),
+  ModelMeta(id: "mistralai/mistral-medium-3.5-128b", name: "Mistral Medium 3.5 128B", sweScore: 82.0, ctxSize: 131072, thinking: false, multimodal: false),
+  ModelMeta(id: "deepseek-ai/deepseek-v4-flash", name: "DeepSeek V4 Flash", sweScore: 81.5, ctxSize: 16384, thinking: true, multimodal: false),
+  ModelMeta(id: "deepseek-ai/deepseek-v4-pro", name: "DeepSeek V4 Pro", sweScore: 83.0, ctxSize: 16384, thinking: true, multimodal: false),
   ModelMeta(id: "mistralai/mistral-medium-3-instruct", name: "Mistral Medium 3", sweScore: 48.0, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "qwen/qwen2.5-coder-32b-instruct", name: "Qwen2.5 Coder 32B", sweScore: 46.0, ctxSize: 32768, thinking: false, multimodal: false),
   ModelMeta(id: "mistralai/magistral-small-2506", name: "Magistral Small", sweScore: 45.0, ctxSize: 32768, thinking: false, multimodal: false),
