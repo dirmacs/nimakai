@@ -15,7 +15,7 @@
 ---
 
 A focused, single-binary tool that continuously pings NVIDIA NIM models and
-reports latency metrics. Includes an 80-model catalog with SWE-bench scores,
+reports latency metrics. Includes an 88-model catalog with SWE-bench scores,
 recommendation engine for
 [oh-my-opencode](https://github.com/bkataru/oh-my-opencode)
 routing, watch mode with alerts, CI health checks, live model discovery, and
@@ -134,7 +134,7 @@ Each OMO category is scored using weighted criteria:
 
 ## Proxy Commands (FFI Integration)
 
-nimakai v0.14.0 includes FFI integration with nimaproxy, allowing you
+nimakai v0.15.0 includes FFI integration with nimaproxy, allowing you
 to start/stop/query the Rust key-rotation proxy directly from the Nim
 CLI:
 
@@ -228,7 +228,7 @@ src/
     cli.nim                CLI argument parsing with profiles
     metrics.nim            Pure metric functions (avg, p50, p95, p99, jitter, stability)
     ping.nim               HTTP ping + throughput measurement
-    catalog.nim            80-model catalog with SWE-bench scores, O(1) index
+    catalog.nim            88-model catalog with SWE-bench scores, O(1) index
     display.nim            Table/JSON rendering, ANSI helpers
     config.nim             Config file persistence + profile loading
     history.nim            JSONL history persistence + trend detection
@@ -242,22 +242,22 @@ src/
     rustffi.nim    — Rust FFI bridge for concurrent HTTP pinging
     update.nim     — Fetch and update model catalog from NVIDIA NIM API
 tests/
-    test_types.nim         6 tests
-    test_metrics.nim       41 tests
-    test_display.nim       49 tests
-    test_ping.nim          15 tests
-    test_catalog.nim       17 tests
-    test_config.nim        12 tests
-    test_opencode.nim      5 tests
-    test_recommend.nim     34 tests
-    test_sync.nim          17 tests
-    test_history.nim       28 tests
-    test_rechistory.nim    9 tests
-    test_watch.nim         8 tests
-    test_integration.nim   12 tests
-    test_discovery.nim     18 tests
-    test_cli.nim           62 tests
-    test_proxy.nim         11 tests
+    test_types.nim         34 tests
+    test_metrics.nim       50 tests
+    test_display.nim       66 tests
+    test_ping.nim          20 tests
+    test_catalog.nim       35 tests
+    test_config.nim        51 tests
+    test_opencode.nim      16 tests
+    test_recommend.nim     58 tests
+    test_sync.nim          29 tests
+    test_history.nim       86 tests
+    test_rechistory.nim    26 tests
+    test_watch.nim         23 tests
+    test_integration.nim   35 tests
+    test_discovery.nim     45 tests
+    test_cli.nim           109 tests
+    test_proxy.nim         32 tests
 
 ### nimaproxy (Rust)
 
@@ -353,11 +353,11 @@ models = [
   "z-ai/glm4.7",
   "z-ai/glm5",
   "z-ai/glm-5.1",
+  "mistralai/mistral-large-3-675b-instruct-2512",
 ]
 max_parallel = 9
 timeout_ms = 15000
 strategy = "complete"
-```
 
 Fires N parallel requests to N models, returns first response. Trades N×token
 budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429
