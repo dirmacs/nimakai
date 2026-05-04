@@ -62,13 +62,14 @@ label = "primary"
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "nvidia/meta/llama-3.3-70b-instruct",
-  "nvidia/qwen/qwen2.5-coder-32b-instruct",
+models = [
+  "meta/llama-3.3-70b-instruct",
+  "qwen/qwen2.5-coder-32b-instruct",
 ]
 
 [racing]
 enabled = true
-models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b"]
+models = ["z-ai/glm4.7", "z-ai/glm5", "z-ai/glm-5.1", "qwen/qwen3.5-397b-a17b", "mistralai/mistral-large-3-675b-instruct-2512"]
 max_parallel = 3
 timeout_ms = 8000
 strategy = "complete"

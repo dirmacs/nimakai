@@ -1,5 +1,6 @@
 ## Terminal table and JSON rendering for nimakai.
-## v0.14.0: pagination, cursor nav, live filter, help overlay, latency bars.
+## v0.15.0: responsive TUI (compact mode on narrow terminals), column separators,
+##           cursor nav, live filter, help overlay, latency bars.
 
 import std/[strformat, strutils, json, algorithm, options, terminal, math]
 import ./[types, metrics, catalog]

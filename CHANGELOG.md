@@ -2,7 +2,36 @@
 
 All notable changes to nimakai are documented in this file.
 
-## [0.14.0] - 2026-04-27
+## [0.15.0] - 2026-05-04
+
+### Added
+
+- **Responsive TUI**: `printTable` now auto-switches to compact mode on terminals < 100
+  columns, hiding JITTER/STAB/BAR/UP% columns while preserving MODEL/LATEST/AVG/P95/HEALTH/VERDICT
+- **Column separators**: Added `│` (U+2502) vertical separators between all columns and `─`
+  (U+2500) horizontal separator line matching content width
+- **8 new models to catalog**: Total increased from 80 to 88. New entries include
+  `deepseek-ai/deepseek-v4-pro` (83.0%), `mistralai/mistral-medium-3.5-128b` (82.0%),
+  `deepseek-ai/deepseek-v4-flash` (81.5%), `minimaxai/minimax-m2.7` (79.0%),
+  `z-ai/glm-5.1` (77.5%), `moonshotai/kimi-k2.6` (77.0%),
+  `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` (44.0%),
+  `mistralai/mistral-small-4-119b-2603` (35.0%)
+
+### Fixed
+
+- **TUI table rendering**: Separator width now correctly accounts for all columns; no more
+  overflow or misalignment on narrow terminals
+- **Catalog print spacing**: Missing space between capabilities and model ID in `printCatalog`
+- **Catalog score ordering**: Previously-added v0.14.0 models were inserted after a 49.0-score
+  entry instead of at the top; now correctly score-sorted descending
+
+### Changed
+
+- nimakai version bump: 0.14.0 → 0.15.0
+- README/nimaproxy README: updated catalog count (88), test counts, model lists in examples
+- nimaproxy README routing example: removed erroneous `nvidia/` prefix from model IDs
+
+
 
 ### Added (nimakai)
 
