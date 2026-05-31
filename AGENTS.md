@@ -116,6 +116,14 @@ models = [
 
 Available racing models (current pool, 8 total): deepseek-ai/deepseek-v4-pro, deepseek-ai/deepseek-v4-flash, mistralai/mistral-medium-3.5-128b, z-ai/glm-5.1, stepfun-ai/step-3.7-flash, moonshotai/kimi-k2.6, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m2.7
 
+Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
+use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested
+`chat_template_kwargs` (`thinking`, and Flash `reasoning_effort=high`);
+Mistral Medium 3.5 uses `temperature=0.7`, `top_p=1.0`, `reasoning_effort=high`;
+GLM 5.1 uses `top_p=1.0`, `seed=42`, and `stream=true` as the default; Qwen 3.5
+397B uses `temperature=0.6`, `top_k=20`, `presence_penalty=0`,
+`repetition_penalty=1`; MiniMax M2.7 uses `max_tokens=8192`.
+
 ## Metrics Reference
 
 | Metric | How Computed |

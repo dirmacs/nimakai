@@ -324,11 +324,24 @@ async fn test_proxy_streaming_with_mock() {
 /// Test with model params
 #[tokio::test]
 async fn test_proxy_with_model_params() {
-    use mockito::Server;
+    use mockito::{Matcher, Server};
 
     let mut server = Server::new_async().await;
     let mock = server
         .mock("POST", "/v1/chat/completions")
+        .match_header("accept", "text/event-stream")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "test-model",
+            "temperature": 0.5,
+            "top_p": 0.9,
+            "max_tokens": 100,
+            "stream": true,
+            "repetition_penalty": 1.0,
+            "chat_template_kwargs": {
+                "thinking": true,
+                "reasoning_effort": "high"
+            }
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"id":"test","choices":[{"message":{"content":"hello"}}]}"#)
@@ -341,12 +354,18 @@ async fn test_proxy_with_model_params() {
     }];
 
     let mut model_params = HashMap::new();
+    let mut chat_template_kwargs = HashMap::new();
+    chat_template_kwargs.insert("thinking".to_string(), serde_json::json!(true));
+    chat_template_kwargs.insert("reasoning_effort".to_string(), serde_json::json!("high"));
     model_params.insert(
         "test-model".to_string(),
         ModelParams {
             temperature: Some(0.5),
             top_p: Some(0.9),
             max_tokens: Some(100),
+            stream: Some(true),
+            repetition_penalty: Some(1.0),
+            chat_template_kwargs: Some(chat_template_kwargs),
             ..Default::default()
         },
     );

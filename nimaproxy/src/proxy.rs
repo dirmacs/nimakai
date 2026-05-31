@@ -115,6 +115,78 @@ fn mistral_validation_error(model_id: &str, body: &Bytes) -> Option<Response> {
     None
 }
 
+fn apply_model_params(json: &mut Value, params: &crate::config::ModelParams) {
+    if let Some(temp) = params.temperature {
+        json["temperature"] = Value::from(temp);
+    }
+    if let Some(tp) = params.top_p {
+        json["top_p"] = Value::from(tp);
+    }
+    if let Some(tk) = params.top_k {
+        json["top_k"] = Value::from(tk);
+    }
+    if let Some(fp) = params.frequency_penalty {
+        json["frequency_penalty"] = Value::from(fp);
+    }
+    if let Some(pp) = params.presence_penalty {
+        json["presence_penalty"] = Value::from(pp);
+    }
+    if let Some(rp) = params.repetition_penalty {
+        json["repetition_penalty"] = Value::from(rp);
+    }
+    if let Some(min_p) = params.min_p {
+        json["min_p"] = Value::from(min_p);
+    }
+    if let Some(max_tokens) = params.max_tokens {
+        json["max_tokens"] = Value::from(max_tokens);
+    }
+    if let Some(reasoning_effort) = &params.reasoning_effort {
+        json["reasoning_effort"] = Value::String(reasoning_effort.clone());
+    }
+    if let Some(seed) = params.seed {
+        json["seed"] = Value::from(seed);
+    }
+
+    // Treat stream as a model default, not a hard override. Callers that
+    // explicitly request streaming or non-streaming should keep control of
+    // the response mode.
+    if let Some(stream) = params.stream {
+        if json.get("stream").is_none() || json.get("stream").is_some_and(Value::is_null) {
+            json["stream"] = Value::Bool(stream);
+        }
+    }
+
+    if let Some(ctk) = &params.chat_template_kwargs {
+        if let Some(obj) = json.as_object_mut() {
+            let entry = obj
+                .entry("chat_template_kwargs".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !entry.is_object() {
+                *entry = Value::Object(serde_json::Map::new());
+            }
+            if let Some(kwargs) = entry.as_object_mut() {
+                for (k, v) in ctk {
+                    kwargs.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+}
+
+fn accept_header_for_json(json: &Value) -> &'static str {
+    if json.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+        "text/event-stream"
+    } else {
+        "application/json"
+    }
+}
+
+fn accept_header_for_body(body: &Bytes) -> &'static str {
+    serde_json::from_slice::<Value>(body)
+        .map(|json| accept_header_for_json(&json))
+        .unwrap_or("application/json")
+}
+
 /// POST /v1/chat/completions
 ///
 /// V1: injects key, retries on 429, streams SSE byte-for-byte.
@@ -143,18 +215,22 @@ pub async fn chat_completions(
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
 
+    // Racing owns per-model body rewriting. Passing the original auto request
+    // avoids leaking router-picked model params into race candidates that do
+    // not define the same fields.
+    if original_model == "auto"
+        && !state.racing_models.is_empty()
+        && state.racing_models.len() >= 2
+    {
+        let racing_models = state.racing_models.clone();
+        return race_models(state, original_body, &racing_models).await;
+    }
+
     let (mut model_id, mut body) = resolve_model(body, &state);
 
     // Validate tool call IDs for Mistral models
     if let Some(response) = mistral_validation_error(&model_id, &body) {
         return response;
-    }
-
-    // Racing only triggers when the ORIGINAL request was model="auto"
-    if original_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2
-    {
-        let racing_models = state.racing_models.clone();
-        return race_models(state, body, &racing_models).await;
     }
 
     let n = state.pool.len().min(MAX_RETRIES).max(1);
@@ -170,6 +246,7 @@ pub async fn chat_completions(
             .post(format!("{}/v1/chat/completions", state.target))
             .header("Authorization", format!("Bearer {}", key))
             .header("Content-Type", "application/json")
+            .header("Accept", accept_header_for_body(&body))
             .body(body.clone())
             .send()
             .await;
@@ -662,37 +739,6 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
         if let Some(router) = &state.router {
             if let Some(picked) = router.pick(&state.model_stats) {
                 json["model"] = Value::String(picked.clone());
-                if let Some(params) = state.model_params.get(&picked) {
-                    if let Some(temp) = params.temperature {
-                        json["temperature"] = Value::from(temp);
-                    }
-                    if let Some(tp) = params.top_p {
-                        json["top_p"] = Value::from(tp);
-                    }
-                    if let Some(tk) = params.top_k {
-                        json["top_k"] = Value::from(tk);
-                    }
-                    if let Some(fp) = params.frequency_penalty {
-                        json["frequency_penalty"] = Value::from(fp);
-                    }
-                    if let Some(pp) = params.presence_penalty {
-                        json["presence_penalty"] = Value::from(pp);
-                    }
-                    if let Some(max_tokens) = params.max_tokens {
-                        json["max_tokens"] = Value::from(max_tokens);
-                    }
-                    if let Some(reasoning_effort) = &params.reasoning_effort {
-                        json["reasoning_effort"] = Value::String(reasoning_effort.clone());
-                    }
-                    if let Some(seed) = params.seed {
-                        json["seed"] = Value::from(seed);
-                    }
-                    if let Some(ctk) = &params.chat_template_kwargs {
-                        for (k, v) in ctk {
-                            json[k] = v.clone();
-                        }
-                    }
-                }
             }
         }
     }
@@ -715,39 +761,8 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
 
     fix_message_ordering(&mut json);
 
-    if let Some(params) = state.model_params.get(&requested) {
-        if let Some(temp) = params.temperature {
-            json["temperature"] = Value::from(temp);
-        }
-        if let Some(tp) = params.top_p {
-            json["top_p"] = Value::from(tp);
-        }
-        if let Some(tk) = params.top_k {
-            json["top_k"] = Value::from(tk);
-        }
-        if let Some(fp) = params.frequency_penalty {
-            json["frequency_penalty"] = Value::from(fp);
-        }
-        if let Some(pp) = params.presence_penalty {
-            json["presence_penalty"] = Value::from(pp);
-        }
-        if let Some(max_tokens) = params.max_tokens {
-            json["max_tokens"] = Value::from(max_tokens);
-        }
-        if let Some(reasoning_effort) = &params.reasoning_effort {
-            json["reasoning_effort"] = Value::String(reasoning_effort.clone());
-        }
-        if let Some(seed) = params.seed {
-            json["seed"] = Value::from(seed);
-        }
-        if let Some(ctk) = &params.chat_template_kwargs {
-            for (k, v) in ctk {
-                // Preserve Mistral-specific parameters that were injected
-                if k != "add_generation_prompt" && k != "continue_final_message" {
-                    json[k] = v.clone();
-                }
-            }
-        }
+    if let Some(params) = state.model_params.get(&model_id) {
+        apply_model_params(&mut json, params);
     }
 
     (model_id, Bytes::from(json.to_string()))
@@ -966,39 +981,12 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
         // Fix message ordering: insert empty assistant between tool→user transitions
         fix_message_ordering(&mut json);
 
-        // Inject per-model hyperparameters - override client settings with proxy config
+        // Inject per-model catalog defaults and hyperparameters.
         if let Some(params) = state.model_params.get(model_id) {
-            if let Some(temp) = params.temperature {
-                json["temperature"] = Value::from(temp);
-            }
-            if let Some(tp) = params.top_p {
-                json["top_p"] = Value::from(tp);
-            }
-            if let Some(tk) = params.top_k {
-                json["top_k"] = Value::from(tk);
-            }
-            if let Some(fp) = params.frequency_penalty {
-                json["frequency_penalty"] = Value::from(fp);
-            }
-            if let Some(pp) = params.presence_penalty {
-                json["presence_penalty"] = Value::from(pp);
-            }
-            if let Some(max_tokens) = params.max_tokens {
-                json["max_tokens"] = Value::from(max_tokens);
-            }
-            if let Some(reasoning_effort) = &params.reasoning_effort {
-                json["reasoning_effort"] = Value::String(reasoning_effort.clone());
-            }
-            if let Some(seed) = params.seed {
-                json["seed"] = Value::from(seed);
-            }
-            if let Some(ctk) = &params.chat_template_kwargs {
-                for (k, v) in ctk {
-                    json[k] = v.clone();
-                }
-            }
+            apply_model_params(&mut json, params);
         }
 
+        let accept_header = accept_header_for_json(&json).to_string();
         let req_body = match serde_json::to_vec(&json) {
             Ok(b) => Bytes::from(b),
             Err(_) => continue,
@@ -1029,6 +1017,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                     .post(format!("{}/v1/chat/completions", target))
                     .header("Authorization", format!("Bearer {}", key))
                     .header("Content-Type", "application/json")
+                    .header("Accept", accept_header)
                     .body(req_body)
                     .send(),
             )
@@ -1197,7 +1186,11 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
 mod tests {
     use super::*;
     use crate::proxy::fix_message_ordering;
-    use crate::{config::ModelCompat, key_pool::KeyPool, model_stats::ModelStatsStore};
+    use crate::{
+        config::{ModelCompat, ModelParams},
+        key_pool::KeyPool,
+        model_stats::ModelStatsStore,
+    };
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -1217,6 +1210,59 @@ mod tests {
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
         }
+    }
+
+    #[test]
+    fn test_apply_model_params_uses_nested_chat_template_kwargs() {
+        let mut json = json!({
+            "model": "deepseek-ai/deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "test"}],
+            "chat_template_kwargs": {"client_value": true}
+        });
+        let mut kwargs = HashMap::new();
+        kwargs.insert("thinking".to_string(), json!(true));
+        kwargs.insert("reasoning_effort".to_string(), json!("high"));
+
+        let params = ModelParams {
+            temperature: Some(1.0),
+            top_p: Some(0.95),
+            max_tokens: Some(16384),
+            stream: Some(true),
+            chat_template_kwargs: Some(kwargs),
+            ..Default::default()
+        };
+
+        apply_model_params(&mut json, &params);
+
+        assert_eq!(json["temperature"], json!(1.0));
+        assert_eq!(json["top_p"], json!(0.95));
+        assert_eq!(json["max_tokens"], json!(16384));
+        assert_eq!(json["stream"], json!(true));
+        assert_eq!(json["chat_template_kwargs"]["client_value"], json!(true));
+        assert_eq!(json["chat_template_kwargs"]["thinking"], json!(true));
+        assert_eq!(
+            json["chat_template_kwargs"]["reasoning_effort"],
+            json!("high")
+        );
+        assert!(json.get("thinking").is_none());
+    }
+
+    #[test]
+    fn test_apply_model_params_preserves_explicit_stream_choice() {
+        let mut json = json!({
+            "model": "z-ai/glm-5.1",
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": false
+        });
+        let params = ModelParams {
+            stream: Some(true),
+            ..Default::default()
+        };
+
+        apply_model_params(&mut json, &params);
+
+        assert_eq!(json["stream"], json!(false));
+        assert_eq!(accept_header_for_json(&json), "application/json");
     }
 
     // ============ validate_model_exists tests ============
