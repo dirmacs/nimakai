@@ -153,10 +153,7 @@ impl Config {
     }
 
     pub fn racing_enabled(&self) -> bool {
-        self.racing
-            .as_ref()
-            .and_then(|r| r.enabled)
-            .unwrap_or(true)
+        self.racing.as_ref().and_then(|r| r.enabled).unwrap_or(true)
     }
 
     pub fn racing_models(&self) -> Vec<String> {
@@ -503,7 +500,7 @@ supports_tool_messages = ["mistralai/model1"]
         assert!(!compat.should_transform_developer_role("mistralai/model1"));
         assert!(!compat.should_transform_developer_role("mistralai/model2"));
         assert!(compat.should_transform_developer_role("unknown-model"));
-        assert!(compat.should_transform_developer_role("qwen/qwen3.5-122b-a10b"));
+        assert!(compat.should_transform_developer_role("stepfun-ai/step-3.7-flash"));
 
         assert!(!compat.should_transform_tool_messages("mistralai/model1"));
         assert!(compat.should_transform_tool_messages("mistralai/model2"));

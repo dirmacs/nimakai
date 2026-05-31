@@ -49,9 +49,7 @@ impl ModelRouter {
                 let idx = self.rr_index.fetch_add(1, Ordering::Relaxed) % self.models.len();
                 Some(self.models[idx].clone())
             }
-            Strategy::LatencyAware => stats
-                .best_model(&self.models)
-                .or_else(|| Some(self.models[0].clone())),
+            Strategy::LatencyAware => stats.best_model(&self.models),
         }
     }
 }

@@ -68,7 +68,7 @@ async fn test_live_multi_turn_10_turns() {
 
     eprintln!("[conversation] Testing 10-turn conversation");
 
-    let model = "meta/llama-3.1-8b-instruct";
+    let model = "qwen/qwen3.5-397b-a17b";
     let mut messages: Vec<serde_json::Value> = Vec::new();
     let mut turn_results: Vec<(usize, u16, Option<String>)> = Vec::new();
 
@@ -124,9 +124,7 @@ async fn test_live_multi_turn_10_turns() {
             "[conversation] Turn {} - Status: {}, Response: {:?}",
             turn + 1,
             status_code,
-            assistant_response
-                .as_ref()
-                .map(|s| &s[..s.len().min(100)])
+            assistant_response.as_ref().map(|s| &s[..s.len().min(100)])
         );
 
         turn_results.push((turn + 1, status_code, assistant_response.clone()));
@@ -153,7 +151,10 @@ async fn test_live_multi_turn_10_turns() {
     }
 
     // Summary
-    let success_count = turn_results.iter().filter(|(_, status, _)| *status == 200).count();
+    let success_count = turn_results
+        .iter()
+        .filter(|(_, status, _)| *status == 200)
+        .count();
     eprintln!(
         "[conversation] Completed {} out of 10 turns successfully",
         success_count
@@ -181,7 +182,7 @@ async fn test_live_tool_calling_variations() {
 
     eprintln!("[tool-calling] Testing tool calling variations");
 
-    let model = "meta/llama-3.1-8b-instruct";
+    let model = "qwen/qwen3.5-397b-a17b";
     let mut tool_results: Vec<(&str, u16, Option<String>)> = Vec::new();
 
     // Variation 1: Single tool definition
@@ -382,7 +383,10 @@ async fn test_live_tool_calling_variations() {
     }
 
     // Summary
-    let success_count = tool_results.iter().filter(|(_, status, _)| *status == 200).count();
+    let success_count = tool_results
+        .iter()
+        .filter(|(_, status, _)| *status == 200)
+        .count();
     eprintln!(
         "[tool-calling] Tool calling results: {}/{} variations successful",
         success_count,

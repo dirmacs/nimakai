@@ -10,6 +10,10 @@ type
     ownedBy*: string
     created*: int
 
+proc isOkStatus*(code: HttpCode): bool =
+  ## Nim renders HttpCode as "200 OK"; use the numeric value for comparisons.
+  code.int == 200
+
 proc discoverModels*(apiKey: string, timeout: int = 15): seq[DiscoveredModel] =
   ## Fetch available models from NVIDIA API's /v1/models endpoint.
   let sslCtx = newContext(verifyMode = CVerifyPeer)
@@ -20,8 +24,7 @@ proc discoverModels*(apiKey: string, timeout: int = 15): seq[DiscoveredModel] =
 
   try:
     let resp = client.get("https://integrate.api.nvidia.com/v1/models")
-    let code = parseInt($resp.code)
-    if code != 200:
+    if not isOkStatus(resp.code):
       client.close()
       return @[]
 

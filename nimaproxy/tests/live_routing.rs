@@ -17,10 +17,7 @@ fn get_api_key() -> Option<String> {
 	std::env::var("NVIDIA_API_KEY").ok()
 }
 
-fn make_live_state_with_routing(
-	models: Vec<String>,
-	_strategy: &str,
-) -> Option<Arc<AppState>> {
+fn make_live_state_with_routing(models: Vec<String>, _strategy: &str) -> Option<Arc<AppState>> {
 	let api_key = get_api_key()?;
 
 	let key_entries = vec![KeyEntry {
@@ -81,14 +78,17 @@ async fn test_live_routing_round_robin() {
 
 	// Use models that are typically available
 	let test_models = vec![
-		"meta/llama-3.1-8b-instruct".to_string(),
-		"nvidia/nemotron-4-340b-instruct".to_string(),
+        "qwen/qwen3.5-397b-a17b".to_string(),
+        "stepfun-ai/step-3.7-flash".to_string(),
 	];
 
 	let state = make_live_state_with_routing(test_models.clone(), "round_robin")
 		.expect("Failed to create live state");
 
-	eprintln!("[routing] Testing round-robin distribution across {} models", test_models.len());
+    eprintln!(
+        "[routing] Testing round-robin distribution across {} models",
+        test_models.len()
+    );
 
 	let num_requests = 10;
 	let mut success_count = 0;
@@ -98,7 +98,12 @@ async fn test_live_routing_round_robin() {
 		let model = &test_models[i % test_models.len()];
 		let status = send_chat_request(&state, model).await;
 
-		eprintln!("[routing] Request {} to {}: status={}", i + 1, model, status);
+        eprintln!(
+            "[routing] Request {} to {}: status={}",
+            i + 1,
+            model,
+            status
+        );
 
 		if status == 200 {
 			success_count += 1;
@@ -134,8 +139,8 @@ async fn test_live_routing_latency_aware() {
 	}
 
 	let test_models = vec![
-		"meta/llama-3.1-8b-instruct".to_string(),
-		"nvidia/nemotron-4-340b-instruct".to_string(),
+        "qwen/qwen3.5-397b-a17b".to_string(),
+        "stepfun-ai/step-3.7-flash".to_string(),
 	];
 
 	let state = make_live_state_with_routing(test_models.clone(), "latency_aware")

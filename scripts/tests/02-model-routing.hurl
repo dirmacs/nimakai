@@ -1,11 +1,11 @@
 # Model Routing Tests
 # Tests routing to specific models and invalid model handling
 
-# Test 1: Route to Qwen model
+# Test 1: Route to Step model
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "qwen/qwen3.5-122b-a10b",
+  "model": "stepfun-ai/step-3.7-flash",
   "messages": [{"role": "user", "content": "Hello"}],
   "max_tokens": 50
 }
@@ -17,7 +17,7 @@ jsonpath "$.choices[0].message.role" == "assistant"
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "z-ai/glm4.7",
+  "model": "z-ai/glm-5.1",
   "messages": [{"role": "user", "content": "Hi"}],
   "max_tokens": 50
 }

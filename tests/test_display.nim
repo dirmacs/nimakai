@@ -261,6 +261,23 @@ suite "pageLegend":
     let p = PagerState(enabled: true, page: 0, pageSize: 0)
     check pageLegend(p, 25) == ""
 
+suite "cursor pagination helpers":
+  test "absolute cursor maps to page-local row for rendering":
+    let p = PagerState(enabled: true, page: 1, pageSize: 10)
+    check localCursorRow(12, p, 25) == 2
+
+  test "cursor outside current page is not rendered as selected":
+    let p = PagerState(enabled: true, page: 1, pageSize: 10)
+    check localCursorRow(3, p, 25) == -1
+
+  test "selected absolute row remains absolute in paginated mode":
+    let p = PagerState(enabled: true, page: 1, pageSize: 10)
+    check selectedAbsoluteRow(12, p, 25) == 12
+
+  test "out-of-range absolute cursor is invalid":
+    let p = PagerState(enabled: true, page: 1, pageSize: 10)
+    check selectedAbsoluteRow(25, p, 25) == -1
+
 suite "latencyBar":
   test "zero ms returns dim dash bar":
     let b = latencyBar(0.0)

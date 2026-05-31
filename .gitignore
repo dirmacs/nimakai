@@ -52,6 +52,7 @@ tests/test_rechistory
 tests/test_watch
 tests/test_integration
 tests/test_discovery
+tests/test_update
 tests/test_proxy
 tests/test_cli
 

@@ -144,6 +144,26 @@ proc highlightQuery*(s: string, query: string): string =
     i = pos + q.len
   result2
 
+# ── Cursor helpers ───────────────────────────────────────────────────────────
+
+proc localCursorRow*(cursorRow: int, pager: PagerState, total: int): int =
+  ## Convert absolute cursor index to the row index visible on the current page.
+  if cursorRow < 0 or cursorRow >= total:
+    return -1
+  if pager.enabled and pager.pageSize > 0:
+    let (s, e) = pageSlice(total, pager.page, pager.pageSize)
+    if cursorRow < s or cursorRow >= e:
+      return -1
+    return cursorRow - s
+  cursorRow
+
+proc selectedAbsoluteRow*(cursorRow: int, pager: PagerState, total: int): int =
+  ## Validate and return the selected absolute row in the filtered+sorted list.
+  discard pager
+  if cursorRow < 0 or cursorRow >= total:
+    return -1
+  cursorRow
+
 # ── Page legend ──────────────────────────────────────────────────────────────
 
 proc pageLegend*(pager: PagerState, total: int): string =
@@ -198,6 +218,7 @@ proc printTable*(stats: seq[ModelStats], round: int,
 
   # ── Apply filter ──
   let visible = filterStats(stats, filterSt.query)
+  let localCursor = localCursorRow(cursorRow, pager, visible.len)
 
   # ── Pagination slice ──
   var showStats: seq[ModelStats]
@@ -218,7 +239,7 @@ proc printTable*(stats: seq[ModelStats], round: int,
 
   # ── Rows ──
   for i, s in showStats:
-    let isCursor = (cursorRow >= 0 and i == cursorRow)
+    let isCursor = (localCursor >= 0 and i == localCursor)
     let rowBg    = if isCursor: "\e[48;5;236m" else: ""
     let rowReset = if isCursor: "\e[0m" else: ""
 

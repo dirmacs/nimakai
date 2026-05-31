@@ -189,7 +189,7 @@ Environment:
 
 Examples:
   nimakai --once
-  nimakai -m qwen/qwen3.5-122b-a10b,qwen/qwen3.5-397b-a17b
+  nimakai -m stepfun-ai/step-3.7-flash,qwen/qwen3.5-397b-a17b
   nimakai recommend --rounds 5 --apply
   nimakai --opencode --json
 """

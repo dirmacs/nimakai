@@ -14,8 +14,8 @@ proc writeOmoFile(path: string, categories: JsonNode = nil) =
   ## Write a minimal oh-my-opencode.json for testing.
   var data = %*{
     "categories": {
-      "quick": {"model": "nvidia/llama-3.1-nemotron-nano-8b-v1"},
-      "deep": {"model": "nvidia/llama-3.3-nemotron-super-49b-v1"}
+      "quick": {"model": "nvidia/stepfun-ai/step-3.7-flash"},
+      "deep": {"model": "nvidia/qwen/qwen3.5-397b-a17b"}
     }
   }
   if categories != nil:
@@ -73,14 +73,14 @@ suite "applyRecommendations":
     writeOmoFile(omoPath)
 
     let recs = @[
-      makeRec("quick", "llama-3.1-nemotron-nano-8b-v1",
-              "qwen-2.5-coder-32b-instruct"),
+      makeRec("quick", "stepfun-ai/step-3.7-flash",
+              "qwen/qwen3.5-397b-a17b"),
     ]
     applyRecommendations(recs, omoPath)
 
     let data = parseJson(readFile(omoPath))
     check data["categories"]["quick"]["model"].getStr() ==
-      "nvidia/qwen-2.5-coder-32b-instruct"
+      "nvidia/qwen/qwen3.5-397b-a17b"
 
   test "preserves existing structure":
     let omoPath = testDir / "oh-my-opencode.json"
@@ -292,7 +292,7 @@ suite "syncRecommendations":
     # Backup should contain the original data (before apply)
     let backupData = parseJson(readFile(backup))
     check backupData["categories"]["quick"]["model"].getStr() ==
-      "nvidia/llama-3.1-nemotron-nano-8b-v1"
+      "nvidia/stepfun-ai/step-3.7-flash"
 
   test "returns false when omo file missing":
     let omoPath = testDir / "nonexistent.json"

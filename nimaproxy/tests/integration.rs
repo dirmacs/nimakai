@@ -93,7 +93,10 @@ fn test_model_stats_circuit_breaker_config_getter() {
     let retrieved = store_custom.circuit_breaker_config();
     assert_eq!(retrieved.max_output_tokens, custom_config.max_output_tokens);
     assert_eq!(retrieved.max_repetitions, custom_config.max_repetitions);
-    assert_eq!(retrieved.max_consecutive_assistant_turns, custom_config.max_consecutive_assistant_turns);
+    assert_eq!(
+        retrieved.max_consecutive_assistant_turns,
+        custom_config.max_consecutive_assistant_turns
+    );
 }
 
 /// Test ModelStatsStore::best_model returning None for empty candidates (model_stats.rs line 311)
@@ -118,7 +121,10 @@ fn test_model_stats_best_model_all_degraded() {
     }
 
     // When all candidates are degraded, should still return one (least degraded)
-    let result = stats.best_model(&["degraded-model-1".to_string(), "degraded-model-2".to_string()]);
+    let result = stats.best_model(&[
+        "degraded-model-1".to_string(),
+        "degraded-model-2".to_string(),
+    ]);
     // Should return one of them (the least degraded)
     assert!(result.is_some());
 }
@@ -130,7 +136,7 @@ fn test_mock_app_state_builder_custom_racing_models() {
 
     let custom_models = vec![
         "meta/llama-3.1-405b-instruct".to_string(),
-        "nvidia/nemotron-4-340b-instruct".to_string(),
+        "minimaxai/minimax-m2.7".to_string(),
     ];
 
     let state = MockAppStateBuilder::new()
@@ -773,7 +779,7 @@ fn test_model_validation_rejects_invalid_model() {
         let mut available = state.available_models.lock().unwrap();
         *available = vec![
             "google/gemma-3-27b-it".to_string(),
-            "qwen/qwen2.5-coder-32b-instruct".to_string(),
+            "qwen/qwen3.5-397b-a17b".to_string(),
         ];
     }
 
@@ -1001,8 +1007,8 @@ fn test_role_transformation_all_mistral_models() {
         compat,
     );
 
-    // mistral-large is NOT in the list, so developer role should be transformed to user
-    let model = "mistralai/mistral-large-3-675b-instruct-2512";
+    // The Mistral model is NOT in the allow-list, so developer role should be transformed to user.
+    let model = "mistralai/mistral-medium-3.5-128b";
     let request_body = json!({
         "model": model,
         "messages": [

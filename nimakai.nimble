@@ -33,4 +33,5 @@ task test, "Run tests":
   exec "nim c -d:ssl --path:src -r tests/test_watch.nim"
   exec "nim c -d:ssl --path:src -r tests/test_integration.nim"
   exec "nim c -d:ssl --path:src -r tests/test_discovery.nim"
+  exec "nim c -d:ssl --path:src -r tests/test_update.nim"
   exec "nim c -d:ssl --path:src -r tests/test_cli.nim"

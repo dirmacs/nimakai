@@ -19,7 +19,9 @@ fn get_test_keys() -> Vec<(String, String)> {
     let env_keys = std::env::var("NVIDIA_API_KEY").unwrap_or_default();
     let keys: Vec<&str> = env_keys.split(',').collect();
     if keys.is_empty() || (keys.len() == 1 && keys[0].is_empty()) {
-        eprintln!("WARN: NVIDIA_API_KEY not set, using dummy key (tests will likely fail with 401)");
+        eprintln!(
+            "WARN: NVIDIA_API_KEY not set, using dummy key (tests will likely fail with 401)"
+        );
         vec![("dummy".to_string(), "test".to_string())]
     } else {
         keys.iter()
@@ -49,8 +51,8 @@ fn make_state() -> Arc<AppState> {
         None,
         ModelStatsStore::new(3000.0),
         vec![
-            "mistralai/devstral-2-123b-instruct-2512".to_string(),
-            "z-ai/glm4.7".to_string(),
+            "mistralai/mistral-medium-3.5-128b".to_string(),
+            "z-ai/glm-5.1".to_string(),
             "qwen/qwen3.5-397b-a17b".to_string(),
         ],
         5,
@@ -62,7 +64,10 @@ fn make_state() -> Arc<AppState> {
 }
 
 /// Send a request and return status code and (if success) the parsed response.
-async fn send_chat(state: Arc<AppState>, body: serde_json::Value) -> (u16, Option<serde_json::Value>) {
+async fn send_chat(
+    state: Arc<AppState>,
+    body: serde_json::Value,
+) -> (u16, Option<serde_json::Value>) {
     let resp = nimaproxy::proxy::chat_completions(
         axum::extract::State(state),
         axum::http::HeaderMap::new(),
@@ -90,7 +95,7 @@ async fn send_chat(state: Arc<AppState>, body: serde_json::Value) -> (u16, Optio
 #[ignore]
 async fn test_tool_definition_with_empty_params() {
     let state = make_state();
-    let model = "mistralai/devstral-2-123b-instruct-2512";
+    let model = "mistralai/mistral-medium-3.5-128b";
 
     let body = json!({
         "model": model,
@@ -135,7 +140,7 @@ async fn test_tool_definition_with_empty_params() {
 #[ignore]
 async fn test_tool_definition_with_parameters() {
     let state = make_state();
-    let model = "mistralai/devstral-2-123b-instruct-2512";
+    let model = "mistralai/mistral-medium-3.5-128b";
 
     let body = json!({
         "model": model,
@@ -194,7 +199,7 @@ async fn test_tool_definition_with_parameters() {
 #[ignore]
 async fn test_tool_call_sequence() {
     let state = make_state();
-    let model = "mistralai/devstral-2-123b-instruct-2512";
+    let model = "mistralai/mistral-medium-3.5-128b";
 
     // First turn: user asks to get weather, assistant should call tool
     let body1 = json!({
@@ -306,7 +311,7 @@ async fn test_tool_call_sequence() {
 #[ignore]
 async fn test_tool_role_transformation() {
     let state = make_state();
-    let model = "z-ai/glm4.7"; // This model may not support native "tool" role
+    let model = "z-ai/glm-5.1"; // This model may not support native "tool" role
 
     let body = json!({
         "model": model,
@@ -372,7 +377,7 @@ async fn test_tool_role_transformation() {
 #[ignore]
 async fn test_assistant_message_with_tool_calls_missing_content() {
     let state = make_state();
-    let model = "mistralai/devstral-2-123b-instruct-2512";
+    let model = "mistralai/mistral-medium-3.5-128b";
 
     // Some models require non-null content even for tool-call-only messages.
     // The proxy should inject an empty string if missing.
@@ -411,7 +416,10 @@ async fn test_assistant_message_with_tool_calls_missing_content() {
     });
 
     let (status, _) = send_chat(state.clone(), body).await;
-    eprintln!("[test_assistant_message_with_tool_calls_missing_content] status={}", status);
+    eprintln!(
+        "[test_assistant_message_with_tool_calls_missing_content] status={}",
+        status
+    );
 
     // Should not crash; likely returns 200 or 400 depending on model strictness.
     assert!(
@@ -425,7 +433,7 @@ async fn test_assistant_message_with_tool_calls_missing_content() {
 #[ignore]
 async fn test_reasoning_field_stripped() {
     let state = make_state();
-    let model = "mistralai/devstral-2-123b-instruct-2512";
+    let model = "mistralai/mistral-medium-3.5-128b";
 
     // Some clients send a "reasoning" field in assistant messages.
     // The proxy should strip it to avoid Pydantic "Extra inputs" errors.
@@ -467,7 +475,7 @@ async fn test_reasoning_field_stripped() {
 
 async fn test_mismatched_tool_calls_and_responses() {
     let state = make_state();
-    let model = "mistralai/devstral-2-123b-instruct-2512";
+    let model = "mistralai/mistral-medium-3.5-128b";
 
     // First turn: get a tool call from the model
     let body1 = json!({
@@ -501,7 +509,10 @@ async fn test_mismatched_tool_calls_and_responses() {
     eprintln!("[test_mismatched] turn1 status={}", status1);
     assert_eq!(status1, 200);
     let resp1 = resp1.unwrap();
-    let tool_calls = resp1["choices"][0]["message"]["tool_calls"].as_array().unwrap().clone();
+    let tool_calls = resp1["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .unwrap()
+        .clone();
     assert!(!tool_calls.is_empty());
     let tool_call_id = tool_calls[0]["id"].as_str().unwrap();
 

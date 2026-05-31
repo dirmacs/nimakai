@@ -1,25 +1,51 @@
 pub mod config;
 pub mod key_pool;
+#[cfg(test)]
+pub mod mock_http;
 pub mod model_router;
 pub mod model_stats;
 pub mod proxy;
-pub mod turn_log;
 pub mod test_utils;
-#[cfg(test)]
-pub mod mock_http;
+pub mod turn_log;
 
 pub use proxy::validate_model_exists;
 
-pub use proxy::{completions, embeddings, props};
 pub use config::{load as config_load, Config, KeyEntry, ModelParams, RoutingConfig};
 pub use key_pool::KeyPool;
 pub use model_router::{ModelRouter, Strategy};
-pub use model_stats::{ModelStatsStore, ModelSnapshot, ModelStatus, RecordOutcome};
+pub use model_stats::{ModelSnapshot, ModelStatsStore, ModelStatus, RecordOutcome};
+pub use proxy::{completions, embeddings, props};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::{Arc, Mutex};
+
+fn push_unique_model(models: &mut Vec<String>, model: &str) {
+    if !model.is_empty() && !models.iter().any(|m| m == model) {
+        models.push(model.to_string());
+    }
+}
+
+fn collect_configured_models(
+    router: Option<&ModelRouter>,
+    racing_models: &[String],
+    available_models: &[String],
+) -> Vec<String> {
+    let mut models = Vec::new();
+    if let Some(router) = router {
+        for model in &router.models {
+            push_unique_model(&mut models, model);
+        }
+    }
+    for model in racing_models {
+        push_unique_model(&mut models, model);
+    }
+    for model in available_models {
+        push_unique_model(&mut models, model);
+    }
+    models
+}
 
 pub struct AppState {
     pub pool: KeyPool,
@@ -57,7 +83,7 @@ impl AppState {
             .build()
             .expect("failed to build HTTP client");
 
-        let available_models = racing_models.clone();
+        let available_models = collect_configured_models(router.as_ref(), &racing_models, &[]);
         Arc::new(AppState {
             pool: KeyPool::new(keys),
             client,
@@ -74,12 +100,28 @@ impl AppState {
             model_compat,
         })
     }
+
+    pub fn configured_models(&self) -> Vec<String> {
+        let available = self.available_models.lock().unwrap();
+        collect_configured_models(self.router.as_ref(), &self.racing_models, &available)
+    }
+
+    pub fn routing_enabled(&self) -> bool {
+        self.router
+            .as_ref()
+            .map(|router| !router.models.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn racing_enabled(&self) -> bool {
+        self.racing_models.len() >= 2 && self.racing_max_parallel >= 2
+    }
 }
 
+use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::path::PathBuf;
-use std::cell::RefCell;
 
 thread_local! {
     static TLS_PID_FILE: RefCell<Option<PathBuf>> = RefCell::new(None);
@@ -117,7 +159,10 @@ fn read_pid_and_port(pfile: &PathBuf) -> Option<(libc::pid_t, u16)> {
     }
     let parts: Vec<&str> = trimmed.split(':').collect();
     let pid = parts.first()?.parse::<libc::pid_t>().ok()?;
-    let port = parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(8080);
+    let port = parts
+        .get(1)
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8080);
     Some((pid, port))
 }
 
@@ -176,9 +221,17 @@ pub extern "C" fn proxy_start_with_pid_file(
     std::eprintln!("[nimaproxy] proxy_start: pid_file={:?}", pfile);
 
     if let Some((existing_pid, existing_port)) = read_pid_and_port(&pfile) {
-        std::eprintln!("[nimaproxy] proxy_start: existing pid={}, port={}", existing_pid, existing_port);
+        std::eprintln!(
+            "[nimaproxy] proxy_start: existing pid={}, port={}",
+            existing_pid,
+            existing_port
+        );
         if is_process_alive(existing_pid) && check_proxy_alive(existing_port) {
-            std::eprintln!("[nimaproxy] proxy_start: already running pid={}, port={}", existing_pid, existing_port);
+            std::eprintln!(
+                "[nimaproxy] proxy_start: already running pid={}, port={}",
+                existing_pid,
+                existing_port
+            );
             return -1;
         }
     }
@@ -201,7 +254,9 @@ pub extern "C" fn proxy_start_with_pid_file(
 
     let port_cstr    = CString::new(port.to_string()).unwrap();
     let config_cstr  = CString::new(path).unwrap();
-    let bin_path     = CString::new(std::env::var("NIMAPROXY_BIN").unwrap_or_else(|_| "nimaproxy".to_string())).unwrap();
+    let bin_path =
+        CString::new(std::env::var("NIMAPROXY_BIN").unwrap_or_else(|_| "nimaproxy".to_string()))
+            .unwrap();
     let cf_flag      = CString::new("--config").unwrap();
     let pt_flag      = CString::new("--port").unwrap();
     let pid_flag     = CString::new("--pid-file").unwrap();
@@ -221,8 +276,16 @@ pub extern "C" fn proxy_start_with_pid_file(
             libc::O_RDWR,
             0o644,
         );
-        libc::posix_spawn_file_actions_adddup2(&mut file_actions, libc::STDIN_FILENO, libc::STDOUT_FILENO);
-        libc::posix_spawn_file_actions_adddup2(&mut file_actions, libc::STDIN_FILENO, libc::STDERR_FILENO);
+        libc::posix_spawn_file_actions_adddup2(
+            &mut file_actions,
+            libc::STDIN_FILENO,
+            libc::STDOUT_FILENO,
+        );
+        libc::posix_spawn_file_actions_adddup2(
+            &mut file_actions,
+            libc::STDIN_FILENO,
+            libc::STDERR_FILENO,
+        );
     }
 
     let mut child_pid: libc::pid_t = 0;
@@ -261,7 +324,9 @@ pub extern "C" fn proxy_start_with_pid_file(
 
     for env_str in envp.iter().take(envp.len() - 1) {
         if !env_str.is_null() {
-            unsafe { let _ = CString::from_raw(*env_str); }
+            unsafe {
+                let _ = CString::from_raw(*env_str);
+            }
         }
     }
 
@@ -291,7 +356,10 @@ pub extern "C" fn proxy_start_with_pid_file(
                 continue;
             }
             if wait_for_proxy_ready(written_port, 500) {
-                std::eprintln!("[nimaproxy] proxy_start: proxy ready on port={}", written_port);
+                std::eprintln!(
+                    "[nimaproxy] proxy_start: proxy ready on port={}",
+                    written_port
+                );
                 return 0;
             }
         }
@@ -300,7 +368,9 @@ pub extern "C" fn proxy_start_with_pid_file(
 
     std::eprintln!("[nimaproxy] proxy_start: proxy failed to become ready");
     fs::remove_file(&pfile).ok();
-    unsafe { libc::kill(child_pid, libc::SIGTERM); }
+    unsafe {
+        libc::kill(child_pid, libc::SIGTERM);
+    }
     -1
 }
 
@@ -316,7 +386,9 @@ pub extern "C" fn proxy_stop() -> i32 {
         return 0;
     }
 
-    unsafe { libc::kill(pid, libc::SIGTERM); }
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
     std::fs::remove_file(pid_file_path(None)).ok();
     0
 }
@@ -402,7 +474,9 @@ pub extern "C" fn proxy_free_string(s: *mut c_char) {
     if s.is_null() {
         return;
     }
-    unsafe { let _ = CString::from_raw(s); }
+    unsafe {
+        let _ = CString::from_raw(s);
+    }
 }
 
 #[cfg(test)]
@@ -455,12 +529,17 @@ label = "test"
         with_isolated_env(19101, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
             let pid_file_cstr = CString::new(pid_file).unwrap();
-            let result = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
+            let result = unsafe {
+                proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr())
+            };
             assert_eq!(result, 0, "proxy_start should succeed");
 
             std::thread::sleep(std::time::Duration::from_millis(500));
             let pid_content = std::fs::read_to_string(pid_file).unwrap_or_default();
-            assert!(!pid_content.is_empty() && pid_content != "starting", "pid file should be written");
+            assert!(
+                !pid_content.is_empty() && pid_content != "starting",
+                "pid file should be written"
+            );
 
             unsafe { proxy_stop() };
         });
@@ -471,13 +550,18 @@ label = "test"
         with_isolated_env(19102, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
             let pid_file_cstr = CString::new(pid_file).unwrap();
-            let start_result = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
+            let start_result = unsafe {
+                proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr())
+            };
             assert_eq!(start_result, 0, "proxy_start should succeed");
 
             std::thread::sleep(std::time::Duration::from_millis(600));
 
             let health = unsafe { proxy_health() };
-            assert!(!health.is_null(), "health should return valid string when running");
+            assert!(
+                !health.is_null(),
+                "health should return valid string when running"
+            );
 
             unsafe { proxy_free_string(health) };
             unsafe { proxy_stop() };
@@ -493,7 +577,10 @@ label = "test"
             std::thread::sleep(std::time::Duration::from_millis(600));
 
             let stats = unsafe { proxy_stats() };
-            assert!(!stats.is_null(), "stats should return valid string when running");
+            assert!(
+                !stats.is_null(),
+                "stats should return valid string when running"
+            );
 
             unsafe { proxy_free_string(stats) };
             unsafe { proxy_stop() };
@@ -503,7 +590,10 @@ label = "test"
     #[test]
     fn test_proxy_health_when_stopped() {
         let health = unsafe { proxy_health() };
-        assert!(health.is_null(), "health should return null when not running");
+        assert!(
+            health.is_null(),
+            "health should return null when not running"
+        );
     }
 
     #[test]
@@ -520,12 +610,16 @@ label = "test"
         with_isolated_env(19104, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
             let pid_file_cstr = CString::new(pid_file).unwrap();
-            let result1 = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
+            let result1 = unsafe {
+                proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr())
+            };
             assert_eq!(result1, 0, "first start should succeed");
 
             std::thread::sleep(std::time::Duration::from_millis(600));
 
-            let result2 = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
+            let result2 = unsafe {
+                proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr())
+            };
             assert_eq!(result2, -1, "second start should fail (already running)");
 
             unsafe { proxy_stop() };
@@ -546,13 +640,19 @@ label = "test"
         with_isolated_env(19106, |cfg_path, pid_file| {
             let config_path = CString::new(cfg_path).unwrap();
             let pid_file_cstr = CString::new(pid_file).unwrap();
-            let result = unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 19106, pid_file_cstr.as_ptr()) };
+            let result = unsafe {
+                proxy_start_with_pid_file(config_path.as_ptr(), 19106, pid_file_cstr.as_ptr())
+            };
             assert_eq!(result, 0, "proxy_start with custom port should succeed");
 
             std::thread::sleep(std::time::Duration::from_millis(600));
 
             let pid_content = std::fs::read_to_string(pid_file).unwrap_or_default();
-            assert!(pid_content.contains("19106"), "PID file should contain custom port {}", pid_content);
+            assert!(
+                pid_content.contains("19106"),
+                "PID file should contain custom port {}",
+                pid_content
+            );
 
             unsafe { proxy_stop() };
         });
@@ -739,7 +839,10 @@ label = "test"
     fn test_proxy_health_impl_no_pid_file() {
         let fake_path = PathBuf::from("/nonexistent/pid/file.pid");
         let result = proxy_health_impl(&fake_path);
-        assert!(result.is_null(), "health should return null for nonexistent pid file");
+        assert!(
+            result.is_null(),
+            "health should return null for nonexistent pid file"
+        );
     }
 
     /// Test proxy_stats_impl with no valid pid file
@@ -747,7 +850,10 @@ label = "test"
     fn test_proxy_stats_impl_no_pid_file() {
         let fake_path = PathBuf::from("/nonexistent/pid/file.pid");
         let result = proxy_stats_impl(&fake_path);
-        assert!(result.is_null(), "stats should return null for nonexistent pid file");
+        assert!(
+            result.is_null(),
+            "stats should return null for nonexistent pid file"
+        );
     }
 
     /// Test proxy_stats_impl with dead process
@@ -761,9 +867,11 @@ label = "test"
 
         let result = proxy_stats_impl(&pid_file);
         // The function should return null when process doesn't exist
-        assert!(result.is_null(), "stats should return null for non-existent process");
+        assert!(
+            result.is_null(),
+            "stats should return null for non-existent process"
+        );
     }
-
 
     // Test 16: FFI null pointer handling
     #[test]

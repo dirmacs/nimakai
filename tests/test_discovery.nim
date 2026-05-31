@@ -1,6 +1,6 @@
 ## Tests for model discovery and catalog diff.
 
-import std/[unittest, json]
+import std/[unittest, json, httpclient]
 import nimakai/[types, discovery]
 
 suite "parseDiscoverResponse":
@@ -36,6 +36,12 @@ suite "parseDiscoverResponse":
     check models[0].id == "model/c"
     check models[0].ownedBy == ""
     check models[0].created == 0
+
+suite "status handling":
+  test "uses numeric HttpCode value instead of parsing display text":
+    check $Http200 == "200 OK"
+    check isOkStatus(Http200)
+    check not isOkStatus(Http404)
 
 suite "diffCatalog":
   let catalog = @[

@@ -75,8 +75,8 @@ suite "parseArgs boolean flags":
 
 suite "parseArgs value flags":
   test "--models with single model":
-    let cfg = parseArgs(@["--models=qwen/qwen3.5-122b-a10b"])
-    check cfg.models == @["qwen/qwen3.5-122b-a10b"]
+    let cfg = parseArgs(@["--models=stepfun-ai/step-3.7-flash"])
+    check cfg.models == @["stepfun-ai/step-3.7-flash"]
 
   test "--models with comma-separated list":
     let cfg = parseArgs(@["-m:model-a,model-b,model-c"])

@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures::{TryStreamExt, FutureExt};
+use futures::{FutureExt, TryStreamExt};
 use serde_json::Value;
 use tokio::time::timeout;
 
@@ -22,7 +22,7 @@ fn count_repetitions(text: &str) -> u32 {
     if words.len() < 4 {
         return 0;
     }
-    
+
     let mut repetitions = 0u32;
     for window_size in 3..=6 {
         if words.len() < window_size * 2 {
@@ -32,7 +32,10 @@ fn count_repetitions(text: &str) -> u32 {
             let slice = &words[i..i + window_size];
             let pattern = slice.join(" ");
             let mut count = 1;
-            for j in (i + window_size..).step_by(window_size).take_while(|&j| j + window_size <= words.len()) {
+            for j in (i + window_size..)
+                .step_by(window_size)
+                .take_while(|&j| j + window_size <= words.len())
+            {
                 let next_slice = &words[j..j + window_size];
                 if next_slice.join(" ") == pattern {
                     count += 1;
@@ -52,27 +55,31 @@ fn extract_response_metrics(text: &str) -> (u32, u32, bool) {
     let mut output_tokens = 0u32;
     let repetition_count = count_repetitions(text);
     let mut has_tool_call = false;
-    
+
     if let Ok(json) = serde_json::from_str::<Value>(text) {
         if let Some(usage) = json.get("usage").and_then(|u| u.get("completion_tokens")) {
             if let Some(tokens) = usage.as_u64() {
                 output_tokens = tokens as u32;
             }
         }
-        
+
         if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
             for choice in choices {
-                if choice.get("message").and_then(|m| m.get("tool_calls")).is_some() {
+                if choice
+                    .get("message")
+                    .and_then(|m| m.get("tool_calls"))
+                    .is_some()
+                {
                     has_tool_call = true;
                 }
             }
         }
     }
-    
+
     if output_tokens == 0 {
         output_tokens = (text.len() as u32) / 4;
     }
-    
+
     (output_tokens, repetition_count, has_tool_call)
 }
 
@@ -85,31 +92,27 @@ pub fn validate_model_exists(model: &str, state: &AppState) -> Result<(), String
         return Ok(());
     }
 
-    // Check if model is in the available_models list (if non-empty)
-    let available = state.available_models.lock().unwrap();
-    if !available.is_empty() {
-        if available.iter().any(|m| m == model) {
+    let configured_models = state.configured_models();
+    if !configured_models.is_empty() {
+        if configured_models.iter().any(|m| m == model) {
             return Ok(());
         }
-        // available_models is set and model is not in it - reject
-        return Err(format!("model '{}' not found in available models", model));
-    }
-    drop(available);
-
-    // Check if model is in the racing_models list (if non-empty)
-    if !state.racing_models.is_empty() && state.racing_models.iter().any(|m| m == model) {
-        return Ok(());
-    }
-
-    // Check if router is configured - it will pick from configured models
-    if state.router.is_some() {
-        return Ok(());
+        return Err(format!("model '{}' not found in configured models", model));
     }
 
     // No routing configured - accept any model (passthrough to NVIDIA)
     // This preserves backward compatibility: when no models are configured,
     // passthrough mode allows any model through
     Ok(())
+}
+
+fn mistral_validation_error(model_id: &str, body: &Bytes) -> Option<Response> {
+    if let Ok(json) = serde_json::from_slice::<Value>(body) {
+        if let Err((status, msg)) = validate_mistral_tool_call_ids(&json, model_id) {
+            return Some((status, msg).into_response());
+        }
+    }
+    None
 }
 
 /// POST /v1/chat/completions
@@ -122,26 +125,34 @@ pub async fn chat_completions(
     _headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let original_body = body.clone();
+
     // Extract original model BEFORE resolve_model modifies it
     let original_model = {
         if let Ok(v) = serde_json::from_slice::<Value>(&body) {
-            v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string()
+            v.get("model")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string()
         } else {
             String::new()
         }
     };
 
-    let (model_id, body) = resolve_model(body, &state);
+    if let Err(msg) = validate_model_exists(&original_model, &state) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+
+    let (mut model_id, mut body) = resolve_model(body, &state);
 
     // Validate tool call IDs for Mistral models
-    if let Ok(json) = serde_json::from_slice::<Value>(&body) {
-        if let Err((status, msg)) = validate_mistral_tool_call_ids(&json, &model_id) {
-            return (status, msg).into_response();
-        }
+    if let Some(response) = mistral_validation_error(&model_id, &body) {
+        return response;
     }
 
     // Racing only triggers when the ORIGINAL request was model="auto"
-    if original_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2 {
+    if original_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2
+    {
         let racing_models = state.racing_models.clone();
         return race_models(state, body, &racing_models).await;
     }
@@ -166,9 +177,16 @@ pub async fn chat_completions(
         match result {
             Err(e) => {
                 if let Some(label) = state.pool.get_key_label(idx) {
-                    state.model_stats.record_with_key(&model_id, &label, t0.elapsed().as_millis() as f64, false);
+                    state.model_stats.record_with_key(
+                        &model_id,
+                        &label,
+                        t0.elapsed().as_millis() as f64,
+                        false,
+                    );
                 } else {
-                    state.model_stats.record(&model_id, t0.elapsed().as_millis() as f64, false);
+                    state
+                        .model_stats
+                        .record(&model_id, t0.elapsed().as_millis() as f64, false);
                 }
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
@@ -192,8 +210,8 @@ pub async fn chat_completions(
                 let ok = status.is_success();
 
                 // Forward response — stream bytes directly (works for JSON + SSE)
-                let resp_status =
-                    axum::http::StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let resp_status = axum::http::StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
 
                 let content_type = resp
                     .headers()
@@ -205,46 +223,76 @@ pub async fn chat_completions(
                 let stream = resp
                     .bytes_stream()
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-                
+
                 let collected = match stream.try_collect::<Vec<Bytes>>().await {
                     Ok(c) => c,
                     Err(e) => {
                         return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
                     }
                 };
-                
-let full_body = collected.concat();
-// Check for server-side degradation from NVIDIA API
-// NVIDIA returns: {"status":400,"title":"Bad Request","detail":"Function id '...': DEGRADED function cannot be invoked"}
-let body_str = std::str::from_utf8(&full_body).unwrap_or("");
-if status == 400 && (body_str.contains("DEGRADED") || body_str.contains("degraded")) {
-    eprintln!("[nimaproxy] SERVER-DEGRADED: model '{}' returned DEGRADED error from NVIDIA (server-side block)", model_id);
-    // Record as server-side degraded - this immediately marks the model as unavailable
-    state.model_stats.record_server_degraded(&model_id);
-    // Continue retry with a different model
-    continue;
-}
-if status == 400 && (body_str.contains("Invalid assistant message") || body_str.contains("invalid assistant")) {
-    eprintln!("[nimaproxy] INVALID-ASSISTANT: model '{}' rejected message structure (400): {} — retrying with next key", model_id, &body_str[..body_str.len().min(200)]);
-    continue;
-}
 
-                let (output_tokens, repetition_count, had_tool_call) = extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
-                
+                let full_body = collected.concat();
+                // Check for server-side degradation from NVIDIA API
+                // NVIDIA returns: {"status":400,"title":"Bad Request","detail":"Function id '...': DEGRADED function cannot be invoked"}
+                let body_str = std::str::from_utf8(&full_body).unwrap_or("");
+                if status == 400 && (body_str.contains("DEGRADED") || body_str.contains("degraded"))
+                {
+                    eprintln!("[nimaproxy] SERVER-DEGRADED: model '{}' returned DEGRADED error from NVIDIA (server-side block)", model_id);
+                    // Record as server-side degraded - this immediately marks the model as unavailable
+                    state.model_stats.record_server_degraded(&model_id);
+                    if original_model == "auto" {
+                        let (next_model_id, next_body) =
+                            resolve_model(original_body.clone(), &state);
+                        model_id = next_model_id;
+                        body = next_body;
+                        if let Some(response) = mistral_validation_error(&model_id, &body) {
+                            return response;
+                        }
+                    }
+                    // Continue retry with the next key and, for auto routing, a freshly resolved model.
+                    continue;
+                }
+                if status == 400
+                    && (body_str.contains("Invalid assistant message")
+                        || body_str.contains("invalid assistant"))
+                {
+                    eprintln!("[nimaproxy] INVALID-ASSISTANT: model '{}' rejected message structure (400): {} — retrying with next key", model_id, &body_str[..body_str.len().min(200)]);
+                    continue;
+                }
+
+                let (output_tokens, repetition_count, had_tool_call) =
+                    extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
+
                 if output_tokens > 0 || repetition_count > 0 {
                     if let Some(label) = state.pool.get_key_label(idx) {
-                        state.model_stats.record_with_circuit_breaker(&model_id, ttfc_ms, ok, output_tokens, repetition_count, had_tool_call);
+                        state.model_stats.record_with_circuit_breaker(
+                            &model_id,
+                            ttfc_ms,
+                            ok,
+                            output_tokens,
+                            repetition_count,
+                            had_tool_call,
+                        );
                     } else {
-                        state.model_stats.record_with_circuit_breaker(&model_id, ttfc_ms, ok, output_tokens, repetition_count, had_tool_call);
+                        state.model_stats.record_with_circuit_breaker(
+                            &model_id,
+                            ttfc_ms,
+                            ok,
+                            output_tokens,
+                            repetition_count,
+                            had_tool_call,
+                        );
                     }
                 } else {
                     if let Some(label) = state.pool.get_key_label(idx) {
-                        state.model_stats.record_with_key(&model_id, &label, ttfc_ms, ok);
+                        state
+                            .model_stats
+                            .record_with_key(&model_id, &label, ttfc_ms, ok);
                     } else {
                         state.model_stats.record(&model_id, ttfc_ms, ok);
                     }
                 }
-                
+
                 let body = Body::from(full_body);
 
                 let mut response = Response::new(body);
@@ -263,104 +311,117 @@ if status == 400 && (body_str.contains("Invalid assistant message") || body_str.
                     );
                 }
                 if content_type.contains("event-stream") {
-                    response.headers_mut().insert(
-                        "cache-control",
-                        HeaderValue::from_static("no-cache"),
-                    );
-                    response.headers_mut().insert(
-                        "x-accel-buffering",
-                        HeaderValue::from_static("no"),
-                    );
+                    response
+                        .headers_mut()
+                        .insert("cache-control", HeaderValue::from_static("no-cache"));
+                    response
+                        .headers_mut()
+                        .insert("x-accel-buffering", HeaderValue::from_static("no"));
                 }
                 return response;
             }
         }
     }
 
-    (StatusCode::TOO_MANY_REQUESTS, "all keys exhausted after retries").into_response()
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        "all keys exhausted after retries",
+    )
+        .into_response()
 }
 
 /// Sanitize tool_calls and tools to remove entries with empty names.
 /// NVIDIA NIM (via Azure OpenAI validation) rejects empty function names with:
 /// "Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64"
 fn sanitize_tool_calls(json: &mut Value) {
- // Sanitize tool_calls in messages
- if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
- for msg in messages.iter_mut() {
- // Strip tool_call_id from assistant messages - most models don't accept it
- // Pydantic error: "Extra inputs are not permitted" for tool_call_id field
- if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
- if role == "assistant" {
- if let Some(obj) = msg.as_object_mut() {
- obj.remove("tool_call_id");
- obj.remove("reasoning"); // Strip reasoning field - not accepted by most models
-            // NVIDIA NIM requires: EITHER content OR tool_calls, not both
-            // When tool_calls is present, set content to null
-            if obj.get("tool_calls").is_some() {
-                obj.insert("content".to_string(), serde_json::Value::Null);
+    // Sanitize tool_calls in messages
+    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages.iter_mut() {
+            // Strip tool_call_id from assistant messages - most models don't accept it
+            // Pydantic error: "Extra inputs are not permitted" for tool_call_id field
+            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+                if role == "assistant" {
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.remove("tool_call_id");
+                        obj.remove("reasoning"); // Strip reasoning field - not accepted by most models
+                                                 // NVIDIA NIM requires: EITHER content OR tool_calls, not both
+                                                 // When tool_calls is present, set content to null
+                        if obj.get("tool_calls").is_some() {
+                            obj.insert("content".to_string(), serde_json::Value::Null);
+                        }
+                    }
+                }
             }
- }
- }
- }
- 
-if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
- let original_len = tool_calls.len();
- // Filter out tool_calls with empty names
- tool_calls.retain(|tc| {
- if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
- !name.is_empty()
- } else {
- // Keep if no name field (shouldn't happen but be safe)
- true
- }
- });
- // If all tool_calls were removed (and there were some originally), remove the tool_calls field entirely
- if original_len > 0 && tool_calls.is_empty() {
- if let Some(obj) = msg.as_object_mut() {
- obj.remove("tool_calls");
- }
- }
-}
- }
- }
 
- // Sanitize tools array (tool definitions) — fix schema fields that break Jinja templates
- // NVIDIA models crash with 500 "tool_use:98" when tool.function.description is null/undefined
- // or when tool.function.parameters is missing/null (template does `description + " "` → boom)
- if let Some(tools) = json.get_mut("tools").and_then(|t| t.as_array_mut()) {
-     // First pass: fix null/missing description and parameters before filtering
-     // NVIDIA Jinja templates do string concat on description → null/undefined causes 500 "tool_use:98"
-     for tool in tools.iter_mut() {
-         if let Some(func) = tool.get_mut("function").and_then(|f| f.as_object_mut()) {
-             match func.get("description") {
-                 None | Some(Value::Null) => {
-                     func.insert("description".to_string(), Value::String(String::new()));
-                 }
-                 _ => {}
-             }
-             match func.get("parameters") {
-                 None | Some(Value::Null) => {
-                     func.insert("parameters".to_string(), serde_json::json!({"type": "object", "properties": {}}));
-                 }
-                 _ => {}
-             }
-         }
-     }
-     // Second pass: filter out tools with empty function names
-     tools.retain(|tool| {
-         if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
-             !name.is_empty()
-         } else {
-             true
-         }
-     });
-     // If all tools were removed, remove the tools field entirely
-     if tools.is_empty() {
-         if let Some(obj) = json.as_object_mut() {
-             obj.remove("tools");
-         }
-     }
- }
+            if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                let original_len = tool_calls.len();
+                // Filter out tool_calls with empty names
+                tool_calls.retain(|tc| {
+                    if let Some(name) = tc
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                    {
+                        !name.is_empty()
+                    } else {
+                        // Keep if no name field (shouldn't happen but be safe)
+                        true
+                    }
+                });
+                // If all tool_calls were removed (and there were some originally), remove the tool_calls field entirely
+                if original_len > 0 && tool_calls.is_empty() {
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.remove("tool_calls");
+                    }
+                }
+            }
+        }
+    }
+
+    // Sanitize tools array (tool definitions) — fix schema fields that break Jinja templates
+    // NVIDIA models crash with 500 "tool_use:98" when tool.function.description is null/undefined
+    // or when tool.function.parameters is missing/null (template does `description + " "` → boom)
+    if let Some(tools) = json.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        // First pass: fix null/missing description and parameters before filtering
+        // NVIDIA Jinja templates do string concat on description → null/undefined causes 500 "tool_use:98"
+        for tool in tools.iter_mut() {
+            if let Some(func) = tool.get_mut("function").and_then(|f| f.as_object_mut()) {
+                match func.get("description") {
+                    None | Some(Value::Null) => {
+                        func.insert("description".to_string(), Value::String(String::new()));
+                    }
+                    _ => {}
+                }
+                match func.get("parameters") {
+                    None | Some(Value::Null) => {
+                        func.insert(
+                            "parameters".to_string(),
+                            serde_json::json!({"type": "object", "properties": {}}),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Second pass: filter out tools with empty function names
+        tools.retain(|tool| {
+            if let Some(name) = tool
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                !name.is_empty()
+            } else {
+                true
+            }
+        });
+        // If all tools were removed, remove the tools field entirely
+        if tools.is_empty() {
+            if let Some(obj) = json.as_object_mut() {
+                obj.remove("tools");
+            }
+        }
+    }
 }
 /// Validate tool call IDs for Mistral models.
 /// Mistral requires tool call IDs to be exactly 9 alphanumeric characters.
@@ -370,15 +431,18 @@ if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mu
 /// Mistral requires tool call IDs to be exactly 9 alphanumeric characters.
 /// Also validates that the number of tool calls matches the number of tool responses
 /// (only when tool messages are present in the request).
-pub(super) fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Result<(), (StatusCode, String)> {
+pub(super) fn validate_mistral_tool_call_ids(
+    json: &Value,
+    model_id: &str,
+) -> Result<(), (StatusCode, String)> {
     if !is_mistral_model(model_id) {
         return Ok(());
     }
-    
+
     let mut tool_call_ids = std::collections::HashSet::new();
     let mut tool_response_ids = std::collections::HashSet::new();
     let mut has_tool_messages = false;
-    
+
     if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
         for msg in messages {
             if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
@@ -403,7 +467,7 @@ pub(super) fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Re
             }
         }
     }
-    
+
     if has_tool_messages {
         for id in &tool_call_ids {
             if !tool_response_ids.contains(id) {
@@ -418,7 +482,7 @@ pub(super) fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Re
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -426,16 +490,20 @@ pub(super) fn validate_mistral_tool_call_ids(json: &Value, model_id: &str) -> Re
 /// After tool messages, the API requires an assistant message before the next user message.
 /// This function inserts empty assistant messages where needed.
 pub fn fix_message_ordering(json: &mut Value) {
-
     if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
-
         let mut i = 0;
         while i < messages.len() {
-            let current_role = messages[i].get("role").and_then(|r| r.as_str()).unwrap_or("");
+            let current_role = messages[i]
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("");
             if current_role == "tool" {
                 // Check if next message exists and is "user" or "developer" (developer→user transform may not have run yet)
                 if i + 1 < messages.len() {
-                    let next_role = messages[i + 1].get("role").and_then(|r| r.as_str()).unwrap_or("");
+                    let next_role = messages[i + 1]
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("");
                     if next_role == "user" || next_role == "developer" {
                         // Insert an assistant message after the tool message
                         // Must have ONLY content (no tool_calls field)
@@ -462,47 +530,48 @@ pub fn fix_message_ordering(json: &mut Value) {
 /// - Keep tool_call_id (required for matching tool results to calls)
 /// - Keep content as the tool output
 fn transform_message_roles(json: &mut Value, model_id: &str, state: &AppState) {
- let transform_developer = state.model_compat.should_transform_developer_role(model_id);
- let transform_tool = state.model_compat.should_transform_tool_messages(model_id);
- 
+    let transform_developer = state.model_compat.should_transform_developer_role(model_id);
+    let transform_tool = state.model_compat.should_transform_tool_messages(model_id);
 
- if !transform_developer && !transform_tool {
- return;
- }
+    if !transform_developer && !transform_tool {
+        return;
+    }
 
- if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
- for msg in messages {
- let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
+    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages {
+            let role = msg
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string();
 
- if transform_developer && role == "developer" {
- if let Some(v) = msg.get_mut("role") {
- *v = Value::String("user".to_string());
- }
- } else if transform_tool && role == "tool" {
- // Transform tool role to assistant
- if let Some(v) = msg.get_mut("role") {
- *v = Value::String("assistant".to_string());
- }
- // Tool messages have tool_call_id which assistant messages also support
- // when they're responding to a tool call, so we keep it
- }
- }
- }
+            if transform_developer && role == "developer" {
+                if let Some(v) = msg.get_mut("role") {
+                    *v = Value::String("user".to_string());
+                }
+            } else if transform_tool && role == "tool" {
+                // Transform tool role to assistant
+                if let Some(v) = msg.get_mut("role") {
+                    *v = Value::String("assistant".to_string());
+                }
+                // Tool messages have tool_call_id which assistant messages also support
+                // when they're responding to a tool call, so we keep it
+            }
+        }
+    }
 }
 /// Check if the conversation has tool messages or tool calls (indicating a tool call flow).
 /// This requires special handling for Mistral models on NVIDIA NIM.
 fn has_tool_messages(json: &Value) -> bool {
-  if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
-    let has_tool_role = messages.iter().any(|msg| {
-      msg.get("role").and_then(|r| r.as_str()) == Some("tool")
-    });
-    let has_tool_calls = messages.iter().any(|msg| {
-      msg.get("tool_calls").is_some()
-    });
-    let has_tool = has_tool_role || has_tool_calls;
-    return has_tool;
-  }
-  false
+    if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
+        let has_tool_role = messages
+            .iter()
+            .any(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("tool"));
+        let has_tool_calls = messages.iter().any(|msg| msg.get("tool_calls").is_some());
+        let has_tool = has_tool_role || has_tool_calls;
+        return has_tool;
+    }
+    false
 }
 
 /// Check if a model is a Mistral model (requires special tool calling handling).
@@ -520,7 +589,7 @@ fn inject_minimax_system_message(json: &mut Value, model_id: &str) {
     if !is_minimax_model(model_id) {
         return;
     }
-    
+
     let minmax_instruction = r#"When using tools, output JSON in this exact format:
 {"tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "function_name", "arguments": {"arg": "value"}}}]}
 Do NOT use XML tags like <minimax:tool_call> or <invoke>."#;
@@ -534,7 +603,8 @@ Do NOT use XML tags like <minimax:tool_call> or <invoke>."#;
                     }
                 }
             } else {
-                let system_msg = serde_json::json!({"role": "system", "content": minmax_instruction});
+                let system_msg =
+                    serde_json::json!({"role": "system", "content": minmax_instruction});
                 messages.insert(0, system_msg);
             }
         } else {
@@ -546,14 +616,14 @@ Do NOT use XML tags like <minimax:tool_call> or <invoke>."#;
 
 /// Check if the last message in the conversation is from the assistant.
 fn is_last_message_from_assistant(json: &Value) -> bool {
-  if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
-    if let Some(last) = messages.last() {
-      if let Some(role) = last.get("role").and_then(|r| r.as_str()) {
-        return role == "assistant";
-      }
+    if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
+        if let Some(last) = messages.last() {
+            if let Some(role) = last.get("role").and_then(|r| r.as_str()) {
+                return role == "assistant";
+            }
+        }
     }
-  }
-  false
+    false
 }
 
 /// Inject parameters for tool calling and conversation continuation.
@@ -570,14 +640,13 @@ fn inject_mistral_tool_params(json: &mut Value, model_id: &str) {
     // These params are rejected by NVIDIA for non-Mistral models
     if is_mistral {
         if has_tools {
-        json["add_generation_prompt"] = Value::Bool(false);
+            json["add_generation_prompt"] = Value::Bool(false);
+        }
+        if last_from_assistant {
+            json["continue_final_message"] = Value::Bool(true);
+        }
     }
-    if last_from_assistant {
-        json["continue_final_message"] = Value::Bool(true);
 }
-    }
-}
-
 
 /// Resolve the model field, optionally rewriting the body for "auto" routing.
 /// Returns (model_id_string, possibly_rewritten_body).
@@ -684,8 +753,32 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     (model_id, Bytes::from(json.to_string()))
 }
 
-/// GET /v1/models — passthrough to NVIDIA.
+/// GET /v1/models — configured model list when routing/racing is enabled, otherwise passthrough.
 pub async fn models(State(state): State<Arc<AppState>>) -> Response {
+    let configured_models = state.configured_models();
+    if !configured_models.is_empty() {
+        let data: Vec<Value> = configured_models
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "object": "model",
+                    "owned_by": "nimaproxy",
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "object": "list",
+            "data": data,
+        });
+        return (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            body.to_string(),
+        )
+            .into_response();
+    }
+
     let Some((key, _)) = state.pool.next_key() else {
         return (StatusCode::TOO_MANY_REQUESTS, "no active API keys").into_response();
     };
@@ -718,6 +811,12 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let statuses = state.pool.status();
     let total = statuses.len();
     let active: usize = statuses.iter().filter(|s| s.active).count();
+    let routing_models = state
+        .router
+        .as_ref()
+        .map(|router| router.models.clone())
+        .unwrap_or_default();
+    let racing_models = state.racing_models.clone();
 
     let keys_json: Vec<Value> = statuses
         .iter()
@@ -736,6 +835,12 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "keys_total": total,
         "keys_active": active,
         "keys": keys_json,
+        "routing_enabled": state.routing_enabled(),
+        "racing_enabled": state.racing_enabled(),
+        "routing_models": routing_models,
+        "racing_models": racing_models,
+        "racing_max_parallel": state.racing_max_parallel,
+        "racing_timeout_ms": state.racing_timeout_ms,
     });
 
     (
@@ -800,11 +905,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 }
 
-async fn race_models(
-    state: Arc<AppState>,
-    body: Bytes,
-    models: &[String],
-) -> Response {
+async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Response {
     let timeout_ms = state.racing_timeout_ms;
     let max_parallel = state.racing_max_parallel.min(models.len());
 
@@ -822,10 +923,10 @@ async fn race_models(
     };
     let n = models.len();
 
-    let candidates: Vec<String> = (0..n)
-        .map(|i| models[(cursor + i) % n].clone())
-        .collect();
-    let candidates_for_race = state.model_stats.racing_candidates(&candidates, max_parallel);
+    let candidates: Vec<String> = (0..n).map(|i| models[(cursor + i) % n].clone()).collect();
+    let candidates_for_race = state
+        .model_stats
+        .racing_candidates(&candidates, max_parallel);
 
     if candidates_for_race.len() < 2 {
         eprintln!("[racing] not enough viable models after filtering (need ≥2)");
@@ -843,29 +944,29 @@ async fn race_models(
     for model_id in &models_to_race {
         let timeout_val = state.model_stats.get_model_timeout(model_id, timeout_ms);
 
-  let mut json: Value = match serde_json::from_slice(&body) {
-    Ok(v) => v,
-    Err(_) => continue,
-  };
-  json["model"] = Value::String(model_id.clone());
+        let mut json: Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        json["model"] = Value::String(model_id.clone());
 
-    // Inject Mistral-specific parameters BEFORE message transformations
-    // so has_tool_messages() can detect tool messages in the original JSON
-    inject_mistral_tool_params(&mut json, model_id);
-    // Inject MiniMax system message for JSON tool calling
-    inject_minimax_system_message(&mut json, model_id);
+        // Inject Mistral-specific parameters BEFORE message transformations
+        // so has_tool_messages() can detect tool messages in the original JSON
+        inject_mistral_tool_params(&mut json, model_id);
+        // Inject MiniMax system message for JSON tool calling
+        inject_minimax_system_message(&mut json, model_id);
 
-    // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
-    sanitize_tool_calls(&mut json);
+        // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
+        sanitize_tool_calls(&mut json);
 
-    // Transform roles first (developer→user) so fix_message_ordering sees the
-    // final role assignments when inserting assistant messages between tool→user gaps.
-    transform_message_roles(&mut json, model_id, &state);
+        // Transform roles first (developer→user) so fix_message_ordering sees the
+        // final role assignments when inserting assistant messages between tool→user gaps.
+        transform_message_roles(&mut json, model_id, &state);
 
-    // Fix message ordering: insert empty assistant between tool→user transitions
-    fix_message_ordering(&mut json);
+        // Fix message ordering: insert empty assistant between tool→user transitions
+        fix_message_ordering(&mut json);
 
-            // Inject per-model hyperparameters - override client settings with proxy config
+        // Inject per-model hyperparameters - override client settings with proxy config
         if let Some(params) = state.model_params.get(model_id) {
             if let Some(temp) = params.temperature {
                 json["temperature"] = Value::from(temp);
@@ -936,12 +1037,6 @@ async fn race_models(
             match result {
                 Ok(Ok(resp)) => {
                     let latency = t0.elapsed().as_millis() as f64;
-                    if let Some(ref label) = key_label {
-                        state_clone.model_stats.record_with_key(&model_id_clone, label, latency, true);
-                    } else {
-                        state_clone.model_stats.record(&model_id_clone, latency, true);
-                    }
-
                     let status = resp.status();
                     let retry_after_secs: u64 = resp
                         .headers()
@@ -949,13 +1044,32 @@ async fn race_models(
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.parse::<u64>().ok())
                         .unwrap_or(60);
+                    let record_outcome = |ok: bool| {
+                        if let Some(ref label) = key_label {
+                            state_clone.model_stats.record_with_key(
+                                &model_id_clone,
+                                label,
+                                latency,
+                                ok,
+                            );
+                        } else {
+                            state_clone.model_stats.record(&model_id_clone, latency, ok);
+                        }
+                    };
 
                     // For 4xx/5xx: buffer body now (stream will be consumed) so we can log it
                     if status.as_u16() != 429 && status.as_u16() >= 400 {
                         let body_bytes = resp.bytes().await.unwrap_or_default();
                         let body_str = String::from_utf8_lossy(&body_bytes);
-                        return Err(format!("HTTP {} from {}: {}", status.as_u16(), model_id_clone, &body_str[..body_str.len().min(400)]));
+                        record_outcome(false);
+                        return Err(format!(
+                            "HTTP {} from {}: {}",
+                            status.as_u16(),
+                            model_id_clone,
+                            &body_str[..body_str.len().min(400)]
+                        ));
                     }
+                    record_outcome(status.is_success());
                     let content_type = resp
                         .headers()
                         .get("content-type")
@@ -969,7 +1083,8 @@ async fn race_models(
                     let body = Body::from_stream(stream);
 
                     let mut response = Response::new(body);
-                    *response.status_mut() = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                    *response.status_mut() =
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                     response.headers_mut().insert(
                         "content-type",
                         HeaderValue::from_str(&content_type)
@@ -982,21 +1097,44 @@ async fn race_models(
                                 .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                         );
                     }
-                    Ok::<(Response, u16, usize, u64), String>((response, status.as_u16(), key_idx_for_spawn, retry_after_secs))
+                    Ok::<(Response, u16, usize, u64), String>((
+                        response,
+                        status.as_u16(),
+                        key_idx_for_spawn,
+                        retry_after_secs,
+                    ))
                 }
                 Ok(Err(e)) => {
                     if let Some(ref label) = key_label {
-                        state_clone.model_stats.record_with_key(&model_id_clone, label, timeout_ms_for_model as f64, false);
+                        state_clone.model_stats.record_with_key(
+                            &model_id_clone,
+                            label,
+                            timeout_ms_for_model as f64,
+                            false,
+                        );
                     } else {
-                        state_clone.model_stats.record(&model_id_clone, timeout_ms_for_model as f64, false);
+                        state_clone.model_stats.record(
+                            &model_id_clone,
+                            timeout_ms_for_model as f64,
+                            false,
+                        );
                     }
                     Err(format!("request error: {}", e))
                 }
                 Err(_) => {
                     if let Some(ref label) = key_label {
-                        state_clone.model_stats.record_with_key(&model_id_clone, label, timeout_ms_for_model as f64, false);
+                        state_clone.model_stats.record_with_key(
+                            &model_id_clone,
+                            label,
+                            timeout_ms_for_model as f64,
+                            false,
+                        );
                     } else {
-                        state_clone.model_stats.record(&model_id_clone, timeout_ms_for_model as f64, false);
+                        state_clone.model_stats.record(
+                            &model_id_clone,
+                            timeout_ms_for_model as f64,
+                            false,
+                        );
                     }
                     Err(format!("timeout after {}ms", timeout_ms_for_model))
                 }
@@ -1006,54 +1144,62 @@ async fn race_models(
         handles.push((model_id.clone(), handle));
     }
 
-if handles.is_empty() {
-return (StatusCode::BAD_REQUEST, "no valid models to race").into_response();
-}
-
-// Use select_all to wait for results in completion order, not spawn order
-// This ensures the first response wins, regardless of which model it comes from
-use futures::future::select_all;
-let mut pending: Vec<_> = handles.into_iter().map(|(model_id, handle)| {
-async move { (model_id, handle.await) }.boxed()
-}).collect();
-
-let mut last_error = None;
-
-while !pending.is_empty() {
-let ((model_id, result), _idx, remaining) = select_all(pending).await;
-match result {
-Ok(Ok((response, status_code, key_idx, retry_after_secs))) => {
-    if status_code == 429 {
-        state.pool.mark_rate_limited(key_idx, retry_after_secs);
-        eprintln!("[racing] {} → 429, key {} rate-limited {}s, trying next", model_id, key_idx, retry_after_secs);
-        last_error = Some(format!("429 rate-limited (key {})", key_idx));
-    } else {
-        eprintln!("[racing] {} → HTTP {} (winner)", model_id, status_code);
-        return response;
+    if handles.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no valid models to race").into_response();
     }
-}
-Ok(Err(e)) => {
-eprintln!("[racing] {} failed: {}", model_id, e);
-last_error = Some(e);
-}
-Err(e) => {
-eprintln!("[racing] {} panicked: {}", model_id, e);
-last_error = Some(e.to_string());
-}
-}
-pending = remaining;
-}
 
-(StatusCode::BAD_GATEWAY, last_error.unwrap_or_else(|| "all racing models failed".to_string())).into_response()
+    // Use select_all to wait for results in completion order, not spawn order
+    // This ensures the first response wins, regardless of which model it comes from
+    use futures::future::select_all;
+    let mut pending: Vec<_> = handles
+        .into_iter()
+        .map(|(model_id, handle)| async move { (model_id, handle.await) }.boxed())
+        .collect();
+
+    let mut last_error = None;
+
+    while !pending.is_empty() {
+        let ((model_id, result), _idx, remaining) = select_all(pending).await;
+        match result {
+            Ok(Ok((response, status_code, key_idx, retry_after_secs))) => {
+                if status_code == 429 {
+                    state.pool.mark_rate_limited(key_idx, retry_after_secs);
+                    eprintln!(
+                        "[racing] {} → 429, key {} rate-limited {}s, trying next",
+                        model_id, key_idx, retry_after_secs
+                    );
+                    last_error = Some(format!("429 rate-limited (key {})", key_idx));
+                } else {
+                    eprintln!("[racing] {} → HTTP {} (winner)", model_id, status_code);
+                    return response;
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("[racing] {} failed: {}", model_id, e);
+                last_error = Some(e);
+            }
+            Err(e) => {
+                eprintln!("[racing] {} panicked: {}", model_id, e);
+                last_error = Some(e.to_string());
+            }
+        }
+        pending = remaining;
+    }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        last_error.unwrap_or_else(|| "all racing models failed".to_string()),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proxy::fix_message_ordering;
+    use crate::{config::ModelCompat, key_pool::KeyPool, model_stats::ModelStatsStore};
     use serde_json::json;
     use std::collections::HashMap;
-    use crate::{config::ModelCompat, key_pool::KeyPool, model_stats::ModelStatsStore};
 
     fn create_test_app_state() -> AppState {
         AppState {
@@ -1090,14 +1236,22 @@ mod tests {
     #[test]
     fn test_validate_model_exists_in_available_models() {
         let state = create_test_app_state();
-        state.available_models.lock().unwrap().push("openai/gpt-4".to_string());
+        state
+            .available_models
+            .lock()
+            .unwrap()
+            .push("openai/gpt-4".to_string());
         assert!(validate_model_exists("openai/gpt-4", &state).is_ok());
     }
 
     #[test]
     fn test_validate_model_exists_not_in_available_models() {
         let state = create_test_app_state();
-        state.available_models.lock().unwrap().push("openai/gpt-4".to_string());
+        state
+            .available_models
+            .lock()
+            .unwrap()
+            .push("openai/gpt-4".to_string());
         let result = validate_model_exists("anthropic/claude", &state);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
@@ -1106,17 +1260,23 @@ mod tests {
     #[test]
     fn test_validate_model_exists_in_racing_models() {
         let mut state = create_test_app_state();
-        state.racing_models = vec!["mistralai/mistral-large".to_string()];
-        assert!(validate_model_exists("mistralai/mistral-large", &state).is_ok());
+        state.racing_models = vec!["mistralai/mistral-medium-3.5-128b".to_string()];
+        assert!(validate_model_exists("mistralai/mistral-medium-3.5-128b", &state).is_ok());
     }
 
     #[test]
     fn test_validate_model_exists_with_router() {
         use crate::model_router::{ModelRouter, Strategy};
-        
+
         let mut state = create_test_app_state();
-        state.router = Some(ModelRouter::new(vec!["model1".to_string(), "model2".to_string()], Strategy::RoundRobin));
-        assert!(validate_model_exists("any-model", &state).is_ok());
+        state.router = Some(ModelRouter::new(
+            vec!["model1".to_string(), "model2".to_string()],
+            Strategy::RoundRobin,
+        ));
+        assert!(validate_model_exists("model1", &state).is_ok());
+        let result = validate_model_exists("any-model", &state);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
     }
 
     #[test]
@@ -1169,7 +1329,9 @@ mod tests {
     fn test_count_repetitions_max_cap() {
         let mut repeated = String::new();
         for i in 0..15 {
-            if i > 0 { repeated.push(' '); }
+            if i > 0 {
+                repeated.push(' ');
+            }
             repeated.push_str("repeat this");
         }
         assert!(count_repetitions(&repeated) <= 10);
@@ -1251,10 +1413,13 @@ mod tests {
             "messages": []
         });
         inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
-        
+
         assert_eq!(json["messages"].as_array().unwrap().len(), 1);
         assert_eq!(json["messages"][0]["role"], "system");
-        assert!(json["messages"][0]["content"].as_str().unwrap().contains("When using tools, output JSON"));
+        assert!(json["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("When using tools, output JSON"));
     }
 
     #[test]
@@ -1266,7 +1431,7 @@ mod tests {
             ]
         });
         inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
-        
+
         let content = json["messages"][0]["content"].as_str().unwrap();
         assert!(content.contains("Original system message"));
         assert!(content.contains("When using tools, output JSON"));
@@ -1281,11 +1446,14 @@ mod tests {
             ]
         });
         inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
-        
+
         assert_eq!(json["messages"].as_array().unwrap().len(), 2);
         assert_eq!(json["messages"][0]["role"], "system");
         assert_eq!(json["messages"][1]["role"], "user");
-        assert!(json["messages"][0]["content"].as_str().unwrap().contains("When using tools, output JSON"));
+        assert!(json["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("When using tools, output JSON"));
     }
 
     #[test]
@@ -1298,10 +1466,10 @@ mod tests {
         assert_eq!(json_gpt["messages"].as_array().unwrap().len(), 0);
 
         let mut json_mistral = json!({
-            "model": "mistralai/mistral-large",
+            "model": "mistralai/mistral-medium-3.5-128b",
             "messages": []
         });
-        inject_minimax_system_message(&mut json_mistral, "mistralai/mistral-large");
+        inject_minimax_system_message(&mut json_mistral, "mistralai/mistral-medium-3.5-128b");
         assert_eq!(json_mistral["messages"].as_array().unwrap().len(), 0);
     }
 
@@ -1320,28 +1488,28 @@ mod tests {
     #[test]
     fn test_inject_mistral_tool_params_adds_generation_prompt_for_tool_messages() {
         let mut json = json!({
-            "model": "mistralai/mistral-large",
+            "model": "mistralai/mistral-medium-3.5-128b",
             "messages": [
                 {"role": "user", "content": "Weather?"},
                 {"role": "tool", "content": "Sunny"}
             ]
         });
-        inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
-        
+        inject_mistral_tool_params(&mut json, "mistralai/mistral-medium-3.5-128b");
+
         assert_eq!(json["add_generation_prompt"], json!(false));
     }
 
     #[test]
     fn test_inject_mistral_tool_params_continues_final_message_from_assistant() {
         let mut json = json!({
-            "model": "mistralai/mistral-large",
+            "model": "mistralai/mistral-medium-3.5-128b",
             "messages": [
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Hi"}
             ]
         });
-        inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
-        
+        inject_mistral_tool_params(&mut json, "mistralai/mistral-medium-3.5-128b");
+
         assert_eq!(json["continue_final_message"], json!(true));
     }
 
@@ -1355,36 +1523,51 @@ mod tests {
             ]
         });
         inject_mistral_tool_params(&mut json_gpt, "openai/gpt-4");
-        
-        assert!(!json_gpt.as_object().unwrap().contains_key("add_generation_prompt"));
-        assert!(!json_gpt.as_object().unwrap().contains_key("continue_final_message"));
+
+        assert!(!json_gpt
+            .as_object()
+            .unwrap()
+            .contains_key("add_generation_prompt"));
+        assert!(!json_gpt
+            .as_object()
+            .unwrap()
+            .contains_key("continue_final_message"));
     }
 
     #[test]
     fn test_inject_mistral_tool_params_no_tool_messages_no_injection() {
         let mut json = json!({
-            "model": "mistralai/mistral-large",
+            "model": "mistralai/mistral-medium-3.5-128b",
             "messages": [
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Hi"}
             ]
         });
-        inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
-        
-        assert!(!json.as_object().unwrap().contains_key("add_generation_prompt"));
+        inject_mistral_tool_params(&mut json, "mistralai/mistral-medium-3.5-128b");
+
+        assert!(!json
+            .as_object()
+            .unwrap()
+            .contains_key("add_generation_prompt"));
         assert_eq!(json["continue_final_message"], json!(true));
     }
 
     #[test]
     fn test_inject_mistral_tool_params_empty_messages() {
         let mut json = json!({
-            "model": "mistralai/mistral-large",
+            "model": "mistralai/mistral-medium-3.5-128b",
             "messages": []
         });
-        inject_mistral_tool_params(&mut json, "mistralai/mistral-large");
-        
-        assert!(!json.as_object().unwrap().contains_key("add_generation_prompt"));
-        assert!(!json.as_object().unwrap().contains_key("continue_final_message"));
+        inject_mistral_tool_params(&mut json, "mistralai/mistral-medium-3.5-128b");
+
+        assert!(!json
+            .as_object()
+            .unwrap()
+            .contains_key("add_generation_prompt"));
+        assert!(!json
+            .as_object()
+            .unwrap()
+            .contains_key("continue_final_message"));
     }
 
     // ============ sanitize_tool_calls tests ============
@@ -1404,7 +1587,7 @@ mod tests {
             ]
         });
         sanitize_tool_calls(&mut json);
-        
+
         let tool_calls = json["messages"][0]["tool_calls"].as_array().unwrap();
         assert_eq!(tool_calls.len(), 2);
         assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
@@ -1421,7 +1604,7 @@ mod tests {
             "messages": []
         });
         sanitize_tool_calls(&mut json);
-        
+
         let tools = json["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["function"]["name"], "valid_tool");
@@ -1440,8 +1623,11 @@ mod tests {
             ]
         });
         sanitize_tool_calls(&mut json);
-        
-        assert!(!json["messages"][0].as_object().unwrap().contains_key("tool_calls"));
+
+        assert!(!json["messages"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("tool_calls"));
     }
 
     #[test]
@@ -1453,7 +1639,7 @@ mod tests {
             "messages": []
         });
         sanitize_tool_calls(&mut json);
-        
+
         assert!(!json.as_object().unwrap().contains_key("tools"));
     }
 
@@ -1470,7 +1656,7 @@ mod tests {
             ]
         });
         sanitize_tool_calls(&mut json);
-        
+
         let tool_calls = json["messages"][0]["tool_calls"].as_array().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
@@ -1518,87 +1704,95 @@ mod tests {
             "messages": []
         });
         sanitize_tool_calls(&mut json);
-        
+
         let tools = json["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["function"]["name"], "tool1");
         assert_eq!(tools[1]["function"]["name"], "tool2");
     }
 
-// ============ Additional edge case tests ============
+    // ============ Additional edge case tests ============
 
-#[test]
-fn test_is_minimax_model_true_for_minimaxai_prefix() {
-    assert!(is_minimax_model("minimaxai/minimax-01"));
-    assert!(is_minimax_model("minimaxai/minimax-02"));
-}
-
-
-// Test for lines 160-166: HTTP client error handling
-#[test]
-fn test_proxy_http_error_recording() {
-    let mut state = create_test_app_state();
-    state.model_stats = ModelStatsStore::new(100.0);
-    state.model_stats.record("test-model", 1000.0, false);
-    let snapshot = state.model_stats.snapshot();
-    assert!(snapshot.iter().any(|s| s.id == "test-model"));
-}
-
-// Test for lines 795, 827-841: circuit breaker integration
-#[test]
-fn test_circuit_breaker_state_transitions() {
-    let stats = ModelStatsStore::new(100.0);
-    for _ in 0..10 {
-        stats.record("degraded-model", 5000.0, false);
+    #[test]
+    fn test_is_minimax_model_true_for_minimaxai_prefix() {
+        assert!(is_minimax_model("minimaxai/minimax-01"));
+        assert!(is_minimax_model("minimaxai/minimax-02"));
     }
-    let snapshot = stats.snapshot();
-    assert!(snapshot.iter().any(|s| s.id == "degraded-model"));
-}
 
-// Test for lines 558, 586: race_models with various configurations
-#[tokio::test]
-async fn test_race_models_configuration_edge_cases() {
-    let state = Arc::new(create_test_app_state());
-    let body = json!({"model": "auto", "messages": [{"role": "user", "content": "test"}]});
-    let models = vec!["single-model".to_string()];
-    let response = race_models(state, Bytes::from(body.to_string()), &models).await;
-    assert!(response.status() == StatusCode::BAD_REQUEST || response.status() >= StatusCode::INTERNAL_SERVER_ERROR);
-}
+    // Test for lines 160-166: HTTP client error handling
+    #[test]
+    fn test_proxy_http_error_recording() {
+        let mut state = create_test_app_state();
+        state.model_stats = ModelStatsStore::new(100.0);
+        state.model_stats.record("test-model", 1000.0, false);
+        let snapshot = state.model_stats.snapshot();
+        assert!(snapshot.iter().any(|s| s.id == "test-model"));
+    }
 
-// Test for lines 595-617: race_models key exhaustion scenarios
-#[tokio::test]
-async fn test_race_models_no_keys() {
-    let mut state = create_test_app_state();
-    state.pool = KeyPool::new(vec![]);
-    let body = json!({"model": "auto", "messages": [{"role": "user", "content": "test"}]});
-    let models = vec!["model".to_string()];
-    let response = race_models(Arc::new(state), Bytes::from(body.to_string()), &models).await;
-    assert!(response.status() >= StatusCode::BAD_REQUEST);
-}
+    // Test for lines 795, 827-841: circuit breaker integration
+    #[test]
+    fn test_circuit_breaker_state_transitions() {
+        let stats = ModelStatsStore::new(100.0);
+        for _ in 0..10 {
+            stats.record("degraded-model", 5000.0, false);
+        }
+        let snapshot = stats.snapshot();
+        assert!(snapshot.iter().any(|s| s.id == "degraded-model"));
+    }
 
-// Test for lines 690-691: chat_completions body parsing
-#[tokio::test]
-async fn test_chat_completions_empty_bytes() {
-    let state = Arc::new(create_test_app_state());
-    let response = chat_completions(State(state), HeaderMap::new(), Bytes::new()).await;
-    assert!(response.status() >= StatusCode::BAD_REQUEST);
-}
+    // Test for lines 558, 586: race_models with various configurations
+    #[tokio::test]
+    async fn test_race_models_configuration_edge_cases() {
+        let state = Arc::new(create_test_app_state());
+        let body = json!({"model": "auto", "messages": [{"role": "user", "content": "test"}]});
+        let models = vec!["single-model".to_string()];
+        let response = race_models(state, Bytes::from(body.to_string()), &models).await;
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST
+                || response.status() >= StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
-// Test for lines 724-750: streaming edge cases
-#[tokio::test]
-async fn test_stream_termination_edge_cases() {
-    let state = Arc::new(create_test_app_state());
-    let body = json!({"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": true});
-    let response = chat_completions(State(state), HeaderMap::new(), Bytes::from(body.to_string())).await;
-    assert!(response.status() >= StatusCode::BAD_REQUEST || response.status() == StatusCode::OK);
-}
+    // Test for lines 595-617: race_models key exhaustion scenarios
+    #[tokio::test]
+    async fn test_race_models_no_keys() {
+        let mut state = create_test_app_state();
+        state.pool = KeyPool::new(vec![]);
+        let body = json!({"model": "auto", "messages": [{"role": "user", "content": "test"}]});
+        let models = vec!["model".to_string()];
+        let response = race_models(Arc::new(state), Bytes::from(body.to_string()), &models).await;
+        assert!(response.status() >= StatusCode::BAD_REQUEST);
+    }
 
+    // Test for lines 690-691: chat_completions body parsing
+    #[tokio::test]
+    async fn test_chat_completions_empty_bytes() {
+        let state = Arc::new(create_test_app_state());
+        let response = chat_completions(State(state), HeaderMap::new(), Bytes::new()).await;
+        assert!(response.status() >= StatusCode::BAD_REQUEST);
+    }
+
+    // Test for lines 724-750: streaming edge cases
+    #[tokio::test]
+    async fn test_stream_termination_edge_cases() {
+        let state = Arc::new(create_test_app_state());
+        let body = json!({"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": true});
+        let response = chat_completions(
+            State(state),
+            HeaderMap::new(),
+            Bytes::from(body.to_string()),
+        )
+        .await;
+        assert!(
+            response.status() >= StatusCode::BAD_REQUEST || response.status() == StatusCode::OK
+        );
+    }
 }
 
 #[cfg(test)]
 mod tool_call_id_tests {
-    use serde_json::json;
     use super::sanitize_tool_calls;
+    use serde_json::json;
 
     #[test]
     fn test_sanitize_strips_tool_call_id_from_assistant() {
@@ -1612,11 +1806,14 @@ mod tool_call_id_tests {
                 }
             ]
         });
-        
+
         sanitize_tool_calls(&mut json);
-        
+
         // tool_call_id should be removed
-        assert!(!json["messages"][0].as_object().unwrap().contains_key("tool_call_id"));
+        assert!(!json["messages"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("tool_call_id"));
     }
 
     #[test]
@@ -1631,11 +1828,14 @@ mod tool_call_id_tests {
                 }
             ]
         });
-        
+
         sanitize_tool_calls(&mut json);
-        
+
         // tool_call_id should remain in tool messages
-        assert!(json["messages"][0].as_object().unwrap().contains_key("tool_call_id"));
+        assert!(json["messages"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("tool_call_id"));
     }
 
     #[test]
@@ -1660,12 +1860,18 @@ mod tool_call_id_tests {
                 }
             ]
         });
-        
+
         sanitize_tool_calls(&mut json);
-        
+
         // tool_call_id should be removed, tool_calls should remain
-        assert!(!json["messages"][0].as_object().unwrap().contains_key("tool_call_id"));
-        assert!(json["messages"][0].as_object().unwrap().contains_key("tool_calls"));
+        assert!(!json["messages"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("tool_call_id"));
+        assert!(json["messages"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("tool_calls"));
     }
 
     // ============ fix_message_ordering tests ============
@@ -1761,21 +1967,26 @@ mod tool_call_id_tests {
     #[test]
     fn test_validate_mistral_tool_call_ids_valid() {
         let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "abc123XYZ", "type": "function", "function": {"name": "test"}}]}]});
-        let result = crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/devstral-2-123b-instruct-2512");
+        let result = crate::proxy::validate_mistral_tool_call_ids(
+            &json,
+            "mistralai/mistral-medium-3.5-128b",
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_mistral_tool_call_ids_invalid_length() {
         let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test"}}]}]});
-        let result = crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
+        let result =
+            crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
         assert!(result.is_ok()); // validate is warn-only, not hard reject;
     }
 
     #[test]
     fn test_validate_mistral_tool_call_ids_invalid_chars() {
         let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]}]});
-        let result = crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
+        let result =
+            crate::proxy::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
         assert!(result.is_ok()); // validate is warn-only, not hard reject;
     }
 
@@ -1801,8 +2012,8 @@ fn log_turn_request(
     is_racing: bool,
     error: Option<String>,
 ) {
-    use crate::turn_log::{TurnLog, MessageLog, log_turn as log_turn_event};
-    
+    use crate::turn_log::{log_turn as log_turn_event, MessageLog, TurnLog};
+
     let mut turn = TurnLog::new(
         requested_model.to_string(),
         responding_model.to_string(),
@@ -1816,9 +2027,9 @@ fn log_turn_request(
         key_label.map(String::from),
         is_racing,
     );
-    
+
     turn.error = error;
-    
+
     log_turn_event(&turn);
 }
 /// POST /v1/completions — legacy completions endpoint
@@ -1829,8 +2040,13 @@ pub async fn completions(
 ) -> Response {
     eprintln!("[nimaproxy] POST /v1/completions");
     let model_id = if let Ok(v) = serde_json::from_slice::<Value>(&body) {
-        v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string()
-    } else { String::new() };
+        v.get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
     let n = state.pool.len().min(MAX_RETRIES).max(1);
     eprintln!("[nimaproxy] POST /v1/completions - got n={}", n);
     for _ in 0..n {
@@ -1839,13 +2055,27 @@ pub async fn completions(
         };
         eprintln!("[nimaproxy] POST /v1/completions - about to send request");
         let t0 = Instant::now();
-        let result = state.client.post(format!("{}/v1/completions", state.target)).header("Authorization", format!("Bearer {}", key)).header("Content-Type", "application/json").body(body.clone()).send().await;
+        let result = state
+            .client
+            .post(format!("{}/v1/completions", state.target))
+            .header("Authorization", format!("Bearer {}", key))
+            .header("Content-Type", "application/json")
+            .body(body.clone())
+            .send()
+            .await;
         match result {
             Err(e) => {
                 if let Some(label) = state.pool.get_key_label(idx) {
-                    state.model_stats.record_with_key(&model_id, &label, t0.elapsed().as_millis() as f64, false);
+                    state.model_stats.record_with_key(
+                        &model_id,
+                        &label,
+                        t0.elapsed().as_millis() as f64,
+                        false,
+                    );
                 } else {
-                    state.model_stats.record(&model_id, t0.elapsed().as_millis() as f64, false);
+                    state
+                        .model_stats
+                        .record(&model_id, t0.elapsed().as_millis() as f64, false);
                 }
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
@@ -1853,24 +2083,51 @@ pub async fn completions(
                 let status = resp.status();
                 let ok = status.is_success();
                 let ttfc_ms = t0.elapsed().as_millis() as f64;
-                let resp_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let content_type = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
-                let stream = resp.bytes_stream().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                let resp_status =
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/json")
+                    .to_string();
+                let stream = resp
+                    .bytes_stream()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
                 let collected = match stream.try_collect::<Vec<Bytes>>().await {
                     Ok(c) => c,
-                    Err(e) => { return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(); }
+                    Err(e) => {
+                        return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                    }
                 };
                 let full_body = collected.concat();
-                let (output_tokens, repetition_count, had_tool_call) = extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
+                let (output_tokens, repetition_count, had_tool_call) =
+                    extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
                 if output_tokens > 0 || repetition_count > 0 {
                     if let Some(label) = state.pool.get_key_label(idx) {
-                        state.model_stats.record_with_circuit_breaker(&model_id, ttfc_ms, ok, output_tokens, repetition_count, had_tool_call);
+                        state.model_stats.record_with_circuit_breaker(
+                            &model_id,
+                            ttfc_ms,
+                            ok,
+                            output_tokens,
+                            repetition_count,
+                            had_tool_call,
+                        );
                     } else {
-                        state.model_stats.record_with_circuit_breaker(&model_id, ttfc_ms, ok, output_tokens, repetition_count, had_tool_call);
+                        state.model_stats.record_with_circuit_breaker(
+                            &model_id,
+                            ttfc_ms,
+                            ok,
+                            output_tokens,
+                            repetition_count,
+                            had_tool_call,
+                        );
                     }
                 } else {
                     if let Some(label) = state.pool.get_key_label(idx) {
-                        state.model_stats.record_with_key(&model_id, &label, ttfc_ms, ok);
+                        state
+                            .model_stats
+                            .record_with_key(&model_id, &label, ttfc_ms, ok);
                     } else {
                         state.model_stats.record(&model_id, ttfc_ms, ok);
                     }
@@ -1878,15 +2135,27 @@ pub async fn completions(
                 let body = Body::from(full_body);
                 let mut response = Response::new(body);
                 *response.status_mut() = resp_status;
-                response.headers_mut().insert("content-type", HeaderValue::from_str(&content_type).unwrap_or_else(|_| HeaderValue::from_static("application/json")));
+                response.headers_mut().insert(
+                    "content-type",
+                    HeaderValue::from_str(&content_type)
+                        .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                );
                 if let Some(label) = state.pool.get_key_label(idx) {
-                    response.headers_mut().insert("x-key-label", HeaderValue::from_str(&label).unwrap_or_else(|_| HeaderValue::from_static("unknown")));
+                    response.headers_mut().insert(
+                        "x-key-label",
+                        HeaderValue::from_str(&label)
+                            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                    );
                 }
                 return response;
             }
         }
     }
-    (StatusCode::TOO_MANY_REQUESTS, "all keys exhausted after retries").into_response()
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        "all keys exhausted after retries",
+    )
+        .into_response()
 }
 
 /// POST /v1/embeddings — embeddings endpoint
@@ -1897,21 +2166,40 @@ pub async fn embeddings(
 ) -> Response {
     eprintln!("[nimaproxy] POST /v1/embeddings");
     let model_id = if let Ok(v) = serde_json::from_slice::<Value>(&body) {
-        v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string()
-    } else { String::new() };
+        v.get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
     let n = state.pool.len().min(MAX_RETRIES).max(1);
     for _ in 0..n {
         let Some((key, idx)) = state.pool.next_key() else {
             return (StatusCode::TOO_MANY_REQUESTS, "all keys rate-limited").into_response();
         };
         let t0 = Instant::now();
-        let result = state.client.post(format!("{}/v1/embeddings", state.target)).header("Authorization", format!("Bearer {}", key)).header("Content-Type", "application/json").body(body.clone()).send().await;
+        let result = state
+            .client
+            .post(format!("{}/v1/embeddings", state.target))
+            .header("Authorization", format!("Bearer {}", key))
+            .header("Content-Type", "application/json")
+            .body(body.clone())
+            .send()
+            .await;
         match result {
             Err(e) => {
                 if let Some(label) = state.pool.get_key_label(idx) {
-                    state.model_stats.record_with_key(&model_id, &label, t0.elapsed().as_millis() as f64, false);
+                    state.model_stats.record_with_key(
+                        &model_id,
+                        &label,
+                        t0.elapsed().as_millis() as f64,
+                        false,
+                    );
                 } else {
-                    state.model_stats.record(&model_id, t0.elapsed().as_millis() as f64, false);
+                    state
+                        .model_stats
+                        .record(&model_id, t0.elapsed().as_millis() as f64, false);
                 }
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
@@ -1919,31 +2207,55 @@ pub async fn embeddings(
                 let status = resp.status();
                 let ok = status.is_success();
                 let ttfc_ms = t0.elapsed().as_millis() as f64;
-                let resp_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let content_type = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
-                let stream = resp.bytes_stream().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                let resp_status =
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/json")
+                    .to_string();
+                let stream = resp
+                    .bytes_stream()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
                 let collected = match stream.try_collect::<Vec<Bytes>>().await {
                     Ok(c) => c,
-                    Err(e) => { return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(); }
+                    Err(e) => {
+                        return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                    }
                 };
                 let full_body = collected.concat();
                 if let Some(label) = state.pool.get_key_label(idx) {
-                    state.model_stats.record_with_key(&model_id, &label, ttfc_ms, ok);
+                    state
+                        .model_stats
+                        .record_with_key(&model_id, &label, ttfc_ms, ok);
                 } else {
                     state.model_stats.record(&model_id, ttfc_ms, ok);
                 }
                 let body = Body::from(full_body);
                 let mut response = Response::new(body);
                 *response.status_mut() = resp_status;
-                response.headers_mut().insert("content-type", HeaderValue::from_str(&content_type).unwrap_or_else(|_| HeaderValue::from_static("application/json")));
+                response.headers_mut().insert(
+                    "content-type",
+                    HeaderValue::from_str(&content_type)
+                        .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                );
                 if let Some(label) = state.pool.get_key_label(idx) {
-                    response.headers_mut().insert("x-key-label", HeaderValue::from_str(&label).unwrap_or_else(|_| HeaderValue::from_static("unknown")));
+                    response.headers_mut().insert(
+                        "x-key-label",
+                        HeaderValue::from_str(&label)
+                            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                    );
                 }
                 return response;
             }
         }
     }
-    (StatusCode::TOO_MANY_REQUESTS, "all keys exhausted after retries").into_response()
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        "all keys exhausted after retries",
+    )
+        .into_response()
 }
 
 /// GET /props — tool capability discovery endpoint (for OMP compatibility)
@@ -1966,6 +2278,8 @@ pub async fn props() -> Response {
     });
     let body = Body::from(props.to_string());
     let mut response = Response::new(body);
-    response.headers_mut().insert("content-type", HeaderValue::from_static("application/json"));
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
     response
 }
