@@ -363,6 +363,24 @@ timeout_ms = 15000
 strategy = "complete"
 ```
 
+**Per-Model NVIDIA Defaults:**
+
+`nimaproxy` applies the build.nvidia.com inference defaults from
+`[model_params."<model>"]` before sending requests upstream. `stream` is treated
+as a default only when the caller omits it, so explicit client streaming choices
+are preserved.
+
+| Model | max_tokens | temperature | top_p | Extra |
+| --- | ---: | ---: | ---: | --- |
+| `deepseek-ai/deepseek-v4-pro` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=false` |
+| `deepseek-ai/deepseek-v4-flash` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=true`, `chat_template_kwargs.reasoning_effort=high` |
+| `mistralai/mistral-medium-3.5-128b` | 16384 | 0.7 | 1.0 | `reasoning_effort=high` |
+| `z-ai/glm-5.1` | 16384 | 1.0 | 1.0 | `seed=42`, `stream=true` default |
+| `stepfun-ai/step-3.7-flash` | 16384 | 1.0 | 0.95 |  |
+| `moonshotai/kimi-k2.6` | 16384 | 1.0 | 1.0 |  |
+| `qwen/qwen3.5-397b-a17b` | 16384 | 0.6 | 0.95 | `top_k=20`, `presence_penalty=0`, `repetition_penalty=1` |
+| `minimaxai/minimax-m2.7` | 8192 | 1.0 | 0.95 |  |
+
 Fires N parallel requests to N models, returns first response. Trades N×token
 budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429
 rate-limit collisions. Models are selected in round-robin order via

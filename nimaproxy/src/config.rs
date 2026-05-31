@@ -89,9 +89,11 @@ pub struct ModelParams {
     pub top_p: Option<f64>,
     pub top_k: Option<i32>,
     pub max_tokens: Option<i32>,
+    pub stream: Option<bool>,
     /// Penalty for frequency of repeated tokens (reduces repetition)
     pub frequency_penalty: Option<f64>,
     pub presence_penalty: Option<f64>,
+    pub repetition_penalty: Option<f64>,
     pub min_p: Option<f64>,
     pub reasoning_effort: Option<String>,
     pub seed: Option<i32>,
@@ -131,7 +133,7 @@ pub struct RacingConfig {
     pub enabled: Option<bool>,
     /// List of models to race. Must have 2+ models.
     pub models: Option<Vec<String>>,
-/// Max parallel requests (default: 3, no upper cap - config value is trusted)
+    /// Max parallel requests (default: 3, no upper cap - config value is trusted)
     pub max_parallel: Option<usize>,
     /// Timeout per request in ms (default: 8000ms)
     pub timeout_ms: Option<u64>,
@@ -163,7 +165,7 @@ impl Config {
             .unwrap_or_default()
     }
 
-pub fn racing_max_parallel(&self) -> usize {
+    pub fn racing_max_parallel(&self) -> usize {
         // Config value or default (3), with minimum of 2
         // No upper cap - config value is trusted
         self.racing
@@ -366,6 +368,11 @@ key = "test"
 temperature = 0.7
 top_p = 0.95
 top_k = 40
+max_tokens = 16384
+stream = false
+repetition_penalty = 1.0
+reasoning_effort = "high"
+chat_template_kwargs = { thinking = true }
 
 [model_params."nvidia/coder"]
 temperature = 0.3
@@ -382,6 +389,11 @@ max_tokens = 4096
         assert_eq!(llama.temperature, Some(0.7));
         assert_eq!(llama.top_p, Some(0.95));
         assert_eq!(llama.top_k, Some(40));
+        assert_eq!(llama.max_tokens, Some(16384));
+        assert_eq!(llama.stream, Some(false));
+        assert_eq!(llama.repetition_penalty, Some(1.0));
+        assert_eq!(llama.reasoning_effort, Some("high".to_string()));
+        assert_eq!(llama.get("thinking"), Some(&serde_json::json!(true)));
 
         let coder_params = config.get_model_params("nvidia/coder");
         assert!(coder_params.is_some());
@@ -438,6 +450,8 @@ temperature = 1.0
         assert_eq!(params.top_p, None);
         assert_eq!(params.top_k, None);
         assert_eq!(params.max_tokens, None);
+        assert_eq!(params.stream, None);
+        assert_eq!(params.repetition_penalty, None);
     }
 
     #[test]
@@ -533,7 +547,7 @@ key = "test"
         assert!(!compat.should_transform_tool_messages("allowed-model"));
         assert!(compat.should_transform_developer_role("blocked-model"));
         assert!(compat.should_transform_tool_messages("blocked-model"));
-}
+    }
     #[test]
     fn test_listen_addr_default() {
         let file = write_temp_config(

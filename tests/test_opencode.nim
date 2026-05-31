@@ -103,3 +103,26 @@ suite "parseOmoConfig":
 
     let omo = parseOmoConfig(path)
     check omo.agents[0].model == "some/model"
+
+  test "parses thinking flag from NVIDIA chat_template_kwargs":
+    let path = "/tmp/test-omo-thinking.json"
+    let data = %*{
+      "agents": {
+        "deepseek": {
+          "model": "nvidia/deepseek-ai/deepseek-v4-flash",
+          "chat_template_kwargs": {"thinking": true}
+        },
+        "legacy": {
+          "model": "nvidia/qwen/qwen3.5-397b-a17b",
+          "chat_template_kwargs": {"enable_thinking": true}
+        }
+      },
+      "categories": {}
+    }
+    writeFile(path, $data)
+    defer: removeFile(path)
+
+    let omo = parseOmoConfig(path)
+    check omo.agents.len == 2
+    for a in omo.agents:
+      check a.thinking

@@ -89,6 +89,24 @@ timeout_ms = 15000
 strategy = "complete"
 ```
 
+### Per-Model NVIDIA Defaults
+
+`[model_params."<model>"]` mirrors the build.nvidia.com inference snippets for
+the configured pool. The proxy sends these defaults upstream for direct,
+auto-routed, and racing requests. `stream` is only a default when the caller
+omits it.
+
+| Model | max_tokens | temperature | top_p | Extra |
+| --- | ---: | ---: | ---: | --- |
+| `deepseek-ai/deepseek-v4-pro` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=false` |
+| `deepseek-ai/deepseek-v4-flash` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=true`, `chat_template_kwargs.reasoning_effort=high` |
+| `mistralai/mistral-medium-3.5-128b` | 16384 | 0.7 | 1.0 | `reasoning_effort=high` |
+| `z-ai/glm-5.1` | 16384 | 1.0 | 1.0 | `seed=42`, `stream=true` default |
+| `stepfun-ai/step-3.7-flash` | 16384 | 1.0 | 0.95 |  |
+| `moonshotai/kimi-k2.6` | 16384 | 1.0 | 1.0 |  |
+| `qwen/qwen3.5-397b-a17b` | 16384 | 0.6 | 0.95 | `top_k=20`, `presence_penalty=0`, `repetition_penalty=1` |
+| `minimaxai/minimax-m2.7` | 8192 | 1.0 | 0.95 |  |
+
 ### Usage
 
 ```bash

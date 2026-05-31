@@ -79,7 +79,9 @@ proc parseOmoConfig*(path: string = ""): OmoConfig =
             maxTokens: cfg{"max_tokens"}.getInt(0),
           )
           if cfg.hasKey("chat_template_kwargs"):
-            agent.thinking = cfg["chat_template_kwargs"]{"enable_thinking"}.getBool(false)
+            let kwargs = cfg["chat_template_kwargs"]
+            agent.thinking = kwargs{"enable_thinking"}.getBool(
+              kwargs{"thinking"}.getBool(false))
           result.agents.add(agent)
 
     if data.hasKey("categories"):
