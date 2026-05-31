@@ -3,7 +3,7 @@
 import std/strutils
 
 const
-  Version* = "0.15.0"
+  Version* = "0.15.1"
   GitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null || echo unknown").strip()
   BuildDate* = CompileDate & " " & CompileTime
   BaseURL* = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -228,5 +228,4 @@ proc samples*(stats: ModelStats): seq[float] =
   result = newSeq[float](stats.ringLen)
   for i in 0..<stats.ringLen:
     result[i] = stats.ring[i]
-
 

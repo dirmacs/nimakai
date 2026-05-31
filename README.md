@@ -134,7 +134,7 @@ Each OMO category is scored using weighted criteria:
 
 ## Proxy Commands (FFI Integration)
 
-nimakai v0.15.0 includes FFI integration with nimaproxy, allowing you
+nimakai includes FFI integration with nimaproxy, allowing you
 to start/stop/query the Rust key-rotation proxy directly from the Nim
 CLI:
 
@@ -242,22 +242,8 @@ src/
     rustffi.nim    — Rust FFI bridge for concurrent HTTP pinging
     update.nim     — Fetch and update model catalog from NVIDIA NIM API
 tests/
-    test_types.nim         34 tests
-    test_metrics.nim       50 tests
-    test_display.nim       66 tests
-    test_ping.nim          20 tests
-    test_catalog.nim       35 tests
-    test_config.nim        51 tests
-    test_opencode.nim      16 tests
-    test_recommend.nim     58 tests
-    test_sync.nim          29 tests
-    test_history.nim       86 tests
-    test_rechistory.nim    26 tests
-    test_watch.nim         23 tests
-    test_integration.nim   35 tests
-    test_discovery.nim     45 tests
-    test_cli.nim           109 tests
-    test_proxy.nim         32 tests
+    16 isolated suites run by `nimble test` (343 tests total)
+    test_proxy.nim         Manual FFI/service tests; starts/stops nimaproxy
 
 ### nimaproxy (Rust)
 
@@ -281,7 +267,7 @@ nimaproxy/
     e2e_live.rs            14 E2E tests with real NVIDIA API
     stress_test.rs         1 live stress test
     coverage_gaps.rs       14 coverage gap tests
-    proxy_error_paths.rs   22 proxy error path tests
+    proxy_error_paths.rs   31 proxy error path tests
     live_chat.rs          5 live chat tests
     live_key_rotation.rs  2 key rotation tests
     live_routing.rs       2 routing tests
@@ -366,16 +352,17 @@ strategy = "complete"
 **Per-Model NVIDIA Defaults:**
 
 `nimaproxy` applies the build.nvidia.com inference defaults from
-`[model_params."<model>"]` before sending requests upstream. `stream` is treated
-as a default only when the caller omits it, so explicit client streaming choices
-are preserved.
+`[model_params."<model>"]` before sending requests upstream. `stream=false`
+may be injected when omitted; `stream=true` entries are retained for catalog
+fidelity, but the proxy streams only when the caller explicitly sends
+`"stream": true`.
 
 | Model | max_tokens | temperature | top_p | Extra |
 | --- | ---: | ---: | ---: | --- |
 | `deepseek-ai/deepseek-v4-pro` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=false` |
 | `deepseek-ai/deepseek-v4-flash` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=true`, `chat_template_kwargs.reasoning_effort=high` |
 | `mistralai/mistral-medium-3.5-128b` | 16384 | 0.7 | 1.0 | `reasoning_effort=high` |
-| `z-ai/glm-5.1` | 16384 | 1.0 | 1.0 | `seed=42`, `stream=true` default |
+| `z-ai/glm-5.1` | 16384 | 1.0 | 1.0 | `seed=42`; NVIDIA snippet streams, caller must opt in |
 | `stepfun-ai/step-3.7-flash` | 16384 | 1.0 | 0.95 |  |
 | `moonshotai/kimi-k2.6` | 16384 | 1.0 | 1.0 |  |
 | `qwen/qwen3.5-397b-a17b` | 16384 | 0.6 | 0.95 | `top_k=20`, `presence_penalty=0`, `repetition_penalty=1` |
@@ -385,8 +372,9 @@ Fires N parallel requests to N models, returns first response. Trades N×token
 budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429
 rate-limit collisions. Models are selected in round-robin order via
 `racing_cursor` to prevent a single fast model from dominating and breaking
-inference loops. Dead models (≥20 consecutive failures or 0 samples) are
-filtered out automatically.
+inference loops. Server-degraded and all-keys-failed models are excluded;
+latency/failure-degraded models are used only as fallback capacity when there
+are not enough healthy models to fill the race.
 
 **Model Compatibility (Developer Role Transformation):**
 

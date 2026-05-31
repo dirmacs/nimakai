@@ -386,43 +386,54 @@ impl ModelStatsStore {
 
     pub fn racing_candidates(&self, candidates: &[String], max: usize) -> Vec<String> {
         let map = self.inner.lock().unwrap();
- let threshold = self.spike_threshold_ms;
- let key_failures = self.key_failures.lock().unwrap();
- let mut ranked: Vec<(&String, Option<f64>)> = Vec::new();
- for m in candidates {
- let tracker = key_failures.get(m);
- let all_keys_failed = tracker.map(|t| t.all_keys_failed()).unwrap_or(false);
- if all_keys_failed {
- continue;
- }
- if let Some(e) = map.get(m) {
- // Skip server-degraded models entirely
- if e.server_degraded {
- continue;
- }
- if e.consecutive_failures >= 20 && all_keys_failed {
- continue;
- }
- if e.is_degraded(m, threshold, &self.circuit_breaker) {
- continue;
- }
- ranked.push((m, e.avg_ms()));
- } else {
- ranked.push((m, None));
- }
- }
- ranked.sort_by(|a, b| match (a.1, b.1) {
- (Some(av), Some(bv)) => av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal),
- (Some(_), None) => std::cmp::Ordering::Less,
- (None, Some(_)) => std::cmp::Ordering::Greater,
- (None, None) => std::cmp::Ordering::Equal,
- });
- ranked
- .into_iter()
- .take(max)
- .map(|(m, _)| m.clone())
- .collect()
- }
+        let threshold = self.spike_threshold_ms;
+        let key_failures = self.key_failures.lock().unwrap();
+        let mut healthy: Vec<(&String, Option<f64>)> = Vec::new();
+        let mut degraded: Vec<(&String, Option<f64>)> = Vec::new();
+
+        for m in candidates {
+            let all_keys_failed = key_failures
+                .get(m)
+                .map(|t| t.all_keys_failed())
+                .unwrap_or(false);
+            if all_keys_failed {
+                continue;
+            }
+
+            if let Some(e) = map.get(m) {
+                // Server-degraded models are explicit upstream blocks and should
+                // stay out of racing until the server-side condition clears.
+                if e.server_degraded {
+                    continue;
+                }
+
+                if e.is_degraded(m, threshold, &self.circuit_breaker) {
+                    degraded.push((m, e.avg_ms()));
+                } else {
+                    healthy.push((m, e.avg_ms()));
+                }
+            } else {
+                healthy.push((m, None));
+            }
+        }
+
+        let by_latency = |a: &(&String, Option<f64>), b: &(&String, Option<f64>)| match (a.1, b.1) {
+            (Some(av), Some(bv)) => av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+
+        healthy.sort_by(by_latency);
+        degraded.sort_by(by_latency);
+
+        healthy
+            .into_iter()
+            .chain(degraded)
+            .take(max)
+            .map(|(m, _)| m.clone())
+            .collect()
+    }
 
     /// Export current stats for all tracked models (for /stats endpoint).
     pub fn snapshot(&self) -> Vec<ModelSnapshot> {
@@ -962,7 +973,7 @@ mod getter_tests {
     }
 
     #[test]
-    fn test_racing_candidates_filters_degraded() {
+    fn test_racing_candidates_uses_degraded_as_fallback() {
         let store = ModelStatsStore::new(3000.0);
 
         // Make model-a degraded with high latency
@@ -979,9 +990,65 @@ mod getter_tests {
         let candidates = vec!["model-a".to_string(), "model-b".to_string()];
         let result = store.racing_candidates(&candidates, 5);
 
-        // model-a should be filtered out as degraded
-        assert!(!result.contains(&"model-a".to_string()));
-        assert!(result.contains(&"model-b".to_string()));
+        // Healthy models are preferred, but degraded models remain fallback
+        // capacity so racing does not collapse to immediate 502s under load.
+        assert_eq!(result, vec!["model-b".to_string(), "model-a".to_string()]);
+    }
+
+    #[test]
+    fn test_racing_candidates_skips_degraded_when_enough_healthy_models() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record("healthy-a", 500.0, true);
+        store.record("healthy-a", 500.0, true);
+        store.record("healthy-a", 500.0, true);
+
+        store.record("healthy-b", 700.0, true);
+        store.record("healthy-b", 700.0, true);
+        store.record("healthy-b", 700.0, true);
+
+        store.record("degraded", 5000.0, true);
+        store.record("degraded", 5000.0, true);
+        store.record("degraded", 5000.0, true);
+
+        let candidates = vec![
+            "degraded".to_string(),
+            "healthy-b".to_string(),
+            "healthy-a".to_string(),
+        ];
+        let result = store.racing_candidates(&candidates, 2);
+
+        assert_eq!(result, vec!["healthy-a".to_string(), "healthy-b".to_string()]);
+        assert!(!result.contains(&"degraded".to_string()));
+    }
+
+    #[test]
+    fn test_racing_candidates_backfills_least_bad_degraded_models() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record("healthy", 500.0, true);
+        store.record("healthy", 500.0, true);
+        store.record("healthy", 500.0, true);
+
+        store.record("degraded-slower", 8000.0, true);
+        store.record("degraded-slower", 8000.0, true);
+        store.record("degraded-slower", 8000.0, true);
+
+        store.record("degraded-less-bad", 4000.0, true);
+        store.record("degraded-less-bad", 4000.0, true);
+        store.record("degraded-less-bad", 4000.0, true);
+
+        let candidates = vec![
+            "degraded-slower".to_string(),
+            "healthy".to_string(),
+            "degraded-less-bad".to_string(),
+        ];
+        let result = store.racing_candidates(&candidates, 2);
+
+        assert_eq!(
+            result,
+            vec!["healthy".to_string(), "degraded-less-bad".to_string()]
+        );
     }
 
     #[test]

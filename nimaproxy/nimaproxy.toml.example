@@ -57,8 +57,9 @@ label = "key4"
 # ── Model Racing (Speculative Execution) ──────────────────────────────────
 # Fire N parallel requests to N models, return first response.
 # Trades N×token budget for min(P50 latency).
-# Dead models (≥20 consecutive failures, 0 samples, or degraded) are filtered
-# automatically. Keys are pre-allocated per task to avoid 429 collisions.
+# Server-degraded models and models where all keys failed are excluded.
+# Degraded latency/failure candidates are used only as fallback capacity when
+# there are not enough healthy models to fill max_parallel.
 #
 # [racing]
 # enabled = true
@@ -75,3 +76,63 @@ label = "key4"
 # max_parallel = 8
 # timeout_ms = 15000
 # strategy = "complete"
+
+# ── NVIDIA Catalog Inference Defaults ─────────────────────────────────────
+# These values mirror the build.nvidia.com snippets for the current 8-model
+# pool. `stream=false` may be injected when omitted. `stream=true` entries are
+# retained for catalog fidelity, but callers must request streaming explicitly.
+
+[model_params."deepseek-ai/deepseek-v4-pro"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+stream = false
+chat_template_kwargs = { thinking = false }
+
+[model_params."deepseek-ai/deepseek-v4-flash"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+stream = false
+chat_template_kwargs = { thinking = true, reasoning_effort = "high" }
+
+[model_params."mistralai/mistral-medium-3.5-128b"]
+temperature = 0.7
+top_p = 1.0
+max_tokens = 16384
+stream = false
+reasoning_effort = "high"
+
+[model_params."z-ai/glm-5.1"]
+temperature = 1.0
+top_p = 1.0
+max_tokens = 16384
+stream = true
+seed = 42
+
+[model_params."stepfun-ai/step-3.7-flash"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+stream = false
+
+[model_params."moonshotai/kimi-k2.6"]
+temperature = 1.0
+top_p = 1.0
+max_tokens = 16384
+stream = false
+
+[model_params."qwen/qwen3.5-397b-a17b"]
+temperature = 0.6
+top_p = 0.95
+top_k = 20
+presence_penalty = 0.0
+repetition_penalty = 1.0
+max_tokens = 16384
+stream = false
+
+[model_params."minimaxai/minimax-m2.7"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 8192
+stream = false

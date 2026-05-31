@@ -28,7 +28,7 @@
 
 ### 🛡️ Production Ready
 
-- 364+ tests with ~92% coverage
+- 378 tests with ~92% coverage
 - Graceful error handling and retry logic
 - Comprehensive metrics and health checks
 
@@ -92,16 +92,17 @@ strategy = "complete"
 ### Per-Model NVIDIA Defaults
 
 `[model_params."<model>"]` mirrors the build.nvidia.com inference snippets for
-the configured pool. The proxy sends these defaults upstream for direct,
-auto-routed, and racing requests. `stream` is only a default when the caller
-omits it.
+the configured pool. The proxy sends hyperparameter defaults upstream for
+direct, auto-routed, and racing requests. `stream=false` may be injected when
+omitted; `stream=true` entries are retained for catalog fidelity, but the proxy
+streams only when the caller explicitly sends `"stream": true`.
 
 | Model | max_tokens | temperature | top_p | Extra |
 | --- | ---: | ---: | ---: | --- |
 | `deepseek-ai/deepseek-v4-pro` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=false` |
 | `deepseek-ai/deepseek-v4-flash` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=true`, `chat_template_kwargs.reasoning_effort=high` |
 | `mistralai/mistral-medium-3.5-128b` | 16384 | 0.7 | 1.0 | `reasoning_effort=high` |
-| `z-ai/glm-5.1` | 16384 | 1.0 | 1.0 | `seed=42`, `stream=true` default |
+| `z-ai/glm-5.1` | 16384 | 1.0 | 1.0 | `seed=42`; NVIDIA snippet streams, caller must opt in |
 | `stepfun-ai/step-3.7-flash` | 16384 | 1.0 | 0.95 |  |
 | `moonshotai/kimi-k2.6` | 16384 | 1.0 | 1.0 |  |
 | `qwen/qwen3.5-397b-a17b` | 16384 | 0.6 | 0.95 | `top_k=20`, `presence_penalty=0`, `repetition_penalty=1` |
@@ -159,9 +160,9 @@ Client → nimaproxy → NVIDIA NIM API
 cargo test
 
 # Run specific test suite
-cargo test --lib          # Library tests (246)
+cargo test --lib          # Library tests (251)
 cargo test --test integration  # Integration tests (45)
-cargo test --test proxy_error_paths  # Error paths (22)
+cargo test --test proxy_error_paths  # Error paths (31)
 cargo test --test coverage_gaps  # Coverage gaps (14)
 cargo test --test e2e_live  # E2E live (14)
 
@@ -176,22 +177,21 @@ cargo test --test live_routing      # Live routing (2)
 cargo test --test live_streaming    # Live streaming (2)
 cargo test --test live_circuit_breaker # Live circuit breaker (2)
 cargo test --test live_tool_calls   # Live tool calls (7)
-                                     # Total live tests: 24
+                                     # Total live tests: 22
 ```
 
-## Recent Changes (v0.13.7)
+## Recent Changes (v0.15.1)
 
 ### Fixed
 
-- **Racing 4xx/5xx**: Non-2xx responses skipped in racing; only first 2xx wins
-- **Racing 429 key-marking**: 429 correctly marks originating key rate-limited
-- **400 retry**: `resolve_model` retries on "Invalid assistant message" 400
-- **Tool schema sanitization**: Null `description`/`parameters` → valid defaults; prevents NVIDIA Jinja `tool_use:98` 500
-- **Error body logging**: 4xx/5xx bodies now logged to journal for debuggability
+- **Direct request timeout**: Non-racing requests now honor the configured dynamic upstream timeout.
+- **Racing capacity**: Degraded latency/failure candidates backfill races only when healthy capacity is insufficient.
+- **Racing 429 handling**: Losing 429 racers no longer globally cool API keys when another model wins; all-key/all-race 429 cases return 429.
+- **Stream semantics**: Catalog `stream=true` values no longer force JSON callers into SSE mode.
 
 ### Added
 
-- `GET /models` route alias (OMP polls without `/v1/` prefix)
+- Build.nvidia.com per-model defaults for the eight-model nimaproxy pool.
 
 See [CHANGELOG.md](CHANGELOG.md) for full history.
 

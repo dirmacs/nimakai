@@ -147,11 +147,13 @@ fn apply_model_params(json: &mut Value, params: &crate::config::ModelParams) {
         json["seed"] = Value::from(seed);
     }
 
-    // Treat stream as a model default, not a hard override. Callers that
-    // explicitly request streaming or non-streaming should keep control of
-    // the response mode.
+    // Treat stream as a client response-mode choice, not as a model
+    // hyperparameter. Callers that explicitly request streaming or
+    // non-streaming keep control, and omitted stream must remain JSON-compatible.
     if let Some(stream) = params.stream {
-        if json.get("stream").is_none() || json.get("stream").is_some_and(Value::is_null) {
+        if json.get("stream").is_some_and(|v| !v.is_null()) {
+            // Preserve the caller's explicit response mode.
+        } else if !stream {
             json["stream"] = Value::Bool(stream);
         }
     }
@@ -218,9 +220,7 @@ pub async fn chat_completions(
     // Racing owns per-model body rewriting. Passing the original auto request
     // avoids leaking router-picked model params into race candidates that do
     // not define the same fields.
-    if original_model == "auto"
-        && !state.racing_models.is_empty()
-        && state.racing_models.len() >= 2
+    if original_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2
     {
         let racing_models = state.racing_models.clone();
         return race_models(state, original_body, &racing_models).await;
@@ -241,18 +241,43 @@ pub async fn chat_completions(
         };
 
         let t0 = Instant::now();
-        let result = state
-            .client
-            .post(format!("{}/v1/chat/completions", state.target))
-            .header("Authorization", format!("Bearer {}", key))
-            .header("Content-Type", "application/json")
-            .header("Accept", accept_header_for_body(&body))
-            .body(body.clone())
-            .send()
-            .await;
+        let request_timeout_ms = state
+            .model_stats
+            .get_model_timeout(&model_id, state.racing_timeout_ms);
+        let result = timeout(
+            std::time::Duration::from_millis(request_timeout_ms),
+            state
+                .client
+                .post(format!("{}/v1/chat/completions", state.target))
+                .header("Authorization", format!("Bearer {}", key))
+                .header("Content-Type", "application/json")
+                .header("Accept", accept_header_for_body(&body))
+                .body(body.clone())
+                .send(),
+        )
+        .await;
 
         match result {
-            Err(e) => {
+            Err(_) => {
+                if let Some(label) = state.pool.get_key_label(idx) {
+                    state.model_stats.record_with_key(
+                        &model_id,
+                        &label,
+                        request_timeout_ms as f64,
+                        false,
+                    );
+                } else {
+                    state
+                        .model_stats
+                        .record(&model_id, request_timeout_ms as f64, false);
+                }
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!("upstream timeout after {}ms", request_timeout_ms),
+                )
+                    .into_response();
+            }
+            Ok(Err(e)) => {
                 if let Some(label) = state.pool.get_key_label(idx) {
                     state.model_stats.record_with_key(
                         &model_id,
@@ -267,7 +292,7 @@ pub async fn chat_completions(
                 }
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
-            Ok(resp) => {
+            Ok(Ok(resp)) => {
                 let status = resp.status();
 
                 if status == 429 {
@@ -301,10 +326,34 @@ pub async fn chat_completions(
                     .bytes_stream()
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
 
-                let collected = match stream.try_collect::<Vec<Bytes>>().await {
-                    Ok(c) => c,
-                    Err(e) => {
+                let collected = match timeout(
+                    std::time::Duration::from_millis(request_timeout_ms),
+                    stream.try_collect::<Vec<Bytes>>(),
+                )
+                .await
+                {
+                    Ok(Ok(c)) => c,
+                    Ok(Err(e)) => {
                         return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                    }
+                    Err(_) => {
+                        if let Some(label) = state.pool.get_key_label(idx) {
+                            state.model_stats.record_with_key(
+                                &model_id,
+                                &label,
+                                request_timeout_ms as f64,
+                                false,
+                            );
+                        } else {
+                            state
+                                .model_stats
+                                .record(&model_id, request_timeout_ms as f64, false);
+                        }
+                        return (
+                            StatusCode::GATEWAY_TIMEOUT,
+                            format!("upstream body timeout after {}ms", request_timeout_ms),
+                        )
+                            .into_response();
                     }
                 };
 
@@ -955,6 +1004,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
     }
 
     let mut handles = Vec::new();
+    let mut skipped_no_key = 0usize;
 
     for model_id in &models_to_race {
         let timeout_val = state.model_stats.get_model_timeout(model_id, timeout_ms);
@@ -1000,6 +1050,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
 
         let key = state.pool.next_key();
         if key.is_none() {
+            skipped_no_key += 1;
             eprintln!("[racing] no keys available for {}", model_id);
             continue;
         }
@@ -1134,6 +1185,9 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
     }
 
     if handles.is_empty() {
+        if skipped_no_key > 0 {
+            return (StatusCode::TOO_MANY_REQUESTS, "all API keys rate-limited").into_response();
+        }
         return (StatusCode::BAD_REQUEST, "no valid models to race").into_response();
     }
 
@@ -1146,17 +1200,19 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
         .collect();
 
     let mut last_error = None;
+    let mut pending_rate_limited_keys: Vec<(usize, u64)> = Vec::new();
+    let mut saw_non_rate_limit_failure = false;
 
     while !pending.is_empty() {
         let ((model_id, result), _idx, remaining) = select_all(pending).await;
         match result {
             Ok(Ok((response, status_code, key_idx, retry_after_secs))) => {
                 if status_code == 429 {
-                    state.pool.mark_rate_limited(key_idx, retry_after_secs);
                     eprintln!(
-                        "[racing] {} → 429, key {} rate-limited {}s, trying next",
+                        "[racing] {} → 429, key {} may be rate-limited {}s, trying next",
                         model_id, key_idx, retry_after_secs
                     );
+                    pending_rate_limited_keys.push((key_idx, retry_after_secs));
                     last_error = Some(format!("429 rate-limited (key {})", key_idx));
                 } else {
                     eprintln!("[racing] {} → HTTP {} (winner)", model_id, status_code);
@@ -1165,14 +1221,32 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
             }
             Ok(Err(e)) => {
                 eprintln!("[racing] {} failed: {}", model_id, e);
+                saw_non_rate_limit_failure = true;
                 last_error = Some(e);
             }
             Err(e) => {
                 eprintln!("[racing] {} panicked: {}", model_id, e);
+                saw_non_rate_limit_failure = true;
                 last_error = Some(e.to_string());
             }
         }
         pending = remaining;
+    }
+
+    for (key_idx, retry_after_secs) in pending_rate_limited_keys {
+        state.pool.mark_rate_limited(key_idx, retry_after_secs);
+    }
+
+    if last_error
+        .as_deref()
+        .is_some_and(|e| e.contains("429 rate-limited"))
+        && !saw_non_rate_limit_failure
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "all racing requests rate-limited",
+        )
+            .into_response();
     }
 
     (
@@ -1217,7 +1291,8 @@ mod tests {
         let mut json = json!({
             "model": "deepseek-ai/deepseek-v4-flash",
             "messages": [{"role": "user", "content": "test"}],
-            "chat_template_kwargs": {"client_value": true}
+            "chat_template_kwargs": {"client_value": true},
+            "stream": true
         });
         let mut kwargs = HashMap::new();
         kwargs.insert("thinking".to_string(), json!(true));
@@ -1262,6 +1337,23 @@ mod tests {
         apply_model_params(&mut json, &params);
 
         assert_eq!(json["stream"], json!(false));
+        assert_eq!(accept_header_for_json(&json), "application/json");
+    }
+
+    #[test]
+    fn test_apply_model_params_does_not_enable_stream_when_omitted() {
+        let mut json = json!({
+            "model": "z-ai/glm-5.1",
+            "messages": [{"role": "user", "content": "test"}]
+        });
+        let params = ModelParams {
+            stream: Some(true),
+            ..Default::default()
+        };
+
+        apply_model_params(&mut json, &params);
+
+        assert!(json.get("stream").is_none());
         assert_eq!(accept_header_for_json(&json), "application/json");
     }
 
