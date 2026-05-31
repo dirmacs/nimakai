@@ -76,10 +76,17 @@ Trades N×token budget for min(P50 latency).
 ```toml
 [racing]
 enabled = true
-models = ["minimaxai/minimax-m2.5", "minimaxai/minimax-m2.7", "qwen/qwen3.5-122b-a10b",
-  "qwen/qwen3.5-397b-a17b", "nvidia/nemotron-3-super-120b-a12b", "z-ai/glm4.7",
-  "z-ai/glm5", "z-ai/glm-5.1", "mistralai/mistral-large-3-675b-instruct-2512"]
-max_parallel = 9
+models = [
+  "deepseek-ai/deepseek-v4-pro",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.7",
+]
+max_parallel = 8
 ```
 
 ## Model Routing (V2)
@@ -96,14 +103,18 @@ Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skip
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "meta/llama-3.3-70b-instruct",
-  "qwen/qwen2.5-coder-32b-instruct",
-  "moonshotai/kimi-k2-instruct",
-  "mistralai/mistral-large-3-675b-instruct-2512",
+  "deepseek-ai/deepseek-v4-pro",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.7",
 ]
 ```
 
-Available racing models (current pool, 9 total): minimaxai/minimax-m2.5, minimaxai/minimax-m2.7, qwen/qwen3.5-122b-a10b, qwen/qwen3.5-397b-a17b, nvidia/nemotron-3-super-120b-a12b, z-ai/glm4.7, z-ai/glm5, z-ai/glm-5.1, mistralai/mistral-large-3-675b-instruct-2512
+Available racing models (current pool, 8 total): deepseek-ai/deepseek-v4-pro, deepseek-ai/deepseek-v4-flash, mistralai/mistral-medium-3.5-128b, z-ai/glm-5.1, stepfun-ai/step-3.7-flash, moonshotai/kimi-k2.6, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m2.7
 
 ## Metrics Reference
 
@@ -155,7 +166,7 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 
 ```bash
 ./nimakai recommend --task coding --format json
-# → {"primary": "nvidia/devstral-2-123b", "fallback": "stepfun-ai/step-3.5-flash"}
+# → {"primary": "nvidia/mistralai/mistral-medium-3.5-128b", "fallback": "stepfun-ai/step-3.7-flash"}
 ```
 
 ## nimaproxy v0.13.7 Critical Fixes (cumulative)

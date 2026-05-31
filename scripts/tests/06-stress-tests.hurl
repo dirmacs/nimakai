@@ -5,7 +5,7 @@
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "qwen/qwen3.5-122b-a10b",
+  "model": "stepfun-ai/step-3.7-flash",
   "messages": [{"role": "user", "content": "Request 1"}],
   "max_tokens": 20
 }
@@ -15,7 +15,7 @@ HTTP *
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "qwen/qwen3.5-122b-a10b",
+  "model": "stepfun-ai/step-3.7-flash",
   "messages": [{"role": "user", "content": "Request 2"}],
   "max_tokens": 20
 }
@@ -25,7 +25,7 @@ HTTP *
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "qwen/qwen3.5-122b-a10b",
+  "model": "stepfun-ai/step-3.7-flash",
   "messages": [{"role": "user", "content": "Request 3"}],
   "max_tokens": 20
 }
@@ -35,7 +35,7 @@ HTTP *
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "qwen/qwen3.5-122b-a10b",
+  "model": "stepfun-ai/step-3.7-flash",
   "messages": [{"role": "user", "content": "Request 4"}],
   "max_tokens": 20
 }
@@ -45,7 +45,7 @@ HTTP *
 POST {{NIMAPROXY_URL}}/v1/chat/completions
 Content-Type: application/json
 {
-  "model": "z-ai/glm4.7",
+  "model": "qwen/qwen3.5-397b-a17b",
   "messages": [{"role": "user", "content": "Request 5"}],
   "max_tokens": 20
 }

@@ -22,12 +22,12 @@ fn get_api_key() -> Option<String> {
 /// Returns None if API key not available (test should skip).
 fn make_live_state() -> Option<Arc<AppState>> {
     let api_key = get_api_key()?;
-    
+
     let key_entries = vec![KeyEntry {
         key: api_key,
         label: Some("live-test".to_string()),
     }];
-    
+
     Some(AppState::new(
         key_entries,
         NVIDIA_API_BASE.to_string(),
@@ -58,10 +58,10 @@ async fn test_live_chat_completions() {
     }
 
     let state = make_live_state().expect("Failed to create live state");
-    
+
     // Use a commonly available model
     let body = serde_json::json!({
-        "model": "nvidia/llama-3.1-nemotron-nano-8b-v1",
+        "model": "stepfun-ai/step-3.7-flash",
         "messages": [
             {"role": "user", "content": "Say 'hello' in exactly one word."}
         ],
@@ -73,7 +73,8 @@ async fn test_live_chat_completions() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
 
     let response = resp.into_response();
     let (parts, body) = response.into_parts();
@@ -82,26 +83,38 @@ async fn test_live_chat_completions() {
     eprintln!("[live] completions status: {}", status_code);
 
     let body_bytes = axum::body::to_bytes(body, 65536).await.unwrap();
-    
+
     if status_code != 200 {
-        eprintln!("[live] error body: {}", String::from_utf8_lossy(&body_bytes));
+        eprintln!(
+            "[live] error body: {}",
+            String::from_utf8_lossy(&body_bytes)
+        );
     }
 
     // Should succeed with valid API key
     assert_eq!(status_code, 200, "Expected 200 OK, got {}", status_code);
 
     // Verify response structure
-    let json: serde_json::Value = serde_json::from_slice(&body_bytes)
-        .expect("Response should be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("Response should be valid JSON");
 
     // Check for required fields
-    assert!(json.get("choices").is_some(), "Response should have 'choices' field");
-    assert!(json.get("model").is_some(), "Response should have 'model' field");
-    
+    assert!(
+        json.get("choices").is_some(),
+        "Response should have 'choices' field"
+    );
+    assert!(
+        json.get("model").is_some(),
+        "Response should have 'model' field"
+    );
+
     if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
         assert!(!choices.is_empty(), "Should have at least one choice");
         if let Some(first_choice) = choices.get(0) {
-            assert!(first_choice.get("message").is_some(), "Choice should have 'message' field");
+            assert!(
+                first_choice.get("message").is_some(),
+                "Choice should have 'message' field"
+            );
         }
     }
 }
@@ -117,9 +130,9 @@ async fn test_live_chat_streaming() {
     }
 
     let state = make_live_state().expect("Failed to create live state");
-    
+
     let body = serde_json::json!({
-        "model": "nvidia/llama-3.1-nemotron-nano-8b-v1",
+        "model": "stepfun-ai/step-3.7-flash",
         "messages": [
             {"role": "user", "content": "Count from 1 to 3."}
         ],
@@ -132,7 +145,8 @@ async fn test_live_chat_streaming() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
 
     let response = resp.into_response();
     let (parts, body) = response.into_parts();
@@ -141,10 +155,12 @@ async fn test_live_chat_streaming() {
     eprintln!("[live] streaming status: {}", status_code);
 
     // Check content-type for streaming
-    let content_type = parts.headers.get("content-type")
+    let content_type = parts
+        .headers
+        .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    
+
     eprintln!("[live] content-type: {}", content_type);
 
     let body_bytes = axum::body::to_bytes(body, 65536).await.unwrap();
@@ -154,16 +170,22 @@ async fn test_live_chat_streaming() {
         eprintln!("[live] error body: {}", content);
         // Skip on transient upstream errors — not a proxy bug
         if matches!(status_code, 429 | 502 | 503) {
-            eprintln!("[SKIP] transient upstream error {}, skipping assertion", status_code);
+            eprintln!(
+                "[SKIP] transient upstream error {}, skipping assertion",
+                status_code
+            );
             return;
         }
     }
 
     assert_eq!(status_code, 200, "Expected 200 OK, got {}", status_code);
-    
+
     // Streaming response should contain event-stream or be JSON
     // (NVIDIA may return JSON even with stream:true for small responses)
-    eprintln!("[live] streaming response preview: {}", &content[..content.len().min(200)]);
+    eprintln!(
+        "[live] streaming response preview: {}",
+        &content[..content.len().min(200)]
+    );
 }
 
 /// ============================================================================
@@ -177,9 +199,9 @@ async fn test_live_chat_tool_calling() {
     }
 
     let state = make_live_state().expect("Failed to create live state");
-    
+
     let body = serde_json::json!({
-        "model": "nvidia/llama-3.1-nemotron-nano-8b-v1",
+        "model": "stepfun-ai/step-3.7-flash",
         "messages": [
             {"role": "user", "content": "What is the weather in Tokyo?"}
         ],
@@ -210,7 +232,8 @@ async fn test_live_chat_tool_calling() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
 
     let response = resp.into_response();
     let (parts, body) = response.into_parts();
@@ -221,23 +244,35 @@ async fn test_live_chat_tool_calling() {
     let body_bytes = axum::body::to_bytes(body, 65536).await.unwrap();
 
     if status_code != 200 {
-        eprintln!("[live] error body: {}", String::from_utf8_lossy(&body_bytes));
+        eprintln!(
+            "[live] error body: {}",
+            String::from_utf8_lossy(&body_bytes)
+        );
         // Skip on transient upstream errors — not a proxy bug
         if matches!(status_code, 429 | 502 | 503) {
-            eprintln!("[SKIP] transient upstream error {}, skipping assertion", status_code);
+            eprintln!(
+                "[SKIP] transient upstream error {}, skipping assertion",
+                status_code
+            );
             return;
         }
     }
 
     assert_eq!(status_code, 200, "Expected 200 OK, got {}", status_code);
 
-    let json: serde_json::Value = serde_json::from_slice(&body_bytes)
-        .expect("Response should be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("Response should be valid JSON");
 
-    eprintln!("[live] tool calling response: {}", &json.to_string()[..json.to_string().len().min(500)]);
+    eprintln!(
+        "[live] tool calling response: {}",
+        &json.to_string()[..json.to_string().len().min(500)]
+    );
 
     // Response should have choices
-    assert!(json.get("choices").is_some(), "Response should have 'choices' field");
+    assert!(
+        json.get("choices").is_some(),
+        "Response should have 'choices' field"
+    );
 }
 
 /// ============================================================================
@@ -251,10 +286,10 @@ async fn test_live_chat_multi_turn() {
     }
 
     let state = make_live_state().expect("Failed to create live state");
-    
+
     // First turn: User asks a question
     let body1 = serde_json::json!({
-        "model": "nvidia/llama-3.1-nemotron-nano-8b-v1",
+        "model": "stepfun-ai/step-3.7-flash",
         "messages": [
             {"role": "user", "content": "My name is Alice. Remember this."}
         ],
@@ -266,7 +301,8 @@ async fn test_live_chat_multi_turn() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body1.to_string()),
-    ).await;
+    )
+    .await;
 
     let response1 = resp1.into_response();
     let (parts1, body1_bytes) = response1.into_parts();
@@ -288,13 +324,12 @@ async fn test_live_chat_multi_turn() {
 
     assert_eq!(status1, 200, "First turn should succeed, got {}", status1);
 
-    let body1_json: serde_json::Value = serde_json::from_slice(&raw1)
-        .expect("Response should be valid JSON");
+    let body1_json: serde_json::Value =
+        serde_json::from_slice(&raw1).expect("Response should be valid JSON");
 
-    let mut messages = vec![
-        serde_json::json!({"role": "user", "content": "My name is Alice. Remember this."}),
-    ];
-    
+    let mut messages =
+        vec![serde_json::json!({"role": "user", "content": "My name is Alice. Remember this."})];
+
     if let Some(choices) = body1_json.get("choices").and_then(|c| c.as_array()) {
         if let Some(first) = choices.get(0) {
             if let Some(msg) = first.get("message") {
@@ -305,7 +340,7 @@ async fn test_live_chat_multi_turn() {
 
     // Second turn: Ask about the name
     let body2 = serde_json::json!({
-        "model": "nvidia/llama-3.1-nemotron-nano-8b-v1",
+        "model": "stepfun-ai/step-3.7-flash",
         "messages": messages,
         "max_tokens": 50,
         "temperature": 0.0
@@ -315,7 +350,8 @@ async fn test_live_chat_multi_turn() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body2.to_string()),
-    ).await;
+    )
+    .await;
 
     let response2 = resp2.into_response();
     let (parts2, body2_bytes) = response2.into_parts();
@@ -336,10 +372,13 @@ async fn test_live_chat_multi_turn() {
 
     assert_eq!(status2, 200, "Second turn should succeed, got {}", status2);
 
-    let body2_json: serde_json::Value = serde_json::from_slice(&raw2)
-        .expect("Response should be valid JSON");
+    let body2_json: serde_json::Value =
+        serde_json::from_slice(&raw2).expect("Response should be valid JSON");
 
-    eprintln!("[live] multi-turn response 2: {}", &body2_json.to_string()[..body2_json.to_string().len().min(300)]);
+    eprintln!(
+        "[live] multi-turn response 2: {}",
+        &body2_json.to_string()[..body2_json.to_string().len().min(300)]
+    );
 }
 
 /// ============================================================================
@@ -353,11 +392,11 @@ async fn test_live_chat_various_models() {
     }
 
     let state = make_live_state().expect("Failed to create live state");
-    
+
     // Models confirmed available on NVIDIA NIM (verified 2026-04-20)
     let models_to_test = vec![
-        "nvidia/llama-3.1-nemotron-nano-8b-v1",
-        "meta/llama-3.1-8b-instruct", // canary: may return 502; at least one must succeed
+        "stepfun-ai/step-3.7-flash",
+        "qwen/qwen3.5-397b-a17b", // canary: may return 502; at least one must succeed
     ];
 
     let mut results: Vec<(String, u16, Option<String>)> = vec![];
@@ -377,7 +416,8 @@ async fn test_live_chat_various_models() {
             axum::extract::State(state.clone()),
             axum::http::HeaderMap::new(),
             bytes::Bytes::from(body.to_string()),
-        ).await;
+        )
+        .await;
 
         let elapsed_ms = t0.elapsed().as_millis();
         let response = resp.into_response();
@@ -413,6 +453,9 @@ async fn test_live_chat_various_models() {
     assert!(
         !successes.is_empty(),
         "At least one model should succeed. Results: {:?}",
-        results.iter().map(|(m, s, _)| format!("{}: {}", m, s)).collect::<Vec<_>>()
+        results
+            .iter()
+            .map(|(m, s, _)| format!("{}: {}", m, s))
+            .collect::<Vec<_>>()
     );
 }

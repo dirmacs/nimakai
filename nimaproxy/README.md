@@ -62,16 +62,30 @@ label = "primary"
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-models = [
-  "meta/llama-3.3-70b-instruct",
-  "qwen/qwen2.5-coder-32b-instruct",
+  "deepseek-ai/deepseek-v4-pro",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.7",
 ]
 
 [racing]
 enabled = true
-models = ["z-ai/glm4.7", "z-ai/glm5", "z-ai/glm-5.1", "qwen/qwen3.5-397b-a17b", "mistralai/mistral-large-3-675b-instruct-2512"]
-max_parallel = 3
-timeout_ms = 8000
+models = [
+  "deepseek-ai/deepseek-v4-pro",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.7",
+]
+max_parallel = 8
+timeout_ms = 15000
 strategy = "complete"
 ```
 

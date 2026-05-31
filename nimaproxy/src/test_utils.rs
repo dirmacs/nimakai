@@ -18,7 +18,7 @@
 //!     .build();
 //! ```
 
-use crate::{AppState, KeyEntry, ModelParams, ModelStatsStore, config};
+use crate::{config, AppState, KeyEntry, ModelParams, ModelStatsStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -163,7 +163,7 @@ impl MockAppStateBuilder {
 	/// let state = MockAppStateBuilder::new()
 	///     .with_custom_racing_models(vec![
 	///         "meta/llama-3.1-405b-instruct".into(),
-	///         "nvidia/nemotron-4-340b-instruct".into(),
+    ///         "minimaxai/minimax-m2.7".into(),
 	///     ])
 	///     .build();
 	/// ```
@@ -385,9 +385,8 @@ pub fn create_racing_scenario(model_count: usize, parallel: usize) -> Arc<AppSta
 /// );
 /// ```
 pub fn create_model_with_params(models: Vec<&str>, max_tokens: i32) -> Arc<AppState> {
-	let mut builder = MockAppStateBuilder::new().with_custom_racing_models(
-		models.iter().map(|s| s.to_string()).collect(),
-	);
+    let mut builder = MockAppStateBuilder::new()
+        .with_custom_racing_models(models.iter().map(|s| s.to_string()).collect());
 
 	for model in models {
 		builder = builder.with_model_param(
@@ -442,9 +441,7 @@ mod tests {
 
 	#[test]
 	fn test_mock_app_state_builder_racing_models() {
-		let state = MockAppStateBuilder::new()
-			.with_racing_models(5)
-			.build();
+        let state = MockAppStateBuilder::new().with_racing_models(5).build();
 		assert_eq!(state.racing_models.len(), 5);
 	}
 
@@ -490,9 +487,7 @@ mod tests {
 	// Test 11: Builder with empty keys
 	#[test]
 	fn test_builder_with_empty_keys() {
-		let state = MockAppStateBuilder::new()
-			.with_custom_keys(vec![])
-			.build();
+        let state = MockAppStateBuilder::new().with_custom_keys(vec![]).build();
 		assert_eq!(state.pool.len(), 0);
 	}
 
@@ -519,10 +514,13 @@ mod tests {
 			.with_racing_max_parallel(4)
 			.with_racing_timeout_ms(10000)
 			.with_racing_strategy("latency-based")
-			.with_model_param("test-model", ModelParams {
+            .with_model_param(
+                "test-model",
+                ModelParams {
 				max_tokens: Some(2048),
 				..Default::default()
-			})
+                },
+            )
 			.build();
 		assert_eq!(state.pool.len(), 5);
 		assert_eq!(state.racing_models.len(), 3);

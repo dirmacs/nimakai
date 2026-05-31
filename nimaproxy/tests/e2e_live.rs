@@ -5,13 +5,26 @@ use nimaproxy::AppState;
 use std::sync::Arc;
 
 const NVIDIA_API_BASE: &str = "https://integrate.api.nvidia.com";
+const LIVE_MODEL_A: &str = "minimaxai/minimax-m2.7";
+const LIVE_MODEL_B: &str = "moonshotai/kimi-k2.6";
+const LIVE_MODEL_C: &str = "z-ai/glm-5.1";
 
 fn get_test_keys() -> Vec<(String, String)> {
-    vec![
-        ("nvapi-YOUR_FIRST_KEY_HERE".to_string(), "key1".to_string()),
-        ("nvapi-YOUR_SECOND_KEY_HERE".to_string(), "key2".to_string()),
-        ("nvapi-YOUR_THIRD_KEY_HERE".to_string(), "key3".to_string()),
-    ]
+    let keys: Vec<String> = std::env::var("NVIDIA_API_KEY")
+        .unwrap_or_default()
+        .split(',')
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+
+    if keys.is_empty() {
+        vec![("nvapi-YOUR_FIRST_KEY_HERE".to_string(), "key-0".to_string())]
+    } else {
+        keys.into_iter()
+            .enumerate()
+            .map(|(i, k)| (k, format!("key-{}", i)))
+            .collect()
+    }
 }
 
 fn make_state() -> Arc<AppState> {
@@ -28,10 +41,7 @@ fn make_state() -> Arc<AppState> {
         NVIDIA_API_BASE.to_string(),
         None,
         ModelStatsStore::new(3000.0),
-        vec![
-            "minimaxai/minimax-m2.5".to_string(),
-            "moonshotai/kimi-k2.5".to_string(),
-        ],
+        vec![LIVE_MODEL_A.to_string(), LIVE_MODEL_B.to_string()],
         5,
         20000,
         "complete".to_string(),
@@ -75,8 +85,9 @@ async fn test_e2e_health_returns_ok() {
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     assert_eq!(json["status"], "UP");
-    assert_eq!(json["keys_total"], 3);
-    assert_eq!(json["keys_active"], 3);
+    let expected_keys = get_test_keys().len();
+    assert_eq!(json["keys_total"], expected_keys);
+    assert_eq!(json["keys_active"], expected_keys);
 }
 
 #[tokio::test]
@@ -100,71 +111,78 @@ async fn test_e2e_models_endpoint_reachable() {
 #[tokio::test]
 async fn test_e2e_key_rotation_round_robin() {
     let state = make_state();
-    
+
     let (_key1, idx1) = state.pool.next_key().unwrap();
     let (_key2, idx2) = state.pool.next_key().unwrap();
-    
-    assert_ne!(idx1, idx2);
-    // Keys in get_test_keys() are redacted placeholders — only verify round-robin rotation.
+
+    if state.pool.len() > 1 {
+        assert_ne!(idx1, idx2);
+    } else {
+        assert_eq!(idx1, idx2);
+    }
 }
 
 #[tokio::test]
 async fn test_e2e_stats_endpoint() {
     let state = make_state();
-    
+
     state.model_stats.record("test-model", 150.0, true);
     state.model_stats.record("test-model", 200.0, true);
-    
+
     let resp = nimaproxy::proxy::stats(axum::extract::State(state.clone())).await;
-    
+
     let response = resp.into_response();
     let (_parts, body) = response.into_parts();
-    
+
     let body_bytes = axum::body::to_bytes(body, 4096).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    
+
     let models = json["models"].as_array().unwrap();
-    assert!(!models.is_empty(), "stats should have recorded some model data");
+    assert!(
+        !models.is_empty(),
+        "stats should have recorded some model data"
+    );
     assert_eq!(models[0]["model"], "test-model");
 }
 
 #[tokio::test]
 async fn test_e2e_key_pool_status() {
     let state = make_state();
-    
-    let statuses = state.pool.status();
-    assert_eq!(statuses.len(), 3);
 
-    assert_eq!(statuses[0].label, "key1");
-    assert_eq!(statuses[1].label, "key2");
-    assert_eq!(statuses[2].label, "key3");
-    
+    let statuses = state.pool.status();
+    assert!(!statuses.is_empty());
+
+    assert_eq!(statuses[0].label, "key-0");
+
     state.pool.mark_rate_limited(0, 60);
-    
+
     let statuses_after = state.pool.status();
     assert!(!statuses_after[0].active);
-    assert!(statuses_after[1].active);
+    if statuses_after.len() > 1 {
+        assert!(statuses_after[1].active);
+    }
 }
 
 #[tokio::test]
 async fn test_e2e_chat_via_proxy() {
     let state = make_state();
-    
-    state.model_stats.record("nvidia/z-ai/glm4.7", 500.0, true);
-    
+
+    state.model_stats.record(LIVE_MODEL_C, 500.0, true);
+
     let body = serde_json::json!({
-        "model": "nvidia/z-ai/glm4.7",
+        "model": LIVE_MODEL_C,
         "messages": [{"role": "user", "content": "Say 'test' in one word."}],
         "max_tokens": 10,
         "temperature": 0.0
     });
-    
+
     let resp = nimaproxy::proxy::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
-    
+    )
+    .await;
+
     let response = resp.into_response();
     let (parts, body) = response.into_parts();
     let status_code = parts.status.as_u16();
@@ -176,8 +194,16 @@ async fn test_e2e_chat_via_proxy() {
         eprintln!("[e2e] error body: {}", String::from_utf8_lossy(&body_bytes));
     }
 
-    assert!(status_code == 200 || status_code == 400 || status_code == 429 || status_code == 401 || status_code == 500 || status_code == 404,
-           "got status {}, expected 200/400/429/401/500/404", status_code);
+    assert!(
+        status_code == 200
+            || status_code == 400
+            || status_code == 429
+            || status_code == 401
+            || status_code == 500
+            || status_code == 404,
+        "got status {}, expected 200/400/429/401/500/404",
+        status_code
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +214,7 @@ async fn test_e2e_chat_via_proxy() {
 async fn test_e2e_racing_uses_preallocated_keys() {
     let state = make_state();
     let body = serde_json::json!({
-        "model": "z-ai/glm4.7",
+        "model": LIVE_MODEL_A,
         "messages": [{"role": "user", "content": "Reply with exactly one word: hello"}],
         "max_tokens": 10,
         "temperature": 0.0
@@ -198,7 +224,8 @@ async fn test_e2e_racing_uses_preallocated_keys() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
 
     let response = resp.into_response();
     let (parts, body) = response.into_parts();
@@ -207,20 +234,37 @@ async fn test_e2e_racing_uses_preallocated_keys() {
     if status_code == 200 {
         let body_bytes = axum::body::to_bytes(body, 65536).await.unwrap();
         let content = String::from_utf8_lossy(&body_bytes);
-        eprintln!("[racing] status=200, body_preview={}", &content[..content.len().min(200)]);
-        assert!(content.contains("z-ai/glm4.7") || content.contains("choices"), "should contain model reference or choices");
+        eprintln!(
+            "[racing] status=200, body_preview={}",
+            &content[..content.len().min(200)]
+        );
+        assert!(
+            content.contains(LIVE_MODEL_A) || content.contains("choices"),
+            "should contain model reference or choices"
+        );
     } else {
-        eprintln!("[racing] got status {}, racing may not be triggered", status_code);
+        eprintln!(
+            "[racing] got status {}, racing may not be triggered",
+            status_code
+        );
     }
 
-    assert!(status_code == 200 || status_code == 400 || status_code == 401 || status_code == 429 || status_code == 500 || status_code == 502 || status_code == 503);
+    assert!(
+        status_code == 200
+            || status_code == 400
+            || status_code == 401
+            || status_code == 429
+            || status_code == 500
+            || status_code == 502
+            || status_code == 503
+    );
 }
 
 #[tokio::test]
 async fn test_e2e_racing_responds_with_key_label_header() {
     let state = make_state_no_racing();
     let body = serde_json::json!({
-        "model": "minimaxai/minimax-m2.5",
+        "model": LIVE_MODEL_A,
         "messages": [{"role": "user", "content": "Say 'ping' in one word"}],
         "max_tokens": 5,
         "temperature": 0.0
@@ -230,7 +274,8 @@ async fn test_e2e_racing_responds_with_key_label_header() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
 
     let response = resp.into_response();
     let parts = response.into_parts().0;
@@ -238,23 +283,27 @@ async fn test_e2e_racing_responds_with_key_label_header() {
 
     // Skip if API is unavailable (429 rate limit or 502 gateway error)
     if status == 429 || status == 502 {
-        eprintln!("[racing] skipping header check - API unavailable (status={})", status);
+        eprintln!(
+            "[racing] skipping header check - API unavailable (status={})",
+            status
+        );
         return;
     }
 
     let key_label = parts.headers.get("x-key-label");
     eprintln!("[racing] x-key-label header: {:?}", key_label);
-    assert!(key_label.is_some(), "response should include x-key-label header for tracing (status={})", status);
+    assert!(
+        key_label.is_some(),
+        "response should include x-key-label header for tracing (status={})",
+        status
+    );
 }
 
 #[tokio::test]
 async fn test_e2e_racing_latency_comparison() {
     let state = make_state();
 
-    let models_to_test = vec![
-        "minimaxai/minimax-m2.5",
-        "moonshotai/kimi-k2.5",
-    ];
+    let models_to_test = vec![LIVE_MODEL_A, LIVE_MODEL_B];
 
     let mut results: Vec<(String, Option<u64>, u16)> = vec![];
 
@@ -271,12 +320,16 @@ async fn test_e2e_racing_latency_comparison() {
             axum::extract::State(state.clone()),
             axum::http::HeaderMap::new(),
             bytes::Bytes::from(body.to_string()),
-        ).await;
+        )
+        .await;
 
         let elapsed_ms = t0.elapsed().as_millis() as u64;
         let status_code = resp.into_response().into_parts().0.status.as_u16();
 
-        eprintln!("[racing-latency] model={} status={} elapsed={}ms", model, status_code, elapsed_ms);
+        eprintln!(
+            "[racing-latency] model={} status={} elapsed={}ms",
+            model, status_code, elapsed_ms
+        );
         results.push((model.to_string(), Some(elapsed_ms), status_code));
     }
 
@@ -284,27 +337,60 @@ async fn test_e2e_racing_latency_comparison() {
     // Failures may indicate: expired keys, network issues, or model unavailability.
     // At least one model should succeed under normal conditions.
     let successes: Vec<_> = results.iter().filter(|(_, _, sc)| *sc == 200).collect();
-    
+
     // Log results for debugging
-    eprintln!("[racing-latency] successes: {}/{}", successes.len(), results.len());
-    
+    eprintln!(
+        "[racing-latency] successes: {}/{}",
+        successes.len(),
+        results.len()
+    );
+
     // Only assert if we have API connectivity - skip assertion if all keys are exhausted
     // This allows the test to pass in CI environments without valid keys
-    if results.iter().any(|(_, _, sc)| *sc != 401 && *sc != 429 && *sc != 502) {
-        assert!(!successes.is_empty(), "at least one model should succeed (results: {:?})", results);
+    if results
+        .iter()
+        .any(|(_, _, sc)| *sc != 401 && *sc != 429 && *sc != 502)
+    {
+        assert!(
+            !successes.is_empty(),
+            "at least one model should succeed (results: {:?})",
+            results
+        );
     } else {
-        eprintln!("[racing-latency] skipping assertion - all requests returned 429/502 (API unavailable)");
+        eprintln!(
+            "[racing-latency] skipping assertion - all requests returned 429/502 (API unavailable)"
+        );
     }
 
     if successes.len() >= 2 {
         let (m1, t1, _) = successes[0];
         let (m2, t2, _) = successes[1];
-        let winner_m = if t1.unwrap_or(u64::MAX) < t2.unwrap_or(u64::MAX) { m1 } else { m2 };
-        let winner_t = if t1.unwrap_or(u64::MAX) < t2.unwrap_or(u64::MAX) { t1 } else { t2 };
-        let loser_m = if t1.unwrap_or(u64::MAX) < t2.unwrap_or(u64::MAX) { m2 } else { m1 };
-        let loser_t = if t1.unwrap_or(u64::MAX) < t2.unwrap_or(u64::MAX) { t2 } else { t1 };
-        eprintln!("[racing-latency] winner: {} ({}ms) vs {} ({}ms)",
-            winner_m, winner_t.unwrap_or(0), loser_m, loser_t.unwrap_or(0)
+        let winner_m = if t1.unwrap_or(u64::MAX) < t2.unwrap_or(u64::MAX) {
+            m1
+        } else {
+            m2
+        };
+        let winner_t = if t1.unwrap_or(u64::MAX) < t2.unwrap_or(u64::MAX) {
+            t1
+        } else {
+            t2
+        };
+        let loser_m = if t1.unwrap_or(u64::MAX) < t2.unwrap_or(u64::MAX) {
+            m2
+        } else {
+            m1
+        };
+        let loser_t = if t1.unwrap_or(u64::MAX) < t2.unwrap_or(u64::MAX) {
+            t2
+        } else {
+            t1
+        };
+        eprintln!(
+            "[racing-latency] winner: {} ({}ms) vs {} ({}ms)",
+            winner_m,
+            winner_t.unwrap_or(0),
+            loser_m,
+            loser_t.unwrap_or(0)
         );
     }
 }
@@ -322,9 +408,16 @@ async fn test_e2e_racing_3keys_round_robin() {
     let i2 = k2.unwrap().1;
     let i3 = k3.unwrap().1;
 
-    let all_unique = [i1, i2, i3].iter().collect::<std::collections::HashSet<_>>().len() == 3;
+    let all_unique = [i1, i2, i3]
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        == 3;
     eprintln!("[racing-keys] round-robin indices: {} {} {}", i1, i2, i3);
-    assert!(all_unique, "3 real keys should all be different on first cycle");
+    assert!(
+        all_unique,
+        "3 real keys should all be different on first cycle"
+    );
 }
 
 #[tokio::test]
@@ -336,7 +429,7 @@ async fn test_e2e_racing_fails_gracefully_on_all_429() {
     }
 
     let body = serde_json::json!({
-        "model": "minimaxai/minimax-m2.5",
+        "model": LIVE_MODEL_A,
         "messages": [{"role": "user", "content": "test"}],
         "max_tokens": 5
     });
@@ -345,10 +438,15 @@ async fn test_e2e_racing_fails_gracefully_on_all_429() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
 
     let status = resp.into_response().into_parts().0.status;
-    assert_eq!(status.as_u16(), 429, "should return 429 when all keys are rate-limited");
+    assert_eq!(
+        status.as_u16(),
+        429,
+        "should return 429 when all keys are rate-limited"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -366,11 +464,16 @@ async fn test_e2e_racing_429_key_cooldown_persists() {
 
     let statuses = state.pool.status();
     assert!(!statuses[0].active, "key 0 must be in cooldown");
-    assert!(statuses[0].cooldown_secs_remaining > 0, "cooldown must be > 0");
+    assert!(
+        statuses[0].cooldown_secs_remaining > 0,
+        "cooldown must be > 0"
+    );
     assert!(statuses[1].active, "key 1 must still be active");
 
-    eprintln!("[e2e-429-cooldown] key 0 cooldown={}s, key 1 active={}",
-        statuses[0].cooldown_secs_remaining, statuses[1].active);
+    eprintln!(
+        "[e2e-429-cooldown] key 0 cooldown={}s, key 1 active={}",
+        statuses[0].cooldown_secs_remaining, statuses[1].active
+    );
 
     // Racing should now only use key 1 (and key 2 if available)
     let body = serde_json::json!({
@@ -384,18 +487,29 @@ async fn test_e2e_racing_429_key_cooldown_persists() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
 
     let response = resp.into_response();
     let (parts, _body) = response.into_parts();
     let status = parts.status.as_u16();
-    let key_label = parts.headers.get("x-key-label").and_then(|v| v.to_str().ok()).map(String::from);
+    let key_label = parts
+        .headers
+        .get("x-key-label")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
 
-    eprintln!("[e2e-429-cooldown] race status={} key_used={:?}", status, key_label);
+    eprintln!(
+        "[e2e-429-cooldown] race status={} key_used={:?}",
+        status, key_label
+    );
 
     // If key 0 was used despite cooldown, that's a bug
     if let Some(ref label) = key_label {
-        assert_ne!(label, "key1", "rate-limited key 'key1' (idx 0) must not be used by racing");
+        assert_ne!(
+            label, "key-0",
+            "rate-limited key 'key-0' (idx 0) must not be used by racing"
+        );
     }
 
     // Accept any non-500 result — key exhaustion or successful chat both acceptable
@@ -411,7 +525,7 @@ async fn test_e2e_invalid_assistant_message_not_propagated() {
     // This is the exact message shape that triggered the OMP crash:
     // assistant message with both content AND tool_calls (or content=None tool_calls=None)
     let body = serde_json::json!({
-        "model": "z-ai/glm4.7",
+        "model": LIVE_MODEL_C,
         "messages": [
             {"role": "user", "content": "call a tool"},
             // Assistant message with tool_calls but no content — sanitize_tool_calls sets content=null
@@ -435,7 +549,8 @@ async fn test_e2e_invalid_assistant_message_not_propagated() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
 
     let response = resp.into_response();
     let (parts, body) = response.into_parts();
@@ -443,7 +558,11 @@ async fn test_e2e_invalid_assistant_message_not_propagated() {
     let body_bytes = axum::body::to_bytes(body, 4096).await.unwrap_or_default();
     let body_str = String::from_utf8_lossy(&body_bytes);
 
-    eprintln!("[e2e-invalid-assistant] status={} body={}", status, &body_str[..body_str.len().min(300)]);
+    eprintln!(
+        "[e2e-invalid-assistant] status={} body={}",
+        status,
+        &body_str[..body_str.len().min(300)]
+    );
 
     // The proxy must NOT forward 400 "Invalid assistant message" directly to client.
     // Acceptable outcomes: 200 (retry succeeded), 429 (keys exhausted), 502 (all models failed),
@@ -475,24 +594,38 @@ async fn test_e2e_racing_returns_2xx_winner() {
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
-    ).await;
+    )
+    .await;
     let elapsed = t0.elapsed().as_millis();
 
     let response = resp.into_response();
     let (parts, body) = response.into_parts();
     let status = parts.status.as_u16();
-    let winner = parts.headers.get("x-key-label").and_then(|v| v.to_str().ok()).map(String::from);
+    let winner = parts
+        .headers
+        .get("x-key-label")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
     let body_bytes = axum::body::to_bytes(body, 16384).await.unwrap_or_default();
     let body_str = String::from_utf8_lossy(&body_bytes);
 
-    eprintln!("[e2e-racing-2xx-winner] status={} elapsed={}ms key={:?} body_preview={}",
-        status, elapsed, winner, &body_str[..body_str.len().min(200)]);
+    eprintln!(
+        "[e2e-racing-2xx-winner] status={} elapsed={}ms key={:?} body_preview={}",
+        status,
+        elapsed,
+        winner,
+        &body_str[..body_str.len().min(200)]
+    );
 
     // Racing must NEVER return a raw 4xx from NVIDIA
-    assert_ne!(status, 400, "racing forwarded NVIDIA 400 to client — status filtering broken");
+    assert_ne!(
+        status, 400,
+        "racing forwarded NVIDIA 400 to client — status filtering broken"
+    );
     // Accept 200, 429 (all keys exhausted), 502 (all models failed)
     assert!(
         status == 200 || status == 429 || status == 502 || status == 503 || status == 504,
-        "unexpected status {} from racing", status
+        "unexpected status {} from racing",
+        status
     );
 }

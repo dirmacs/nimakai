@@ -59,7 +59,7 @@ nimakai
 nimakai --once
 
 # Specific models only
-nimakai -m qwen/qwen3.5-122b-a10b,qwen/qwen3.5-397b-a17b
+nimakai -m stepfun-ai/step-3.7-flash,qwen/qwen3.5-397b-a17b
 
 # Sort by stability score
 nimakai --sort stability
@@ -330,10 +330,14 @@ cp nimaproxy.toml.example nimaproxy.toml
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "moonshotai/kimi-k2-instruct",
-  "qwen/qwen3.5-122b-a10b",
-  "mistralai/mistral-large-3-675b-instruct-2512",
-  "z-ai/glm4.7",
+  "deepseek-ai/deepseek-v4-pro",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.7",
 ]
 ```
 
@@ -345,19 +349,19 @@ When a request arrives with `"model": "auto"`, the proxy picks the best model fr
 [racing]
 enabled = true
 models = [
-  "minimaxai/minimax-m2.5",
-  "minimaxai/minimax-m2.7",
-  "qwen/qwen3.5-122b-a10b",
-  "qwen/qwen3.5-397b-a17b",
-  "nvidia/nemotron-3-super-120b-a12b",
-  "z-ai/glm4.7",
-  "z-ai/glm5",
+  "deepseek-ai/deepseek-v4-pro",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
-  "mistralai/mistral-large-3-675b-instruct-2512",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.7",
 ]
-max_parallel = 9
+max_parallel = 8
 timeout_ms = 15000
 strategy = "complete"
+```
 
 Fires N parallel requests to N models, returns first response. Trades N×token
 budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429

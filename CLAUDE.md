@@ -90,7 +90,7 @@ timeout_ms = 5000
 num_results = 100
 
 [profile.work]
-models = ["devstral-2-123b", "step-3.5-flash"]
+models = ["mistralai/mistral-medium-3.5-128b", "stepfun-ai/step-3.7-flash"]
 interval_ms = 2000
 ```
 
@@ -136,17 +136,30 @@ label = "production"
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "meta/llama-3.3-70b-instruct",
-  "qwen/qwen2.5-coder-32b-instruct",
-  "moonshotai/kimi-k2-instruct",
-  "mistralai/devstral-2-123b-instruct-2512",
+  "deepseek-ai/deepseek-v4-pro",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.7",
 ]
 
 [racing]
 enabled = true
-models = ["z-ai/glm4.7", "qwen/qwen3.5-397b-a17b", "mistralai/devstral-2-123b-instruct-2512"]
-max_parallel = 3
-timeout_ms = 8000
+models = [
+  "deepseek-ai/deepseek-v4-pro",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
+  "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m2.7",
+]
+max_parallel = 8
+timeout_ms = 15000
 strategy = "complete"
 ```
 

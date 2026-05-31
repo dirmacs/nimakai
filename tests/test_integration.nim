@@ -31,8 +31,8 @@ proc makeStats(id: string, pings: openArray[float],
 proc writeOmoFile(path: string, categories: JsonNode = nil) =
   var data = %*{
     "categories": {
-      "quick": {"model": "nvidia/llama-3.1-nemotron-nano-8b-v1"},
-      "deep": {"model": "nvidia/qwen3.5-397b-a17b"}
+      "quick": {"model": "nvidia/stepfun-ai/step-3.7-flash"},
+      "deep": {"model": "nvidia/qwen/qwen3.5-397b-a17b"}
     }
   }
   if categories != nil:
@@ -55,12 +55,12 @@ suite "full recommend pipeline":
 
     # Simulate benchmark results: fast model vs slow model
     var stats: seq[ModelStats] = @[]
-    # Make nemotron-nano slow
-    stats.add(makeStats("llama-3.1-nemotron-nano-8b-v1",
+    # Make the current quick model slow.
+    stats.add(makeStats("stepfun-ai/step-3.7-flash",
                         [2000.0, 2200.0, 1800.0]))
     # Make a fast alternative with catalog metadata
     for m in cat:
-      if m.id notin ["llama-3.1-nemotron-nano-8b-v1",
+      if m.id notin ["stepfun-ai/step-3.7-flash",
                      "qwen/qwen3.5-397b-a17b"]:
         stats.add(makeStats(m.id, [300.0, 350.0, 280.0]))
 
@@ -69,7 +69,7 @@ suite "full recommend pipeline":
                         [500.0, 550.0, 480.0]))
 
     let omo = OmoConfig(categories: @[
-      OmoCategory(name: "quick", model: "llama-3.1-nemotron-nano-8b-v1"),
+      OmoCategory(name: "quick", model: "stepfun-ai/step-3.7-flash"),
       OmoCategory(name: "deep", model: "qwen/qwen3.5-397b-a17b"),
     ])
 

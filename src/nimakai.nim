@@ -98,7 +98,7 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
   var round     = 0
   var pager     = cfg.pagination
   var filterSt  = cfg.filter
-  var cursorRow = 0  # 0-indexed cursor in the current visible+paged view
+  var cursorRow = 0  # 0-indexed cursor in the current filtered+sorted list
   let interactive = not cfg.once and not cfg.jsonOutput and isatty(0.cint) != 0
 
   # Sync proxy models at startup (non-blocking; graceful when proxy absent)
@@ -245,21 +245,13 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
                   cursorRow = s - 1
             of '\r', '\n':  # Enter — detail view
               let vis = filterStats(stats, filterSt.query)
-              if pager.enabled and pager.pageSize > 0:
-                let (s, _) = pageSlice(vis.len, pager.page, pager.pageSize)
-                let absRow = s + cursorRow
-                if absRow < vis.len:
-                  # Find index in stats
-                  for si, st in stats:
-                    if st.id == vis[absRow].id:
-                      detailIdx = si
-                      break
-              else:
-                if cursorRow < vis.len:
-                  for si, st in stats:
-                    if st.id == vis[cursorRow].id:
-                      detailIdx = si
-                      break
+              let absRow = selectedAbsoluteRow(cursorRow, pager, vis.len)
+              if absRow >= 0:
+                # Find index in stats
+                for si, st in stats:
+                  if st.id == vis[absRow].id:
+                    detailIdx = si
+                    break
               if detailIdx >= 0:
                 showDetail = true
             of 't', 'T':
@@ -271,14 +263,17 @@ proc runBenchmark(cfg: Config, cat: seq[ModelMeta], favorites: seq[string]) =
             of '<', '[':  # prev page
               if pager.enabled and pager.page > 0:
                 dec pager.page
-                cursorRow = 0
+                let vis = filterStats(stats, filterSt.query)
+                let (s, _) = pageSlice(vis.len, pager.page, pager.pageSize)
+                cursorRow = s
             of '>', ']':  # next page
               if pager.enabled:
                 let vis = filterStats(stats, filterSt.query)
                 let maxPage = pageCount(vis.len, pager.pageSize) - 1
                 if pager.page < maxPage:
                   inc pager.page
-                  cursorRow = 0
+                  let (s, _) = pageSlice(vis.len, pager.page, pager.pageSize)
+                  cursorRow = s
             of '/':
               filterSt.active = true
             of '\e':  # Esc: clear filter
@@ -752,6 +747,7 @@ proc main() =
 
     # Determine model list
     var models = cfg.models
+    var modelsFromDiscovery = false
     if cfg.useOpencode:
       let ocModels = parseOpenCodeConfig()
       models = @[]
@@ -767,15 +763,19 @@ proc main() =
       if fetchResult.apiError.len > 0:
         stderr.writeLine "\e[31mError fetching models: " & fetchResult.apiError & "\e[0m"
         quit(1)
-      # Use all fetched model IDs as the default list
-      models = fetchResult.allModels
+      # Use only chat-completions benchmark candidates as the default list.
+      models = fetchResult.benchmarkModels
+      modelsFromDiscovery = true
+      if not cfg.quiet and fetchResult.allModels.len > models.len:
+        let skipped = fetchResult.allModels.len - models.len
+        stderr.writeLine &"\e[90m  discovery: skipped {skipped} non-chat/non-benchmarkable model endpoints\e[0m"
 
     if models.len == 0:
       stderr.writeLine "\e[31mError: no models matched the filter\e[0m"
       stderr.writeLine "Use --models or --opencode to specify models"
       quit(1)
 
-    if not cfg.quiet:
+    if not cfg.quiet and not modelsFromDiscovery:
       validateModels(models, cat)
 
     var runCfg = cfg

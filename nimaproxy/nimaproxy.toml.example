@@ -44,13 +44,14 @@ label = "key4"
 # spike_threshold_ms = 3000
 #
 # models = [
-#   "moonshotai/kimi-k2-instruct",
-#   "qwen/qwen2.5-coder-32b-instruct",
-#   "mistralai/devstral-2-123b-instruct-2512",
-#   "meta/llama-3.3-70b-instruct",
-#   "mistralai/mistral-medium-3.5-128b",
-#   "deepseek-ai/deepseek-v4-flash",
 #   "deepseek-ai/deepseek-v4-pro",
+#   "deepseek-ai/deepseek-v4-flash",
+#   "mistralai/mistral-medium-3.5-128b",
+#   "z-ai/glm-5.1",
+#   "stepfun-ai/step-3.7-flash",
+#   "moonshotai/kimi-k2.6",
+#   "qwen/qwen3.5-397b-a17b",
+#   "minimaxai/minimax-m2.7",
 # ]
 
 # ── Model Racing (Speculative Execution) ──────────────────────────────────
@@ -62,17 +63,14 @@ label = "key4"
 # [racing]
 # enabled = true
 # models = [
-#   "moonshotai/kimi-k2",
-#   "minimaxai/minimax-m2.5",
-#   "qwen/qwen3-next-80b-a3b-thinking",
-#   "stepfun-ai/step-3.5-flash",
-#   "qwen/qwen3.5-122b-a10b",
-#   "qwen/qwen3-coder-480b-a35b-instruct",
-#   "google/gemma-3-27b-it",
-#   "qwen/qwen2.5-coder-32b-instruct",
-#   "mistralai/mistral-medium-3.5-128b",
-#   "deepseek-ai/deepseek-v4-flash",
 #   "deepseek-ai/deepseek-v4-pro",
+#   "deepseek-ai/deepseek-v4-flash",
+#   "mistralai/mistral-medium-3.5-128b",
+#   "z-ai/glm-5.1",
+#   "stepfun-ai/step-3.7-flash",
+#   "moonshotai/kimi-k2.6",
+#   "qwen/qwen3.5-397b-a17b",
+#   "minimaxai/minimax-m2.7",
 # ]
 # max_parallel = 8
 # timeout_ms = 15000

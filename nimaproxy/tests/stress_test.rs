@@ -1,9 +1,63 @@
 use std::time::Instant;
 
 const NUM_TURNS: usize = 25;
-const PROXY_URL: &str = "http://127.0.0.1:8082";
 
 const SYSTEM_PROMPT: &str = r#"You are a coding assistant. Answer briefly."#;
+
+fn proxy_url() -> String {
+    std::env::var("NIMAPROXY_STRESS_URL")
+        .or_else(|_| std::env::var("NIMAPROXY_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn assert_nimaproxy_target(client: &reqwest::blocking::Client, proxy_url: &str) {
+    let health_url = format!("{}/health", proxy_url);
+    let response = client.get(&health_url).send().unwrap_or_else(|e| {
+        panic!(
+            "stress test target is not reachable at {}: {}",
+            health_url, e
+        )
+    });
+
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    assert!(
+        status.is_success(),
+        "stress test target health check failed at {}: HTTP {} body={}",
+        health_url,
+        status,
+        body
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|e| {
+        panic!(
+            "stress test target at {} does not look like nimaproxy /health JSON: {} body={}",
+            health_url, e, body
+        )
+    });
+
+    assert_eq!(
+        json.get("status").and_then(|v| v.as_str()),
+        Some("UP"),
+        "stress test target at {} is not a healthy nimaproxy instance: {}",
+        health_url,
+        body
+    );
+    assert!(
+        json.get("keys_total").and_then(|v| v.as_u64()).unwrap_or(0) > 0,
+        "stress test target at {} has no configured keys: {}",
+        health_url,
+        body
+    );
+    assert!(
+        json.get("racing_enabled").and_then(|v| v.as_bool()) == Some(true),
+        "stress test requires racing_enabled=true at {}: {}",
+        health_url,
+        body
+    );
+}
 
 #[test]
 fn stress_test() {
@@ -16,19 +70,29 @@ fn stress_test() {
     println!("{}", sep);
     println!();
 
+    let proxy_url = proxy_url();
+    println!("Target: {}", proxy_url);
+
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("Failed to build HTTP client");
+
+    assert_nimaproxy_target(&client, &proxy_url);
 
     let mut total_requests = 0;
     let mut total_tokens = 0u64;
     let mut total_latency_ms = 0u64;
     let mut key_usage = std::collections::HashMap::new();
     let mut model_wins = std::collections::HashMap::new();
-    model_wins.insert("z-ai/glm4.7".to_string(), 0);
+    model_wins.insert("deepseek-ai/deepseek-v4-pro".to_string(), 0);
+    model_wins.insert("deepseek-ai/deepseek-v4-flash".to_string(), 0);
+    model_wins.insert("mistralai/mistral-medium-3.5-128b".to_string(), 0);
+    model_wins.insert("z-ai/glm-5.1".to_string(), 0);
+    model_wins.insert("stepfun-ai/step-3.7-flash".to_string(), 0);
+    model_wins.insert("moonshotai/kimi-k2.6".to_string(), 0);
     model_wins.insert("qwen/qwen3.5-397b-a17b".to_string(), 0);
-    model_wins.insert("mistralai/devstral-2-123b-instruct-2512".to_string(), 0);
+    model_wins.insert("minimaxai/minimax-m2.7".to_string(), 0);
     let mut errors = Vec::new();
 
     let conversation: Vec<&str> = vec![
@@ -64,7 +128,7 @@ fn stress_test() {
         let start = Instant::now();
 
         let request_body = serde_json::json!({
-            "model": "z-ai/glm4.7",
+            "model": "auto",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message}
@@ -80,7 +144,7 @@ fn stress_test() {
             attempt += 1;
             let body = serde_json::to_string(&request_body).unwrap();
             let resp = client
-                .post(&format!("{}/v1/chat/completions", PROXY_URL))
+                .post(&format!("{}/v1/chat/completions", proxy_url))
                 .header("Content-Type", "application/json")
                 .body(body)
                 .send();
@@ -212,11 +276,32 @@ fn stress_test() {
     );
     println!(
         "Racing:       {}",
-        if model_wins.len() > 1 {
+        if model_wins.iter().filter(|(_, count)| **count > 0).count() > 1 {
             "✓ YES"
         } else {
             "✗ NO"
         }
     );
     println!();
+
+    assert!(
+        total_requests > 0,
+        "stress test did not complete any successful requests; first errors: {:?}",
+        errors.iter().take(5).collect::<Vec<_>>()
+    );
+    assert!(
+        total_requests >= (NUM_TURNS / 2) as u64,
+        "stress test completed too few successful requests: {}/{}; first errors: {:?}",
+        total_requests,
+        NUM_TURNS,
+        errors.iter().take(5).collect::<Vec<_>>()
+    );
+    assert!(
+        !key_usage.is_empty(),
+        "stress test did not observe any x-key-label headers"
+    );
+    assert!(
+        model_wins.values().any(|count| *count > 0),
+        "stress test did not observe any successful racing model responses"
+    );
 }

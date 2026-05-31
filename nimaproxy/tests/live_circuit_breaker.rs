@@ -89,18 +89,14 @@ async fn test_live_circuit_breaker_degradation() {
 
 	eprintln!("[circuit-breaker] Testing degradation behavior");
 
-	let test_model = "meta/llama-3.1-8b-instruct";
+    let test_model = "qwen/qwen3.5-397b-a17b";
 	let mut statuses = Vec::new();
 
 	// Send several requests to establish baseline
 	for i in 0..5 {
 		let status = send_chat_request(&state, test_model, "Say 'hello'.").await;
 		statuses.push(status);
-		eprintln!(
-			"[circuit-breaker] Request {}: status={}",
-			i + 1,
-			status
-		);
+        eprintln!("[circuit-breaker] Request {}: status={}", i + 1, status);
 
 		std::thread::sleep(std::time::Duration::from_millis(500));
 	}
@@ -108,11 +104,10 @@ async fn test_live_circuit_breaker_degradation() {
 	// Record some stats manually to simulate degradation
 	// This simulates consecutive failures
 	for i in 0..5 {
-		state.model_stats.record(&format!("test-model-{}", i), 5000.0, false);
-		eprintln!(
-			"[circuit-breaker] Recorded failure for test-model-{}",
-			i
-		);
+        state
+            .model_stats
+            .record(&format!("test-model-{}", i), 5000.0, false);
+        eprintln!("[circuit-breaker] Recorded failure for test-model-{}", i);
 	}
 
 	// Check model stats
@@ -155,7 +150,7 @@ async fn test_live_circuit_breaker_recovery() {
 
 	eprintln!("[circuit-breaker] Testing recovery behavior");
 
-	let test_model = "meta/llama-3.1-8b-instruct";
+    let test_model = "qwen/qwen3.5-397b-a17b";
 
 	// First, establish a baseline with successful requests
 	let baseline_requests = 3;

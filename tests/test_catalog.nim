@@ -28,9 +28,9 @@ suite "BuiltinCatalog integrity":
 
 suite "lookupMeta":
   test "finds existing model":
-    let result = BuiltinCatalog.lookupMeta("z-ai/glm4.7")
+    let result = BuiltinCatalog.lookupMeta("z-ai/glm-5.1")
     check result.isSome
-    check result.get.name == "GLM 4.7"
+    check result.get.name == "GLM 5.1"
 
   test "returns none for unknown model":
     let result = BuiltinCatalog.lookupMeta("nonexistent/model")
@@ -46,7 +46,7 @@ suite "catalogModelIds":
   test "returns all IDs":
     let ids = catalogModelIds(BuiltinCatalog)
     check ids.len == BuiltinCatalog.len
-    check "z-ai/glm4.7" in ids
+    check "z-ai/glm-5.1" in ids
 
 suite "loadUserModels":
   test "loads models from a temp JSON file":
@@ -100,8 +100,8 @@ suite "loadUserModels":
     # Override an existing builtin model
     let data = %*[
       {
-        "id": "z-ai/glm4.7",
-        "name": "GLM 4.7 Custom",
+        "id": "z-ai/glm-5.1",
+        "name": "GLM 5.1 Custom",
         "sweScore": 45.0,
         "ctxSize": 32768,
       }
@@ -110,9 +110,9 @@ suite "loadUserModels":
     defer: removeFile(tmpPath)
 
     let cat = loadCatalog(tmpPath)
-    let meta = cat.lookupMeta("z-ai/glm4.7")
+    let meta = cat.lookupMeta("z-ai/glm-5.1")
     check meta.isSome
-    check meta.get.name == "GLM 4.7 Custom"
+    check meta.get.name == "GLM 5.1 Custom"
 
     check abs(meta.get.sweScore - 45.0) < 0.01
     check meta.get.ctxSize == 32768
@@ -120,9 +120,9 @@ suite "loadUserModels":
 suite "buildCatalogIndex":
   test "index lookup finds model":
     let index = buildCatalogIndex(BuiltinCatalog)
-    let meta = index.lookupMeta("z-ai/glm4.7")
+    let meta = index.lookupMeta("z-ai/glm-5.1")
     check meta.isSome
-    check meta.get.name == "GLM 4.7"
+    check meta.get.name == "GLM 5.1"
 
   test "index lookup returns none for missing model":
     let index = buildCatalogIndex(BuiltinCatalog)

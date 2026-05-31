@@ -45,7 +45,7 @@ fn skip_if_no_api_key() -> bool {
 
 async fn send_chat_request(state: &Arc<AppState>) -> u16 {
 	let body = serde_json::json!({
-		"model": "meta/llama-3.1-8b-instruct",
+        "model": "qwen/qwen3.5-397b-a17b",
 		"messages": [
 			{"role": "user", "content": "Say 'hello' in exactly one word."}
 		],
@@ -124,7 +124,10 @@ async fn test_live_key_rotation_under_load() {
 
 	// Verify key rotation is happening
 	let keys_used = key_usage.keys().len();
-	eprintln!("[key-rotation] Number of unique keys tracked: {}", keys_used);
+    eprintln!(
+        "[key-rotation] Number of unique keys tracked: {}",
+        keys_used
+    );
 
 	// At least some requests should succeed
 	assert!(
@@ -153,7 +156,10 @@ async fn test_live_key_rate_limit_recovery() {
 	let mut rate_limited = 0;
 	let mut successes = 0;
 
-	eprintln!("[rate-limit] Sending {} rapid requests to trigger rate limiting", rapid_requests);
+    eprintln!(
+        "[rate-limit] Sending {} rapid requests to trigger rate limiting",
+        rapid_requests
+    );
 
 	for i in 0..rapid_requests {
 		let status = send_chat_request(&state).await;
@@ -182,7 +188,10 @@ async fn test_live_key_rate_limit_recovery() {
 
 	// Check pool status
 	let pool_status = state.pool.status();
-	eprintln!("[rate-limit] Pool status after rapid requests: {:?}", pool_status);
+    eprintln!(
+        "[rate-limit] Pool status after rapid requests: {:?}",
+        pool_status
+    );
 
 	// If rate limited, wait and verify recovery
 	if rate_limited > 0 {

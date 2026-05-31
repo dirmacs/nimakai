@@ -8,11 +8,43 @@ type
     newModels*: seq[ModelMeta]
     existingModels*: seq[string]
     allModels*: seq[string]
+    benchmarkModels*: seq[string]
     apiError*: string
 
 proc containsIgnoreCase*(s: string, substr: string): bool =
   ## Check if substring exists (case-insensitive).
   toLowerAscii(s).contains(toLowerAscii(substr))
+
+proc isBenchmarkableModelId*(modelId: string): bool =
+  ## Return true for model IDs that are reasonable chat-completions benchmark candidates.
+  ##
+  ## NVIDIA's /v1/models endpoint also includes embedding, parsing, reward,
+  ## retrieval, safety, and detector endpoints. Those IDs can be listed but
+  ## should not be sent through the chat-completions latency benchmark.
+  let id = modelId.strip().toLowerAscii()
+  if id.len == 0:
+    return false
+
+  const blockedSubstrings = [
+    "arctic-embed", "bge-", "content-safety", "deplot", "detector",
+    "embed", "embedcode", "embedqa", "fuyu", "gliner", "guard",
+    "ising-calibration", "kosmos", "moderation", "nemoguard",
+    "nemoretriever", "nv-embed", "nvclip", "parse", "pii",
+    "rerank", "retriever", "reward", "safety", "topic-control",
+    "translate", "vila"
+  ]
+
+  for token in blockedSubstrings:
+    if token in id:
+      return false
+  true
+
+proc filterBenchmarkableModelIds*(modelIds: seq[string]): seq[string] =
+  ## Filter and deduplicate model IDs while preserving NVIDIA API order.
+  for modelId in modelIds:
+    let normalized = modelId.strip()
+    if normalized.isBenchmarkableModelId and normalized notin result:
+      result.add(normalized)
 
 proc inferCtxSizeFromModelId*(modelId: string): int =
   ## Estimate context window size from model ID.
@@ -71,8 +103,10 @@ proc fetchModelsFromAPI*(apiKey: string, timeout: int = 15): FetchResult =
         let modelId = item["id"].getStr()
         discoveredIds.add(modelId)
 
-        # Check if this is a new model
-        if modelId notin existingIds:
+        if modelId in existingIds:
+          result.existingModels.add(modelId)
+        # Check if this is a new benchmarkable model.
+        elif modelId.isBenchmarkableModelId:
           var meta: ModelMeta
           meta.id = modelId
           meta.name = item{"name"}.getStr(modelId)
@@ -97,8 +131,6 @@ proc fetchModelsFromAPI*(apiKey: string, timeout: int = 15): FetchResult =
           meta.outputLimit = 0
 
           result.newModels.add(meta)
-        else:
-          result.existingModels.add(modelId)
 
       # Deduplicate model IDs before assigning to allModels
       var uniqueIds: seq[string] = @[]
@@ -106,6 +138,7 @@ proc fetchModelsFromAPI*(apiKey: string, timeout: int = 15): FetchResult =
         if id notin uniqueIds:
           uniqueIds.add(id)
       result.allModels = uniqueIds
+      result.benchmarkModels = filterBenchmarkableModelIds(uniqueIds)
       client.close()
     else:
       client.close()
@@ -195,6 +228,7 @@ proc printFetchResults*(result: FetchResult, jsonOutput: bool = false) =
 
     let j = %*{
       "total_fetched": result.totalFetched,
+      "benchmarkable_models": result.benchmarkModels.len,
       "new_models": newModelsJson.len,
       "new_models_list": newModelsJson,
     }
@@ -204,6 +238,7 @@ proc printFetchResults*(result: FetchResult, jsonOutput: bool = false) =
     echo "\e[1m nimakai\e[0m v" & Version & "\e[0m \e[90mfetch results\e[0m"
     echo ""
     echo " \e[1mTotal models fetched:\e[0m " & $result.totalFetched
+    echo " \e[1mBenchmarkable models:\e[0m " & $result.benchmarkModels.len
     echo " \e[1mNew models found:\e[0m " & $result.newModels.len
     echo ""
 

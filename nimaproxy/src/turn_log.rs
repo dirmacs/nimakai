@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write, BufWriter};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -22,61 +22,61 @@ pub struct MessageLog {
 pub struct TurnLog {
     /// ISO8601 timestamp
     pub timestamp: DateTime<Utc>,
-    
+
     /// Request ID (UUID if provided, else generated)
     pub request_id: Option<String>,
-    
+
     /// Model that was requested
     pub requested_model: String,
-    
+
     /// Actual model that responded (after routing)
     pub responding_model: String,
-    
+
     /// Time to first byte (ms)
     pub latency_ms: u64,
-    
+
     /// Whether the request succeeded
     pub success: bool,
-    
+
     /// HTTP status code
     pub status_code: u16,
-    
+
     /// Number of messages in request
     pub request_message_count: usize,
-    
+
     /// Number of messages in response  
     pub response_message_count: usize,
-    
+
     /// Total tokens in request (if available)
     pub request_tokens: Option<u32>,
-    
+
     /// Total tokens in response (if available)
     pub response_tokens: Option<u32>,
-    
+
     /// Whether tool calls were present
     pub has_tool_calls: bool,
-    
+
     /// Tool call count
     pub tool_call_count: usize,
-    
+
     /// Error message if failed
     pub error: Option<String>,
-    
+
     /// Key label used (if available)
     pub key_label: Option<String>,
-    
+
     /// Whether this was a racing request
     pub is_racing: bool,
-    
+
     /// Racing context: how many models were raced
     pub racing_models_count: Option<usize>,
-    
+
     /// Racing context: did this model win the race?
     pub racing_winner: Option<bool>,
-    
+
     /// Full request messages (redacted if needed)
     pub request_messages: Vec<MessageLog>,
-    
+
     /// Response message (first choice only)
     pub response_message: Option<MessageLog>,
 }
@@ -134,71 +134,71 @@ impl TurnLogger {
             path: path.to_string(),
             enabled,
         };
-        
+
         if enabled {
             logger.open_file()?;
         }
-        
+
         Ok(logger)
     }
-    
+
     fn open_file(&self) -> io::Result<()> {
         // Create parent directory if needed
         if let Some(parent) = Path::new(&self.path).parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        
+
         *self.writer.lock().unwrap() = Some(BufWriter::new(file));
         Ok(())
     }
-    
+
     pub fn log(&self, turn: &TurnLog) -> io::Result<()> {
         if !self.enabled {
             return Ok(());
         }
-        
+
         let mut writer_guard = self.writer.lock().unwrap();
-        
+
         // Reopen if needed (e.g., after rotation)
         if writer_guard.is_none() {
             self.open_file()?;
             writer_guard = self.writer.lock().unwrap();
         }
-        
+
         if let Some(writer) = writer_guard.as_mut() {
             serde_json::to_writer(&mut *writer, turn)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
         }
-        
+
         Ok(())
     }
-    
+
     pub fn rotate(&self) -> io::Result<()> {
         // Close current file
         {
             let mut writer_guard = self.writer.lock().unwrap();
             *writer_guard = None;
         }
-        
+
         // Rotate file (add timestamp suffix)
         let path = Path::new(&self.path);
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
         let rotated_path = format!("{}.{}", path.display(), timestamp);
-        
+
         if path.exists() {
             std::fs::rename(path, &rotated_path)?;
         }
-        
+
         // Open fresh file
         self.open_file()
     }
-    
+
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -230,23 +230,21 @@ pub fn with_logger<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&TurnLogger) -> R,
 {
-    unsafe {
-        GLOBAL_LOGGER.as_ref().map(|logger| f(logger))
-    }
+    unsafe { GLOBAL_LOGGER.as_ref().map(|logger| f(logger)) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use tempfile::NamedTempFile;
     use std::io::BufRead;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_turn_log_creation() {
         let turn = TurnLog::new(
             "auto".to_string(),
-            "mistralai/devstral-2-123b".to_string(),
+            "mistralai/mistral-medium-3.5-128b".to_string(),
             742,
             true,
             200,
@@ -257,9 +255,9 @@ mod tests {
             Some("test".to_string()),
             true,
         );
-        
+
         assert_eq!(turn.requested_model, "auto");
-        assert_eq!(turn.responding_model, "mistralai/devstral-2-123b");
+        assert_eq!(turn.responding_model, "mistralai/mistral-medium-3.5-128b");
         assert_eq!(turn.latency_ms, 742);
         assert!(turn.success);
         assert!(!turn.has_tool_calls);
@@ -280,7 +278,7 @@ mod tests {
             None,
             false,
         );
-        
+
         turn.request_messages = vec![
             MessageLog {
                 role: "user".to_string(),
@@ -295,14 +293,14 @@ mod tests {
                 tool_calls: None,
             },
         ];
-        
+
         turn.response_message = Some(MessageLog {
             role: "assistant".to_string(),
             content: "How can I help?".to_string(),
             tool_call_id: None,
             tool_calls: None,
         });
-        
+
         assert_eq!(turn.request_messages.len(), 2);
         assert_eq!(turn.request_messages[0].role, "user");
         assert!(turn.response_message.is_some());
@@ -329,7 +327,7 @@ mod tests {
             Some("key1".to_string()),
             false,
         );
-        
+
         let json = serde_json::to_string(&turn).unwrap();
         assert!(json.contains("test-model"));
         assert!(json.contains("requested_model"));

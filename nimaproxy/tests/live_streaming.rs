@@ -60,7 +60,7 @@ async fn test_live_streaming_chunked_response() {
 
 	// Request streaming with a longer response to ensure chunks
 	let body = serde_json::json!({
-		"model": "meta/llama-3.1-8b-instruct",
+        "model": "qwen/qwen3.5-397b-a17b",
 		"messages": [
 			{"role": "user", "content": "Count from 1 to 5, saying each number on a new line."}
 		],
@@ -110,7 +110,10 @@ async fn test_live_streaming_chunked_response() {
 
 		if is_sse {
 			// Count SSE chunks
-			let chunk_count = content.lines().filter(|line| line.starts_with("data:")).count();
+            let chunk_count = content
+                .lines()
+                .filter(|line| line.starts_with("data:"))
+                .count();
 			eprintln!("[streaming] Found {} SSE data chunks", chunk_count);
 
 			// Verify SSE structure
@@ -166,7 +169,7 @@ async fn test_live_streaming_early_termination() {
 
 	// Request with streaming
 	let body = serde_json::json!({
-		"model": "meta/llama-3.1-8b-instruct",
+        "model": "qwen/qwen3.5-397b-a17b",
 		"messages": [
 			{"role": "user", "content": "Write a short story about a robot."}
 		],
@@ -190,21 +193,24 @@ async fn test_live_streaming_early_termination() {
 
 	let elapsed = start_time.elapsed();
 
-	eprintln!("[streaming] Early termination test - status: {}", status_code);
+    eprintln!(
+        "[streaming] Early termination test - status: {}",
+        status_code
+    );
 	eprintln!("[streaming] Response time: {:?}", elapsed);
 
 	// Read the body (simulating client reading until completion or cancellation)
 	let body_bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
 	let content = String::from_utf8_lossy(&body_bytes);
 
-	eprintln!(
-		"[streaming] Response length: {} bytes",
-		body_bytes.len()
-	);
+    eprintln!("[streaming] Response length: {} bytes", body_bytes.len());
 
 	if status_code == 200 {
 		// Count SSE events if applicable
-		let event_count = content.lines().filter(|line| line.starts_with("data:")).count();
+        let event_count = content
+            .lines()
+            .filter(|line| line.starts_with("data:"))
+            .count();
 		eprintln!("[streaming] SSE events received: {}", event_count);
 
 		// Check for [DONE] marker
