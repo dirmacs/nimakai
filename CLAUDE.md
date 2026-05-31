@@ -1,13 +1,13 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.0. 88-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.1. 88-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
 ```bash
 cd nimakai
 nimble build                       # → ./nimakai binary
-nimble test                        # runs 16 test suites
+nimble test                        # runs 16 isolated suites; test_proxy.nim is manual FFI
 
 # One-liner rebuild and run
 nimble build && ./nimakai
@@ -29,7 +29,7 @@ src/
     cli.nim        — CLI argument parsing with profiles
     metrics.nim    — Ring buffer, P50/P95/P99, jitter, stability score
     ping.nim       — HTTP ping + throughput measurement
-    catalog.nim    — 80-model catalog with SWE-bench scores
+    catalog.nim    — 88-model catalog with SWE-bench scores
     display.nim    — Table/JSON rendering, ANSI helpers, proxy footer
     config.nim     — Config file persistence + profile loading
     history.nim    — JSONL history persistence + trend detection
@@ -42,7 +42,7 @@ src/
     proxyffi.nim   — Nim FFI bindings to libnimaproxy.so
     rustffi.nim    — Rust FFI bridge for concurrent HTTP pinging
     update.nim     — Fetch and update model catalog from NVIDIA NIM API
-tests/          — 16 test files
+tests/          — 17 test files (16 in nimble test + manual FFI test_proxy.nim)
 ```
 
 ### nimaproxy (Rust)
@@ -63,7 +63,7 @@ nimaproxy/
     e2e_live.rs           — 14 live API tests
     stress_test.rs         — 1 live stress test
     coverage_gaps.rs       — 14 coverage gap tests
-    proxy_error_paths.rs   — 22 proxy error path tests
+    proxy_error_paths.rs   — 31 proxy error path tests
     live_chat.rs           — 5 live chat tests
     live_key_rotation.rs   — 2 key rotation tests
     live_routing.rs        — 2 routing tests
@@ -79,7 +79,7 @@ nimaproxy/
 - **SSL flag required** — build with `-d:ssl`; NIM endpoints are HTTPS
 - **Release build uses size optimization** — `--opt:size` in the build task; keep binary small
 - **`malebolgia` for parallelism** — used for concurrent model pinging; don't swap it out
-- **80-model catalog is hardcoded in `catalog.nim`** — update there when new NIM models launch
+- **88-model catalog is hardcoded in `catalog.nim`** — update there when new NIM models launch
 
 ## Config
 
@@ -167,7 +167,8 @@ Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested
 `chat_template_kwargs` (`thinking`, and Flash `reasoning_effort=high`);
 Mistral Medium 3.5 uses `temperature=0.7`, `top_p=1.0`, `reasoning_effort=high`;
-GLM 5.1 uses `top_p=1.0`, `seed=42`, and `stream=true` as the default; Qwen 3.5
+GLM 5.1 uses `top_p=1.0` and `seed=42`; its NVIDIA snippet streams, but
+nimaproxy requires callers to explicitly request `"stream": true`. Qwen 3.5
 397B uses `temperature=0.6`, `top_k=20`, `presence_penalty=0`,
 `repetition_penalty=1`; MiniMax M2.7 uses `max_tokens=8192`.
 

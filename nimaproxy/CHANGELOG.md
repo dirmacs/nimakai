@@ -1,5 +1,22 @@
 # Changelog
 
+All notable changes to nimaproxy will be documented in this file.
+
+## [0.15.1] - 2026-05-31
+
+### Fixed
+
+- **Stream semantics**: `stream=true` from NVIDIA catalog snippets is retained for catalog fidelity but no longer forces JSON callers into SSE mode.
+- **Direct request timeout**: Non-racing chat requests now honor configured dynamic upstream timeouts and return 504 on timeout.
+- **Racing candidate fallback**: Healthy candidates are preferred; degraded latency/failure candidates backfill only when healthy capacity is insufficient.
+- **Racing 429 handling**: Losing 429 racers do not globally cool keys when another model wins; all-key/all-race rate-limit cases return 429.
+
+### Changed
+
+- Version bump: 0.13.7 → 0.15.1.
+- Updated docs and examples for the current eight-model pool and build.nvidia.com per-model defaults.
+- Current test counts: 251 lib, 45 integration, 31 proxy_error_paths, 14 coverage_gaps, 14 e2e_live, 22 live suite tests, and 1 stress test.
+
 ## [0.13.7] - 2026-04-27
 
 ### Fixed
@@ -64,8 +81,6 @@
 - `fix_message_ordering` inserts `{"role":"assistant","content":null}` between tool→user
   transitions (content must be null, not empty string, per NVIDIA requirements)
 - Deployed as production binary (systemd service)
-
-All notable changes to nimaproxy will be documented in this file.
 
 ## [0.13.1] - 2026-04-25
 

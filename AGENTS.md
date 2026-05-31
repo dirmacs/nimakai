@@ -1,12 +1,12 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.0. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.1. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.0 includes critical fixes for NVIDIA NIM assistant message validation and OMP/Pawan integration.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.1 includes NVIDIA catalog defaults, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
 
-## FFI Integration (v0.15.0)
+## FFI Integration (v0.15+)
 
-nimakai v0.15.0 embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
+nimakai embeds nimaproxy via FFI. The Nim CLI can start/stop/query the proxy directly:
 
 ```bash
 nimakai proxy start --proxy-config /path/to/nimaproxy.toml --proxy-port 8080
@@ -29,13 +29,14 @@ src/
     ping.nim      — HTTP ping: timed GET to NIM health endpoint, parse resp.code.int
     metrics.nim   — Ring buffer (last 100 samples), P50/P95/P99, jitter (stddev),
                     stability score 0–100 = composite of P95 + jitter + spike rate + uptime
-    catalog.nim   — 80-model catalog: model IDs, context windows
+    catalog.nim   — 88-model catalog: model IDs, context windows
     display.nim   — ncurses-style terminal table: live refresh, ANSI colors per health state
     config.nim    — Load nimakai.cfg, parse --profile flag, profile variable overrides
     recommend.nim — Score-based recommendation: given task type → best available model
     discovery.nim — discoverModels() via NVIDIA API, diffCatalog() vs hardcoded catalog; syncFromProxy()
     history.nim   — Persist latency samples to disk, read/display trends with --days flag
-tests/          — 16 test files, one per module (test_metrics.nim, test_catalog.nim, etc.)
+tests/          — 17 test files; `nimble test` runs 16 isolated suites, while
+                  test_proxy.nim is a manual FFI/service suite
 ```
 
 ### nimaproxy (Rust)
@@ -59,7 +60,7 @@ nimaproxy/
     e2e_live.rs            14 E2E tests with real NVIDIA API
     stress_test.rs         1 live stress test
     coverage_gaps.rs       14 coverage gap tests
-    proxy_error_paths.rs   22 proxy error path tests
+    proxy_error_paths.rs   31 proxy error path tests
     live_chat.rs           5 live chat tests
     live_key_rotation.rs   2 key rotation tests
     live_routing.rs        2 routing tests
@@ -120,7 +121,8 @@ Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested
 `chat_template_kwargs` (`thinking`, and Flash `reasoning_effort=high`);
 Mistral Medium 3.5 uses `temperature=0.7`, `top_p=1.0`, `reasoning_effort=high`;
-GLM 5.1 uses `top_p=1.0`, `seed=42`, and `stream=true` as the default; Qwen 3.5
+GLM 5.1 uses `top_p=1.0` and `seed=42`; its NVIDIA snippet streams, but
+nimaproxy requires callers to explicitly request `"stream": true`. Qwen 3.5
 397B uses `temperature=0.6`, `top_k=20`, `presence_penalty=0`,
 `repetition_penalty=1`; MiniMax M2.7 uses `max_tokens=8192`.
 
@@ -174,10 +176,18 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 
 ```bash
 ./nimakai recommend --task coding --format json
-# → {"primary": "nvidia/mistralai/mistral-medium-3.5-128b", "fallback": "stepfun-ai/step-3.7-flash"}
+# → {"primary": "mistralai/mistral-medium-3.5-128b", "fallback": "stepfun-ai/step-3.7-flash"}
 ```
 
-## nimaproxy v0.13.7 Critical Fixes (cumulative)
+## nimaproxy v0.15.1 Critical Fixes (cumulative)
+
+### Racing, Timeout, and Model Defaults
+
+- Applies build.nvidia.com per-model defaults for the current eight-model pool.
+- Treats `stream=true` as caller-controlled response mode, not a forced model hyperparameter.
+- Direct chat requests honor configured dynamic upstream timeouts and return 504 on timeout.
+- Racing excludes server-degraded/all-keys-failed models, but can backfill with least-bad degraded latency/failure candidates when healthy capacity is insufficient.
+- Losing 429 racers do not globally cool keys when another model wins; all-key/all-race rate-limit cases return 429.
 
 ### Assistant Message Validation
 

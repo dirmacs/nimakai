@@ -385,6 +385,68 @@ async fn test_proxy_with_model_params() {
 
     let body = serde_json::json!({
         "model": "test-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let _resp = chat_completions(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    mock.assert();
+}
+
+#[tokio::test]
+async fn test_proxy_model_params_do_not_enable_stream_when_omitted() {
+    use mockito::{Matcher, Server};
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .match_header("accept", "application/json")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "test-model",
+            "temperature": 0.5
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"id":"test","choices":[{"message":{"content":"hello"}}]}"#)
+        .expect_at_least(1)
+        .create();
+
+    let key_entries = vec![KeyEntry {
+        key: "test-key".to_string(),
+        label: Some("test".to_string()),
+    }];
+
+    let mut model_params = HashMap::new();
+    model_params.insert(
+        "test-model".to_string(),
+        ModelParams {
+            temperature: Some(0.5),
+            stream: Some(true),
+            ..Default::default()
+        },
+    );
+
+    let state = AppState::new(
+        key_entries,
+        server.url(),
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        3,
+        20000,
+        "complete".to_string(),
+        model_params,
+        ModelCompat::default(),
+    );
+
+    let body = serde_json::json!({
+        "model": "test-model",
         "messages": [{"role": "user", "content": "test"}]
     });
 
@@ -396,6 +458,64 @@ async fn test_proxy_with_model_params() {
     .await;
 
     mock.assert();
+}
+
+#[tokio::test]
+async fn test_direct_chat_request_uses_configured_timeout() {
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((_socket, _peer)) = listener.accept().await {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+
+    let key_entries = vec![KeyEntry {
+        key: "test-key".to_string(),
+        label: Some("test".to_string()),
+    }];
+    let state = AppState::new(
+        key_entries,
+        format!("http://{}", addr),
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        3,
+        50,
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+    );
+
+    let body = serde_json::json!({
+        "model": "slow-model",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    let elapsed = started.elapsed();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "direct request did not honor timeout quickly enough: {:?}",
+        elapsed
+    );
+
+    let snapshot = state.model_stats.snapshot();
+    let slow = snapshot.iter().find(|s| s.id == "slow-model").unwrap();
+    assert_eq!(slow.success, 0);
+    assert_eq!(slow.total, 1);
 }
 
 /// Test with ModelRouter for model selection
@@ -948,6 +1068,31 @@ fn make_racing_state_two_keys(api_url: String) -> Arc<AppState> {
     )
 }
 
+#[tokio::test]
+async fn test_racing_returns_429_when_all_keys_unavailable() {
+    let state = make_racing_state_two_keys("http://127.0.0.1:9".to_string());
+    state.pool.mark_rate_limited(0, 30);
+    state.pool.mark_rate_limited(1, 30);
+
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = nimaproxy::proxy::chat_completions(
+        axum::extract::State(state),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    let body = to_bytes(resp.into_body(), 1024).await.unwrap();
+    assert_eq!(&body[..], b"all API keys rate-limited");
+}
+
 /// Racing: when one model returns 400, the proxy must NOT forward it immediately.
 /// The race must exhaust all models; since the only model returns 400, we get BAD_GATEWAY.
 /// Critically: we do NOT get 400 propagated to the client.
@@ -1054,6 +1199,51 @@ async fn test_racing_429_marks_key_rate_limited() {
     // The cooldown should be around 30s (from Retry-After header)
     let cd = rate_limited[0].cooldown_secs_remaining;
     assert!(cd > 0 && cd <= 30, "cooldown should be ≤30s, got {}s", cd);
+}
+
+#[tokio::test]
+async fn test_racing_429_loser_does_not_globally_cool_key() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let _rate_limited = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "30")
+        .with_body(r#"{"error":{"message":"Rate limit exceeded for this model"}}"#)
+        .expect(1)
+        .create();
+    let _winner = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"id":"ok","model":"model-b","choices":[{"message":{"content":"ok"}}]}"#)
+        .expect(1)
+        .create();
+
+    let state = make_racing_state_two_keys(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = nimaproxy::proxy::chat_completions(
+        axum::extract::State(state.clone()),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let post = state.pool.status();
+    assert!(
+        post.iter().all(|s| s.active),
+        "a losing 429 racer must not globally cool keys when another model wins: {:?}",
+        post
+    );
 }
 
 /// Racing: one model returns 400, another returns 200 — the 200 must win.

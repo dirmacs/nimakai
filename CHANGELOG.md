@@ -2,6 +2,20 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.15.1] - 2026-05-31
+
+### Fixed
+
+- **nimaproxy stream semantics**: `stream=true` from NVIDIA catalog snippets no longer forces JSON clients into SSE mode; callers must opt into streaming explicitly.
+- **nimaproxy direct timeouts**: Non-racing chat requests now honor configured dynamic upstream timeouts and return 504 on timeout.
+- **nimaproxy racing fallback**: Racing keeps healthy candidates first, then backfills with least-bad degraded latency/failure candidates when healthy capacity is insufficient.
+- **nimaproxy racing 429 handling**: Losing 429 racers no longer globally cool API keys when another model wins; all-key/all-race rate-limit cases return 429.
+
+### Changed
+
+- Version bump: nimakai 0.15.0 → 0.15.1, nimaproxy 0.13.7 → 0.15.1.
+- Docs refreshed for the eight-model nimaproxy pool, current test counts, and caller-controlled streaming behavior.
+
 ## [0.15.0] - 2026-05-04
 
 ### Added
