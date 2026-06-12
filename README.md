@@ -15,7 +15,7 @@
 ---
 
 A focused, single-binary tool that continuously pings NVIDIA NIM models and
-reports latency metrics. Includes an 88-model catalog with SWE-bench scores,
+reports latency metrics. Includes a 90-model catalog with SWE-bench scores,
 recommendation engine for
 [oh-my-opencode](https://github.com/bkataru/oh-my-opencode)
 routing, watch mode with alerts, CI health checks, live model discovery, and
@@ -228,7 +228,7 @@ src/
     cli.nim                CLI argument parsing with profiles
     metrics.nim            Pure metric functions (avg, p50, p95, p99, jitter, stability)
     ping.nim               HTTP ping + throughput measurement
-    catalog.nim            88-model catalog with SWE-bench scores, O(1) index
+    catalog.nim            90-model catalog with SWE-bench scores, O(1) index
     display.nim            Table/JSON rendering, ANSI helpers
     config.nim             Config file persistence + profile loading
     history.nim            JSONL history persistence + trend detection
@@ -242,7 +242,7 @@ src/
     rustffi.nim    — Rust FFI bridge for concurrent HTTP pinging
     update.nim     — Fetch and update model catalog from NVIDIA NIM API
 tests/
-    16 isolated suites run by `nimble test` (343 tests total)
+    16 isolated suites run by `nimble test` (345 tests total)
     test_proxy.nim         Manual FFI/service tests; starts/stops nimaproxy
 
 ### nimaproxy (Rust)
@@ -317,12 +317,14 @@ strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
   "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
   "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
 ]
 ```
@@ -336,15 +338,17 @@ When a request arrives with `"model": "auto"`, the proxy picks the best model fr
 enabled = true
 models = [
   "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
   "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
 ]
-max_parallel = 8
+max_parallel = 10
 timeout_ms = 15000
 strategy = "complete"
 ```
@@ -360,12 +364,14 @@ fidelity, but the proxy streams only when the caller explicitly sends
 | Model | max_tokens | temperature | top_p | Extra |
 | --- | ---: | ---: | ---: | --- |
 | `deepseek-ai/deepseek-v4-pro` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=false` |
+| `nvidia/nemotron-3-ultra-550b-a55b` | 16384 | 1.0 | 0.95 | `reasoning_budget=16384`, `chat_template_kwargs.enable_thinking=true`; NVIDIA snippet streams, caller must opt in |
 | `deepseek-ai/deepseek-v4-flash` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=true`, `chat_template_kwargs.reasoning_effort=high` |
 | `mistralai/mistral-medium-3.5-128b` | 16384 | 0.7 | 1.0 | `reasoning_effort=high` |
 | `z-ai/glm-5.1` | 16384 | 1.0 | 1.0 | `seed=42`; NVIDIA snippet streams, caller must opt in |
 | `stepfun-ai/step-3.7-flash` | 16384 | 1.0 | 0.95 |  |
 | `moonshotai/kimi-k2.6` | 16384 | 1.0 | 1.0 |  |
 | `qwen/qwen3.5-397b-a17b` | 16384 | 0.6 | 0.95 | `top_k=20`, `presence_penalty=0`, `repetition_penalty=1` |
+| `minimaxai/minimax-m3` | 8192 | 1.0 | 0.95 | multimodal |
 | `minimaxai/minimax-m2.7` | 8192 | 1.0 | 0.95 |  |
 
 Fires N parallel requests to N models, returns first response. Trades N×token

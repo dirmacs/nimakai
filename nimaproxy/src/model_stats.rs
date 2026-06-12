@@ -152,7 +152,9 @@ impl ModelEntry {
     /// Calculate dynamic timeout for this model based on historical P95.
     /// Returns timeout_ms with buffer: p95 + max(2000ms, p95 * 0.5), capped at max_timeout.
     pub fn dynamic_timeout_ms(&self, max_timeout_ms: u64) -> u64 {
-        let p95 = self.p95_ms().unwrap_or(5000.0);
+        let Some(p95) = self.p95_ms() else {
+            return max_timeout_ms;
+        };
         let buffer = (p95 * 0.5).max(2000.0);
         let timeout = (p95 + buffer).min(max_timeout_ms as f64) as u64;
         timeout.max(1000) // minimum 1s timeout
@@ -951,6 +953,24 @@ mod getter_tests {
         // Should be based on p95 + buffer, but within max
         assert!(timeout >= 1000); // At least 1s minimum
         assert!(timeout <= max_timeout);
+    }
+
+    #[test]
+    fn test_get_model_timeout_uses_max_until_enough_samples() {
+        let store = ModelStatsStore::new(3000.0);
+        let max_timeout = 15000u64;
+
+        store.record("failure-only-model", max_timeout as f64, false);
+        assert_eq!(
+            store.get_model_timeout("failure-only-model", max_timeout),
+            max_timeout
+        );
+
+        store.record("one-success-model", 500.0, true);
+        assert_eq!(
+            store.get_model_timeout("one-success-model", max_timeout),
+            max_timeout
+        );
     }
 
     #[test]

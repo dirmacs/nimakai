@@ -2,6 +2,24 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.15.2] - 2026-06-12
+
+### Added
+
+- **Catalog and proxy pool refresh**: Added `nvidia/nemotron-3-ultra-550b-a55b`
+  and `minimaxai/minimax-m3` to the built-in catalog and nimaproxy routing/racing pools.
+- **Nemotron defaults**: Added `reasoning_budget=16384` and
+  `chat_template_kwargs.enable_thinking=true` support for NVIDIA catalog snippets.
+
+### Changed
+
+- Version bump: nimakai/nimaproxy 0.15.1 → 0.15.2.
+- Catalog count: 88 → 90; nimaproxy configured pool count: 8 → 10 with `max_parallel` raised to 10.
+
+### Fixed
+
+- **nimaproxy dynamic timeout warm-up**: Models with fewer than two successful latency samples now keep the configured max timeout instead of shrinking to the synthetic 7.5s fallback.
+
 ## [0.15.1] - 2026-05-31
 
 ### Fixed

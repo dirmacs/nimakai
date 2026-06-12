@@ -32,6 +32,20 @@ suite "lookupMeta":
     check result.isSome
     check result.get.name == "GLM 5.1"
 
+  test "finds Nemotron 3 Ultra with thinking metadata":
+    let result = BuiltinCatalog.lookupMeta("nvidia/nemotron-3-ultra-550b-a55b")
+    check result.isSome
+    check result.get.name == "Nemotron 3 Ultra 550B"
+    check result.get.thinking == true
+    check result.get.multimodal == false
+
+  test "finds MiniMax M3 with multimodal metadata":
+    let result = BuiltinCatalog.lookupMeta("minimaxai/minimax-m3")
+    check result.isSome
+    check result.get.name == "MiniMax M3"
+    check result.get.thinking == false
+    check result.get.multimodal == true
+
   test "returns none for unknown model":
     let result = BuiltinCatalog.lookupMeta("nonexistent/model")
     check result.isNone

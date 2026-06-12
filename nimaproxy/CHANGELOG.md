@@ -2,6 +2,22 @@
 
 All notable changes to nimaproxy will be documented in this file.
 
+## [0.15.2] - 2026-06-12
+
+### Added
+
+- Added `nvidia/nemotron-3-ultra-550b-a55b` and `minimaxai/minimax-m3` to routing and racing examples/configuration.
+- Added `reasoning_budget` parsing and upstream injection for Nemotron 3 Ultra.
+
+### Changed
+
+- Version bump: 0.15.1 → 0.15.2.
+- Configured pool count: 8 → 10 with `max_parallel` raised to 10.
+
+### Fixed
+
+- **Dynamic timeout warm-up**: Models with fewer than two successful latency samples now keep the configured max timeout instead of shrinking to the synthetic 7.5s fallback.
+
 ## [0.15.1] - 2026-05-31
 
 ### Fixed
