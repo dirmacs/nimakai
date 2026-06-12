@@ -1,8 +1,8 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.1. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.2. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.1 includes NVIDIA catalog defaults, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.2 includes the ten-model NVIDIA catalog-default pool, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
 
 ## FFI Integration (v0.15+)
 
@@ -29,7 +29,7 @@ src/
     ping.nim      — HTTP ping: timed GET to NIM health endpoint, parse resp.code.int
     metrics.nim   — Ring buffer (last 100 samples), P50/P95/P99, jitter (stddev),
                     stability score 0–100 = composite of P95 + jitter + spike rate + uptime
-    catalog.nim   — 88-model catalog: model IDs, context windows
+    catalog.nim   — 90-model catalog: model IDs, context windows
     display.nim   — ncurses-style terminal table: live refresh, ANSI colors per health state
     config.nim    — Load nimakai.cfg, parse --profile flag, profile variable overrides
     recommend.nim — Score-based recommendation: given task type → best available model
@@ -79,15 +79,17 @@ Trades N×token budget for min(P50 latency).
 enabled = true
 models = [
   "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
   "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
 ]
-max_parallel = 8
+max_parallel = 10
 ```
 
 ## Model Routing (V2)
@@ -105,26 +107,30 @@ strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
   "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
   "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
 ]
 ```
 
-Available racing models (current pool, 8 total): deepseek-ai/deepseek-v4-pro, deepseek-ai/deepseek-v4-flash, mistralai/mistral-medium-3.5-128b, z-ai/glm-5.1, stepfun-ai/step-3.7-flash, moonshotai/kimi-k2.6, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m2.7
+Available racing models (current pool, 10 total): deepseek-ai/deepseek-v4-pro, nvidia/nemotron-3-ultra-550b-a55b, deepseek-ai/deepseek-v4-flash, mistralai/mistral-medium-3.5-128b, z-ai/glm-5.1, stepfun-ai/step-3.7-flash, moonshotai/kimi-k2.6, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m3, minimaxai/minimax-m2.7
 
 Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested
 `chat_template_kwargs` (`thinking`, and Flash `reasoning_effort=high`);
+Nemotron 3 Ultra uses `temperature=1.0`, `top_p=0.95`, `max_tokens=16384`,
+`reasoning_budget=16384`, and `chat_template_kwargs.enable_thinking=true`;
 Mistral Medium 3.5 uses `temperature=0.7`, `top_p=1.0`, `reasoning_effort=high`;
 GLM 5.1 uses `top_p=1.0` and `seed=42`; its NVIDIA snippet streams, but
 nimaproxy requires callers to explicitly request `"stream": true`. Qwen 3.5
 397B uses `temperature=0.6`, `top_k=20`, `presence_penalty=0`,
-`repetition_penalty=1`; MiniMax M2.7 uses `max_tokens=8192`.
+`repetition_penalty=1`; MiniMax M3 and M2.7 use `max_tokens=8192`.
 
 ## Metrics Reference
 
@@ -179,13 +185,14 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 # → {"primary": "mistralai/mistral-medium-3.5-128b", "fallback": "stepfun-ai/step-3.7-flash"}
 ```
 
-## nimaproxy v0.15.1 Critical Fixes (cumulative)
+## nimaproxy v0.15.2 Critical Fixes (cumulative)
 
 ### Racing, Timeout, and Model Defaults
 
-- Applies build.nvidia.com per-model defaults for the current eight-model pool.
+- Applies build.nvidia.com per-model defaults for the current ten-model pool.
 - Treats `stream=true` as caller-controlled response mode, not a forced model hyperparameter.
 - Direct chat requests honor configured dynamic upstream timeouts and return 504 on timeout.
+- New or failure-only models keep the configured max timeout until enough latency history exists.
 - Racing excludes server-degraded/all-keys-failed models, but can backfill with least-bad degraded latency/failure candidates when healthy capacity is insufficient.
 - Losing 429 racers do not globally cool keys when another model wins; all-key/all-race rate-limit cases return 429.
 

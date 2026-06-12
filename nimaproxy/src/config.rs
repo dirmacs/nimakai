@@ -89,6 +89,7 @@ pub struct ModelParams {
     pub top_p: Option<f64>,
     pub top_k: Option<i32>,
     pub max_tokens: Option<i32>,
+    pub reasoning_budget: Option<i32>,
     pub stream: Option<bool>,
     /// Penalty for frequency of repeated tokens (reduces repetition)
     pub frequency_penalty: Option<f64>,
@@ -369,10 +370,11 @@ temperature = 0.7
 top_p = 0.95
 top_k = 40
 max_tokens = 16384
+reasoning_budget = 16384
 stream = false
 repetition_penalty = 1.0
 reasoning_effort = "high"
-chat_template_kwargs = { thinking = true }
+chat_template_kwargs = { thinking = true, enable_thinking = true }
 
 [model_params."nvidia/coder"]
 temperature = 0.3
@@ -390,10 +392,15 @@ max_tokens = 4096
         assert_eq!(llama.top_p, Some(0.95));
         assert_eq!(llama.top_k, Some(40));
         assert_eq!(llama.max_tokens, Some(16384));
+        assert_eq!(llama.reasoning_budget, Some(16384));
         assert_eq!(llama.stream, Some(false));
         assert_eq!(llama.repetition_penalty, Some(1.0));
         assert_eq!(llama.reasoning_effort, Some("high".to_string()));
         assert_eq!(llama.get("thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            llama.get("enable_thinking"),
+            Some(&serde_json::json!(true))
+        );
 
         let coder_params = config.get_model_params("nvidia/coder");
         assert!(coder_params.is_some());
@@ -450,6 +457,7 @@ temperature = 1.0
         assert_eq!(params.top_p, None);
         assert_eq!(params.top_k, None);
         assert_eq!(params.max_tokens, None);
+        assert_eq!(params.reasoning_budget, None);
         assert_eq!(params.stream, None);
         assert_eq!(params.repetition_penalty, None);
     }

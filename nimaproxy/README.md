@@ -63,12 +63,14 @@ strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
   "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
   "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
 ]
 
@@ -76,15 +78,17 @@ models = [
 enabled = true
 models = [
   "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
   "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
 ]
-max_parallel = 8
+max_parallel = 10
 timeout_ms = 15000
 strategy = "complete"
 ```
@@ -100,12 +104,14 @@ streams only when the caller explicitly sends `"stream": true`.
 | Model | max_tokens | temperature | top_p | Extra |
 | --- | ---: | ---: | ---: | --- |
 | `deepseek-ai/deepseek-v4-pro` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=false` |
+| `nvidia/nemotron-3-ultra-550b-a55b` | 16384 | 1.0 | 0.95 | `reasoning_budget=16384`, `chat_template_kwargs.enable_thinking=true`; NVIDIA snippet streams, caller must opt in |
 | `deepseek-ai/deepseek-v4-flash` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=true`, `chat_template_kwargs.reasoning_effort=high` |
 | `mistralai/mistral-medium-3.5-128b` | 16384 | 0.7 | 1.0 | `reasoning_effort=high` |
 | `z-ai/glm-5.1` | 16384 | 1.0 | 1.0 | `seed=42`; NVIDIA snippet streams, caller must opt in |
 | `stepfun-ai/step-3.7-flash` | 16384 | 1.0 | 0.95 |  |
 | `moonshotai/kimi-k2.6` | 16384 | 1.0 | 1.0 |  |
 | `qwen/qwen3.5-397b-a17b` | 16384 | 0.6 | 0.95 | `top_k=20`, `presence_penalty=0`, `repetition_penalty=1` |
+| `minimaxai/minimax-m3` | 8192 | 1.0 | 0.95 | multimodal |
 | `minimaxai/minimax-m2.7` | 8192 | 1.0 | 0.95 |  |
 
 ### Usage
@@ -180,18 +186,19 @@ cargo test --test live_tool_calls   # Live tool calls (7)
                                      # Total live tests: 22
 ```
 
-## Recent Changes (v0.15.1)
+## Recent Changes (v0.15.2)
 
 ### Fixed
 
 - **Direct request timeout**: Non-racing requests now honor the configured dynamic upstream timeout.
+- **Dynamic timeout warm-up**: New or failure-only models keep the configured max timeout until enough latency history exists.
 - **Racing capacity**: Degraded latency/failure candidates backfill races only when healthy capacity is insufficient.
 - **Racing 429 handling**: Losing 429 racers no longer globally cool API keys when another model wins; all-key/all-race 429 cases return 429.
 - **Stream semantics**: Catalog `stream=true` values no longer force JSON callers into SSE mode.
 
 ### Added
 
-- Build.nvidia.com per-model defaults for the eight-model nimaproxy pool.
+- Build.nvidia.com per-model defaults for the ten-model nimaproxy pool.
 
 See [CHANGELOG.md](CHANGELOG.md) for full history.
 

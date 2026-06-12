@@ -5,9 +5,11 @@ import std/[json, os, options, strutils, algorithm, tables]
 import ./types
 
 const BuiltinCatalog*: seq[ModelMeta] = @[
+  ModelMeta(id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra 550B", sweScore: 84.0, ctxSize: 131072, thinking: true, multimodal: false),
   ModelMeta(id: "deepseek-ai/deepseek-v4-pro", name: "DeepSeek V4 Pro", sweScore: 83.0, ctxSize: 16384, thinking: true, multimodal: false),
   ModelMeta(id: "mistralai/mistral-medium-3.5-128b", name: "Mistral Medium 3.5 128B", sweScore: 82.0, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "deepseek-ai/deepseek-v4-flash", name: "DeepSeek V4 Flash", sweScore: 81.5, ctxSize: 16384, thinking: true, multimodal: false),
+  ModelMeta(id: "minimaxai/minimax-m3", name: "MiniMax M3", sweScore: 79.5, ctxSize: 204800, thinking: false, multimodal: true),
   ModelMeta(id: "minimaxai/minimax-m2.7", name: "MiniMax M2.7", sweScore: 79.0, ctxSize: 204800, thinking: false, multimodal: false),
   ModelMeta(id: "z-ai/glm-5.1", name: "GLM 5.1", sweScore: 77.5, ctxSize: 131072, thinking: false, multimodal: false),
   ModelMeta(id: "moonshotai/kimi-k2.5", name: "Kimi K2.5", sweScore: 76.8, ctxSize: 131072, thinking: true, multimodal: true),

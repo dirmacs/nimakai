@@ -1,6 +1,6 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.1. 88-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.2. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
@@ -29,7 +29,7 @@ src/
     cli.nim        — CLI argument parsing with profiles
     metrics.nim    — Ring buffer, P50/P95/P99, jitter, stability score
     ping.nim       — HTTP ping + throughput measurement
-    catalog.nim    — 88-model catalog with SWE-bench scores
+    catalog.nim    — 90-model catalog with SWE-bench scores
     display.nim    — Table/JSON rendering, ANSI helpers, proxy footer
     config.nim     — Config file persistence + profile loading
     history.nim    — JSONL history persistence + trend detection
@@ -79,7 +79,7 @@ nimaproxy/
 - **SSL flag required** — build with `-d:ssl`; NIM endpoints are HTTPS
 - **Release build uses size optimization** — `--opt:size` in the build task; keep binary small
 - **`malebolgia` for parallelism** — used for concurrent model pinging; don't swap it out
-- **88-model catalog is hardcoded in `catalog.nim`** — update there when new NIM models launch
+- **90-model catalog is hardcoded in `catalog.nim`** — update there when new NIM models launch
 
 ## Config
 
@@ -137,12 +137,14 @@ strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
   "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
   "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
 ]
 
@@ -150,15 +152,17 @@ models = [
 enabled = true
 models = [
   "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
   "mistralai/mistral-medium-3.5-128b",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
+  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
 ]
-max_parallel = 8
+max_parallel = 10
 timeout_ms = 15000
 strategy = "complete"
 ```
@@ -166,11 +170,13 @@ strategy = "complete"
 Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested
 `chat_template_kwargs` (`thinking`, and Flash `reasoning_effort=high`);
+Nemotron 3 Ultra uses `temperature=1.0`, `top_p=0.95`, `max_tokens=16384`,
+`reasoning_budget=16384`, and `chat_template_kwargs.enable_thinking=true`;
 Mistral Medium 3.5 uses `temperature=0.7`, `top_p=1.0`, `reasoning_effort=high`;
 GLM 5.1 uses `top_p=1.0` and `seed=42`; its NVIDIA snippet streams, but
 nimaproxy requires callers to explicitly request `"stream": true`. Qwen 3.5
 397B uses `temperature=0.6`, `top_k=20`, `presence_penalty=0`,
-`repetition_penalty=1`; MiniMax M2.7 uses `max_tokens=8192`.
+`repetition_penalty=1`; MiniMax M3 and M2.7 use `max_tokens=8192`.
 
 `x-key-label` response header tracks which key was used for rotation debugging.
 

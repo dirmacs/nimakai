@@ -140,6 +140,9 @@ fn apply_model_params(json: &mut Value, params: &crate::config::ModelParams) {
     if let Some(max_tokens) = params.max_tokens {
         json["max_tokens"] = Value::from(max_tokens);
     }
+    if let Some(reasoning_budget) = params.reasoning_budget {
+        json["reasoning_budget"] = Value::from(reasoning_budget);
+    }
     if let Some(reasoning_effort) = &params.reasoning_effort {
         json["reasoning_effort"] = Value::String(reasoning_effort.clone());
     }
@@ -1296,12 +1299,14 @@ mod tests {
         });
         let mut kwargs = HashMap::new();
         kwargs.insert("thinking".to_string(), json!(true));
+        kwargs.insert("enable_thinking".to_string(), json!(true));
         kwargs.insert("reasoning_effort".to_string(), json!("high"));
 
         let params = ModelParams {
             temperature: Some(1.0),
             top_p: Some(0.95),
             max_tokens: Some(16384),
+            reasoning_budget: Some(16384),
             stream: Some(true),
             chat_template_kwargs: Some(kwargs),
             ..Default::default()
@@ -1312,9 +1317,11 @@ mod tests {
         assert_eq!(json["temperature"], json!(1.0));
         assert_eq!(json["top_p"], json!(0.95));
         assert_eq!(json["max_tokens"], json!(16384));
+        assert_eq!(json["reasoning_budget"], json!(16384));
         assert_eq!(json["stream"], json!(true));
         assert_eq!(json["chat_template_kwargs"]["client_value"], json!(true));
         assert_eq!(json["chat_template_kwargs"]["thinking"], json!(true));
+        assert_eq!(json["chat_template_kwargs"]["enable_thinking"], json!(true));
         assert_eq!(
             json["chat_template_kwargs"]["reasoning_effort"],
             json!("high")

@@ -39,4 +39,6 @@ suite "benchmarkable model filtering":
 
   test "catalog-like chat models are benchmarkable":
     check isBenchmarkableModelId("deepseek-ai/deepseek-v4-pro")
+    check isBenchmarkableModelId("nvidia/nemotron-3-ultra-550b-a55b")
+    check isBenchmarkableModelId("minimaxai/minimax-m3")
     check isBenchmarkableModelId("stepfun-ai/step-3.7-flash")

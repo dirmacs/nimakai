@@ -45,12 +45,14 @@ label = "key4"
 #
 # models = [
 #   "deepseek-ai/deepseek-v4-pro",
+#   "nvidia/nemotron-3-ultra-550b-a55b",
 #   "deepseek-ai/deepseek-v4-flash",
 #   "mistralai/mistral-medium-3.5-128b",
 #   "z-ai/glm-5.1",
 #   "stepfun-ai/step-3.7-flash",
 #   "moonshotai/kimi-k2.6",
 #   "qwen/qwen3.5-397b-a17b",
+#   "minimaxai/minimax-m3",
 #   "minimaxai/minimax-m2.7",
 # ]
 
@@ -65,20 +67,22 @@ label = "key4"
 # enabled = true
 # models = [
 #   "deepseek-ai/deepseek-v4-pro",
+#   "nvidia/nemotron-3-ultra-550b-a55b",
 #   "deepseek-ai/deepseek-v4-flash",
 #   "mistralai/mistral-medium-3.5-128b",
 #   "z-ai/glm-5.1",
 #   "stepfun-ai/step-3.7-flash",
 #   "moonshotai/kimi-k2.6",
 #   "qwen/qwen3.5-397b-a17b",
+#   "minimaxai/minimax-m3",
 #   "minimaxai/minimax-m2.7",
 # ]
-# max_parallel = 8
+# max_parallel = 10
 # timeout_ms = 15000
 # strategy = "complete"
 
 # ── NVIDIA Catalog Inference Defaults ─────────────────────────────────────
-# These values mirror the build.nvidia.com snippets for the current 8-model
+# These values mirror the build.nvidia.com snippets for the current 10-model
 # pool. `stream=false` may be injected when omitted. `stream=true` entries are
 # retained for catalog fidelity, but callers must request streaming explicitly.
 
@@ -88,6 +92,14 @@ top_p = 0.95
 max_tokens = 16384
 stream = false
 chat_template_kwargs = { thinking = false }
+
+[model_params."nvidia/nemotron-3-ultra-550b-a55b"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+reasoning_budget = 16384
+stream = true
+chat_template_kwargs = { enable_thinking = true }
 
 [model_params."deepseek-ai/deepseek-v4-flash"]
 temperature = 1.0
@@ -129,6 +141,12 @@ top_k = 20
 presence_penalty = 0.0
 repetition_penalty = 1.0
 max_tokens = 16384
+stream = false
+
+[model_params."minimaxai/minimax-m3"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 8192
 stream = false
 
 [model_params."minimaxai/minimax-m2.7"]
