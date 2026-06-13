@@ -155,10 +155,19 @@ async fn test_live_multi_turn_10_turns() {
         .iter()
         .filter(|(_, status, _)| *status == 200)
         .count();
+    let rate_limited_count = turn_results
+        .iter()
+        .filter(|(_, status, _)| *status == 429)
+        .count();
     eprintln!(
         "[conversation] Completed {} out of 10 turns successfully",
         success_count
     );
+
+    if success_count == 0 && rate_limited_count == topics.len() {
+        eprintln!("[SKIP] test_live_multi_turn_10_turns: NVIDIA key budget exhausted (all 429)");
+        return;
+    }
 
     // At least some turns should succeed
     assert!(
@@ -387,11 +396,22 @@ async fn test_live_tool_calling_variations() {
         .iter()
         .filter(|(_, status, _)| *status == 200)
         .count();
+    let rate_limited_count = tool_results
+        .iter()
+        .filter(|(_, status, _)| *status == 429)
+        .count();
     eprintln!(
         "[tool-calling] Tool calling results: {}/{} variations successful",
         success_count,
         tool_results.len()
     );
+
+    if success_count == 0 && rate_limited_count == tool_results.len() {
+        eprintln!(
+            "[SKIP] test_live_tool_calling_variations: NVIDIA key budget exhausted (all 429)"
+        );
+        return;
+    }
 
     // At least some variations should work
     assert!(

@@ -1,8 +1,8 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.2. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.3. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.2 includes the ten-model NVIDIA catalog-default pool, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.3 includes the ten-model NVIDIA catalog-default pool, adaptive racing/gateway limits, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
 
 ## FFI Integration (v0.15+)
 
@@ -35,7 +35,7 @@ src/
     recommend.nim — Score-based recommendation: given task type → best available model
     discovery.nim — discoverModels() via NVIDIA API, diffCatalog() vs hardcoded catalog; syncFromProxy()
     history.nim   — Persist latency samples to disk, read/display trends with --days flag
-tests/          — 17 test files; `nimble test` runs 16 isolated suites, while
+tests/          — 18 test files; `nimble test` runs 17 isolated suites, while
                   test_proxy.nim is a manual FFI/service suite
 ```
 
@@ -58,9 +58,9 @@ nimaproxy/
   tests/
     integration.rs         45 integration tests
     e2e_live.rs            14 E2E tests with real NVIDIA API
-    stress_test.rs         1 live stress test
+    stress_test.rs         1 live stress test (`NIMAPROXY_STRESS_TURNS` configurable)
     coverage_gaps.rs       14 coverage gap tests
-    proxy_error_paths.rs   31 proxy error path tests
+    proxy_error_paths.rs   32 proxy error path tests
     live_chat.rs           5 live chat tests
     live_key_rotation.rs   2 key rotation tests
     live_routing.rs        2 routing tests
@@ -72,7 +72,9 @@ nimaproxy/
 ## Racing (Speculative Execution)
 
 V3 feature: fires N parallel requests to N models, returns first response.
-Trades N×token budget for min(P50 latency).
+Trades N×token budget for min(P50 latency). v0.15.3 adds adaptive fanout and
+gateway concurrency limits so the healthy ceiling remains 10 while pressure and
+degraded states back off before NVIDIA-side cooldowns dominate.
 
 ```toml
 [racing]
@@ -90,6 +92,34 @@ models = [
   "minimaxai/minimax-m2.7",
 ]
 max_parallel = 10
+timeout_ms = 15000
+strategy = "complete"
+adaptive = true
+min_parallel = 2
+pressure_parallel = 6
+degraded_parallel = 3
+fast_models = [
+  "stepfun-ai/step-3.7-flash",
+  "qwen/qwen3.5-397b-a17b",
+  "z-ai/glm-5.1",
+  "moonshotai/kimi-k2.6",
+  "minimaxai/minimax-m3",
+]
+fallback_models = [
+  "minimaxai/minimax-m2.7",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+]
+
+[limits]
+max_upstream_in_flight = 48
+max_in_flight_per_key = 3
+
+[timeouts]
+min_dynamic_timeout_ms = 8000
+dynamic_sample_floor = 10
 ```
 
 ## Model Routing (V2)
@@ -185,15 +215,19 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 # → {"primary": "mistralai/mistral-medium-3.5-128b", "fallback": "stepfun-ai/step-3.7-flash"}
 ```
 
-## nimaproxy v0.15.2 Critical Fixes (cumulative)
+## nimaproxy v0.15.3 Critical Fixes (cumulative)
 
 ### Racing, Timeout, and Model Defaults
 
 - Applies build.nvidia.com per-model defaults for the current ten-model pool.
 - Treats `stream=true` as caller-controlled response mode, not a forced model hyperparameter.
 - Direct chat requests honor configured dynamic upstream timeouts and return 504 on timeout.
-- New or failure-only models keep the configured max timeout until enough latency history exists.
+- New or failure-only models keep the configured max timeout until enough latency history exists, then learned timeouts are clamped by `min_dynamic_timeout_ms`.
+- Adaptive racing uses fast/fallback tiers and backs off from `max_parallel=10` to pressure/degraded fanout when gateway pressure rises.
+- Gateway limits cap total upstream in-flight requests and per-key in-flight requests; saturated gateways return local 503s.
+- `/health`, `/stats`, and `nimakai proxy status` expose gateway in-flight counts, request counters, fanout average, racing wins, and per-key in-flight counts.
 - Racing excludes server-degraded/all-keys-failed models, but can backfill with least-bad degraded latency/failure candidates when healthy capacity is insufficient.
+- Local latency degradation requires three samples; NVIDIA server-degraded responses are still honored immediately.
 - Losing 429 racers do not globally cool keys when another model wins; all-key/all-race rate-limit cases return 429.
 
 ### Assistant Message Validation

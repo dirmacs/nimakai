@@ -1,13 +1,13 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.2. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.3. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
 ```bash
 cd nimakai
 nimble build                       # → ./nimakai binary
-nimble test                        # runs 16 isolated suites; test_proxy.nim is manual FFI
+nimble test                        # runs 17 isolated suites; test_proxy.nim is manual FFI
 
 # One-liner rebuild and run
 nimble build && ./nimakai
@@ -42,7 +42,7 @@ src/
     proxyffi.nim   — Nim FFI bindings to libnimaproxy.so
     rustffi.nim    — Rust FFI bridge for concurrent HTTP pinging
     update.nim     — Fetch and update model catalog from NVIDIA NIM API
-tests/          — 17 test files (16 in nimble test + manual FFI test_proxy.nim)
+tests/          — 18 test files (17 in nimble test + manual FFI test_proxy.nim)
 ```
 
 ### nimaproxy (Rust)
@@ -61,9 +61,9 @@ nimaproxy/
   tests/
     integration.rs       — 45 tests
     e2e_live.rs           — 14 live API tests
-    stress_test.rs         — 1 live stress test
+    stress_test.rs         — 1 live stress test (`NIMAPROXY_STRESS_TURNS` configurable)
     coverage_gaps.rs       — 14 coverage gap tests
-    proxy_error_paths.rs   — 31 proxy error path tests
+    proxy_error_paths.rs   — 32 proxy error path tests
     live_chat.rs           — 5 live chat tests
     live_key_rotation.rs   — 2 key rotation tests
     live_routing.rs        — 2 routing tests
@@ -165,7 +165,36 @@ models = [
 max_parallel = 10
 timeout_ms = 15000
 strategy = "complete"
+adaptive = true
+min_parallel = 2
+pressure_parallel = 6
+degraded_parallel = 3
+fast_models = [
+  "stepfun-ai/step-3.7-flash",
+  "qwen/qwen3.5-397b-a17b",
+  "z-ai/glm-5.1",
+  "moonshotai/kimi-k2.6",
+  "minimaxai/minimax-m3",
+]
+fallback_models = [
+  "minimaxai/minimax-m2.7",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+]
+
+[limits]
+max_upstream_in_flight = 48
+max_in_flight_per_key = 3
+
+[timeouts]
+min_dynamic_timeout_ms = 8000
+dynamic_sample_floor = 10
 ```
+
+Local latency degradation requires three samples; NVIDIA server-degraded
+responses are still honored immediately.
 
 Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested

@@ -3,7 +3,7 @@
 import std/strutils
 
 const
-  Version* = "0.15.2"
+  Version* = "0.15.3"
   GitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null || echo unknown").strip()
   BuildDate* = CompileDate & " " & CompileTime
   BaseURL* = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -71,8 +71,17 @@ type
   ProxyHealth* = object
     status*: string
     activeKeys*: int
+    keysTotal*: int
+    gatewayInFlight*: int
+    gatewayLimit*: int
     routingEnabled*: bool
     racingEnabled*: bool
+    racingMaxParallel*: int
+    racingTimeoutMs*: int
+    racingAdaptive*: bool
+    racingMinParallel*: int
+    racingPressureParallel*: int
+    racingDegradedParallel*: int
 
   ProxyModelStats* = object
     model*: string
@@ -90,13 +99,44 @@ type
     keyHint*: string
     active*: bool
     cooldownSecsRemaining*: int
+    inFlight*: int
+    maxInFlight*: int
+
+  ProxyRacingWin* = object
+    model*: string
+    wins*: int
+
+  ProxyGatewayStats* = object
+    requestTotal*: int
+    directRequests*: int
+    racingRequests*: int
+    upstreamAttempts*: int
+    upstreamInFlight*: int
+    maxUpstreamInFlight*: int
+    maxInFlightPerKey*: int
+    overloadRejects*: int
+    noKeyRejects*: int
+    timeoutCount*: int
+    rateLimitCount*: int
+    fanoutTotal*: int
+    fanoutSamples*: int
+    fanoutAvg*: float
+    racingWins*: seq[ProxyRacingWin]
 
   ProxyStats* = object
     models*: seq[ProxyModelStats]
     keys*: seq[ProxyKeyStats]
+    gateway*: ProxyGatewayStats
     racingModels*: seq[string]
+    racingEnabled*: bool
     racingMaxParallel*: int
     racingTimeoutMs*: int
+    racingAdaptive*: bool
+    racingMinParallel*: int
+    racingPressureParallel*: int
+    racingDegradedParallel*: int
+    racingFastModels*: seq[string]
+    racingFallbackModels*: seq[string]
 
   Thresholds* = object
     perfectAvg*: float

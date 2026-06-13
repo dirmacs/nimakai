@@ -8,11 +8,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures::{FutureExt, TryStreamExt};
+use futures::TryStreamExt;
 use serde_json::Value;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-use crate::AppState;
+use crate::{AppState, KeyAcquireError, KeyLease, UpstreamPermit};
 
 const MAX_RETRIES: usize = 8;
 
@@ -192,6 +193,116 @@ fn accept_header_for_body(body: &Bytes) -> &'static str {
         .unwrap_or("application/json")
 }
 
+fn timeout_for_model(state: &AppState, model_id: &str) -> u64 {
+    state.model_stats.get_model_timeout_with_policy(
+        model_id,
+        state.racing_timeout_ms,
+        state.min_dynamic_timeout_ms,
+        state.dynamic_sample_floor,
+    )
+}
+
+fn gateway_overloaded_response(state: &AppState) -> Response {
+    state.gateway_metrics.record_overload();
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "gateway overloaded; retry later",
+    )
+        .into_response()
+}
+
+fn no_key_response(state: &AppState) -> Response {
+    state.gateway_metrics.record_no_key();
+    (StatusCode::TOO_MANY_REQUESTS, "all API keys rate-limited").into_response()
+}
+
+fn acquire_gateway_permits(state: &AppState) -> Result<(UpstreamPermit, KeyLease), Response> {
+    let upstream_permit = state
+        .try_acquire_upstream()
+        .ok_or_else(|| gateway_overloaded_response(state))?;
+
+    match state.pool.next_key_with_permit() {
+        Ok(key_lease) => Ok((upstream_permit, key_lease)),
+        Err(KeyAcquireError::AllBusy) => Err(gateway_overloaded_response(state)),
+        Err(KeyAcquireError::NoKeys | KeyAcquireError::AllCoolingDown) => {
+            Err(no_key_response(state))
+        }
+    }
+}
+
+fn adaptive_racing_parallel(state: &AppState, candidate_count: usize) -> usize {
+    let configured = state.racing_max_parallel.min(candidate_count);
+    if configured < 2 {
+        return configured;
+    }
+
+    let available_key_slots = state.pool.available_permits();
+    if available_key_slots < 2 {
+        return available_key_slots;
+    }
+
+    if !state.racing_adaptive {
+        return configured.min(available_key_slots);
+    }
+
+    let active_keys = state.pool.active_count();
+    if active_keys == 0 {
+        return 0;
+    }
+
+    let in_flight = state.gateway_metrics.upstream_in_flight() as usize;
+    let pressure_mark = (state.max_upstream_in_flight / 3).max(1);
+    let degraded_mark = ((state.max_upstream_in_flight * 2) / 3).max(1);
+
+    let desired = if active_keys < state.pool.len() || in_flight >= degraded_mark {
+        state.racing_degraded_parallel
+    } else if in_flight >= pressure_mark {
+        state.racing_pressure_parallel
+    } else {
+        configured
+    };
+
+    let min_parallel = state
+        .racing_min_parallel
+        .min(candidate_count)
+        .min(available_key_slots);
+    desired
+        .min(configured)
+        .min(candidate_count)
+        .min(available_key_slots)
+        .max(min_parallel)
+}
+
+fn rotated_models(models: &[String], cursor: usize) -> Vec<String> {
+    let n = models.len();
+    (0..n).map(|i| models[(cursor + i) % n].clone()).collect()
+}
+
+fn tiered_candidates(state: &AppState, rotated: &[String], max_parallel: usize) -> Vec<String> {
+    if !state.racing_adaptive || state.racing_fast_models.is_empty() {
+        return state.model_stats.racing_candidates(rotated, max_parallel);
+    }
+
+    let fast: Vec<String> = rotated
+        .iter()
+        .filter(|m| state.racing_fast_models.iter().any(|f| f == *m))
+        .cloned()
+        .collect();
+
+    let fallback: Vec<String> = rotated
+        .iter()
+        .filter(|m| {
+            state.racing_fallback_models.iter().any(|f| f == *m)
+                || !state.racing_fast_models.iter().any(|f| f == *m)
+        })
+        .cloned()
+        .collect();
+
+    state
+        .model_stats
+        .racing_candidates_tiered(&fast, &fallback, max_parallel)
+}
+
 /// POST /v1/chat/completions
 ///
 /// V1: injects key, retries on 429, streams SSE byte-for-byte.
@@ -225,9 +336,11 @@ pub async fn chat_completions(
     // not define the same fields.
     if original_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2
     {
+        state.gateway_metrics.record_request(true);
         let racing_models = state.racing_models.clone();
         return race_models(state, original_body, &racing_models).await;
     }
+    state.gateway_metrics.record_request(false);
 
     let (mut model_id, mut body) = resolve_model(body, &state);
 
@@ -239,20 +352,22 @@ pub async fn chat_completions(
     let n = state.pool.len().min(MAX_RETRIES).max(1);
 
     for _ in 0..n {
-        let Some((key, idx)) = state.pool.next_key() else {
-            return (StatusCode::TOO_MANY_REQUESTS, "all API keys rate-limited").into_response();
+        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state) {
+            Ok(permits) => permits,
+            Err(response) => return response,
         };
+        let _upstream_permit = upstream_permit;
+        let idx = key_lease.idx;
+        let key_label = key_lease.label.clone();
 
         let t0 = Instant::now();
-        let request_timeout_ms = state
-            .model_stats
-            .get_model_timeout(&model_id, state.racing_timeout_ms);
+        let request_timeout_ms = timeout_for_model(&state, &model_id);
         let result = timeout(
             std::time::Duration::from_millis(request_timeout_ms),
             state
                 .client
                 .post(format!("{}/v1/chat/completions", state.target))
-                .header("Authorization", format!("Bearer {}", key))
+                .header("Authorization", format!("Bearer {}", key_lease.key))
                 .header("Content-Type", "application/json")
                 .header("Accept", accept_header_for_body(&body))
                 .body(body.clone())
@@ -262,10 +377,11 @@ pub async fn chat_completions(
 
         match result {
             Err(_) => {
-                if let Some(label) = state.pool.get_key_label(idx) {
+                state.gateway_metrics.record_timeout();
+                if let Some(label) = key_label.as_ref() {
                     state.model_stats.record_with_key(
                         &model_id,
-                        &label,
+                        label,
                         request_timeout_ms as f64,
                         false,
                     );
@@ -281,10 +397,10 @@ pub async fn chat_completions(
                     .into_response();
             }
             Ok(Err(e)) => {
-                if let Some(label) = state.pool.get_key_label(idx) {
+                if let Some(label) = key_label.as_ref() {
                     state.model_stats.record_with_key(
                         &model_id,
-                        &label,
+                        label,
                         t0.elapsed().as_millis() as f64,
                         false,
                     );
@@ -299,6 +415,7 @@ pub async fn chat_completions(
                 let status = resp.status();
 
                 if status == 429 {
+                    state.gateway_metrics.record_rate_limit();
                     let retry_after = resp
                         .headers()
                         .get("retry-after")
@@ -340,10 +457,11 @@ pub async fn chat_completions(
                         return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
                     }
                     Err(_) => {
-                        if let Some(label) = state.pool.get_key_label(idx) {
+                        state.gateway_metrics.record_timeout();
+                        if let Some(label) = key_label.as_ref() {
                             state.model_stats.record_with_key(
                                 &model_id,
-                                &label,
+                                label,
                                 request_timeout_ms as f64,
                                 false,
                             );
@@ -393,7 +511,7 @@ pub async fn chat_completions(
                     extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
 
                 if output_tokens > 0 || repetition_count > 0 {
-                    if let Some(label) = state.pool.get_key_label(idx) {
+                    if key_label.is_some() {
                         state.model_stats.record_with_circuit_breaker(
                             &model_id,
                             ttfc_ms,
@@ -413,10 +531,10 @@ pub async fn chat_completions(
                         );
                     }
                 } else {
-                    if let Some(label) = state.pool.get_key_label(idx) {
+                    if let Some(label) = key_label.as_ref() {
                         state
                             .model_stats
-                            .record_with_key(&model_id, &label, ttfc_ms, ok);
+                            .record_with_key(&model_id, label, ttfc_ms, ok);
                     } else {
                         state.model_stats.record(&model_id, ttfc_ms, ok);
                     }
@@ -432,10 +550,10 @@ pub async fn chat_completions(
                         .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                 );
                 // Track which key was used for rotation debugging
-                if let Some(label) = state.pool.get_key_label(idx) {
+                if let Some(label) = key_label.as_ref() {
                     response.headers_mut().insert(
                         "x-key-label",
-                        HeaderValue::from_str(&label)
+                        HeaderValue::from_str(label)
                             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                     );
                 }
@@ -893,21 +1011,31 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "key_hint": s.key_hint,
                 "active": s.active,
                 "cooldown_secs_remaining": s.cooldown_secs_remaining,
+                "in_flight": s.in_flight,
+                "max_in_flight": s.max_in_flight,
             })
         })
         .collect();
+
+    let metrics = state.gateway_metrics.snapshot();
 
     let body = serde_json::json!({
         "status": if active > 0 { "UP" } else { "DEGRADED" },
         "keys_total": total,
         "keys_active": active,
         "keys": keys_json,
+        "gateway_in_flight": metrics.upstream_in_flight,
+        "gateway_limit": state.max_upstream_in_flight,
         "routing_enabled": state.routing_enabled(),
         "racing_enabled": state.racing_enabled(),
         "routing_models": routing_models,
         "racing_models": racing_models,
         "racing_max_parallel": state.racing_max_parallel,
         "racing_timeout_ms": state.racing_timeout_ms,
+        "racing_adaptive": state.racing_adaptive,
+        "racing_min_parallel": state.racing_min_parallel,
+        "racing_pressure_parallel": state.racing_pressure_parallel,
+        "racing_degraded_parallel": state.racing_degraded_parallel,
     });
 
     (
@@ -947,6 +1075,8 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "key_hint": s.key_hint,
                 "active": s.active,
                 "cooldown_secs_remaining": s.cooldown_secs_remaining,
+                "in_flight": s.in_flight,
+                "max_in_flight": s.max_in_flight,
             })
         })
         .collect();
@@ -956,13 +1086,38 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .iter()
         .map(|m| serde_json::json!(m))
         .collect();
+    let metrics = state.gateway_metrics.snapshot();
 
     let body = serde_json::json!({
         "models": models_json,
         "keys": keys_json,
+        "gateway": {
+            "request_total": metrics.request_total,
+            "direct_requests": metrics.direct_requests,
+            "racing_requests": metrics.racing_requests,
+            "upstream_attempts": metrics.upstream_attempts,
+            "upstream_in_flight": metrics.upstream_in_flight,
+            "max_upstream_in_flight": state.max_upstream_in_flight,
+            "max_in_flight_per_key": state.max_in_flight_per_key,
+            "overload_rejects": metrics.overload_rejects,
+            "no_key_rejects": metrics.no_key_rejects,
+            "timeout_count": metrics.timeout_count,
+            "rate_limit_count": metrics.rate_limit_count,
+            "fanout_total": metrics.fanout_total,
+            "fanout_samples": metrics.fanout_samples,
+            "fanout_avg": metrics.fanout_avg,
+            "racing_wins": metrics.racing_wins,
+        },
         "racing_models": racing_models,
+        "racing_enabled": state.racing_enabled(),
         "racing_max_parallel": state.racing_max_parallel,
         "racing_timeout_ms": state.racing_timeout_ms,
+        "racing_adaptive": state.racing_adaptive,
+        "racing_min_parallel": state.racing_min_parallel,
+        "racing_pressure_parallel": state.racing_pressure_parallel,
+        "racing_degraded_parallel": state.racing_degraded_parallel,
+        "racing_fast_models": state.racing_fast_models.clone(),
+        "racing_fallback_models": state.racing_fallback_models.clone(),
     });
 
     (
@@ -973,11 +1128,13 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Response {
-    let timeout_ms = state.racing_timeout_ms;
-    let max_parallel = state.racing_max_parallel.min(models.len());
+    let max_parallel = adaptive_racing_parallel(&state, models.len());
 
     if max_parallel < 2 {
-        return (StatusCode::BAD_REQUEST, "racing requires at least 2 models").into_response();
+        if state.pool.active_count() == 0 {
+            return no_key_response(&state);
+        }
+        return gateway_overloaded_response(&state);
     }
 
     // Rotate model selection: grab cursor, pick models starting from it,
@@ -990,10 +1147,8 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
     };
     let n = models.len();
 
-    let candidates: Vec<String> = (0..n).map(|i| models[(cursor + i) % n].clone()).collect();
-    let candidates_for_race = state
-        .model_stats
-        .racing_candidates(&candidates, max_parallel);
+    let candidates = rotated_models(models, cursor);
+    let candidates_for_race = tiered_candidates(&state, &candidates, max_parallel);
 
     if candidates_for_race.len() < 2 {
         eprintln!("[racing] not enough viable models after filtering (need ≥2)");
@@ -1003,14 +1158,15 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
     let models_to_race = candidates_for_race;
     {
         let mut c = state.racing_cursor.lock().unwrap();
-        *c = (cursor + max_parallel) % n;
+        *c = (cursor + models_to_race.len()) % n;
     }
 
-    let mut handles = Vec::new();
+    let mut tasks = JoinSet::new();
     let mut skipped_no_key = 0usize;
+    let mut skipped_overloaded = 0usize;
 
     for model_id in &models_to_race {
-        let timeout_val = state.model_stats.get_model_timeout(model_id, timeout_ms);
+        let timeout_val = timeout_for_model(&state, model_id);
 
         let mut json: Value = match serde_json::from_slice(&body) {
             Ok(v) => v,
@@ -1049,21 +1205,40 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
         let client = state.client.clone();
         let state_clone = state.clone();
         let model_id_clone = model_id.clone();
+        let model_id_for_task = model_id.clone();
         let timeout_ms_for_model = timeout_val;
 
-        let key = state.pool.next_key();
-        if key.is_none() {
-            skipped_no_key += 1;
-            eprintln!("[racing] no keys available for {}", model_id);
-            continue;
-        }
-        let (key, key_idx) = key.unwrap();
-        let key_label = state.pool.get_key_label(key_idx);
+        let upstream_permit = match state.try_acquire_upstream() {
+            Some(permit) => permit,
+            None => {
+                skipped_overloaded += 1;
+                state.gateway_metrics.record_overload();
+                eprintln!("[racing] upstream limit reached for {}", model_id);
+                continue;
+            }
+        };
+        let key_lease = match state.pool.next_key_with_permit() {
+            Ok(lease) => lease,
+            Err(KeyAcquireError::AllBusy) => {
+                skipped_overloaded += 1;
+                state.gateway_metrics.record_overload();
+                eprintln!("[racing] key concurrency limit reached for {}", model_id);
+                continue;
+            }
+            Err(KeyAcquireError::NoKeys | KeyAcquireError::AllCoolingDown) => {
+                skipped_no_key += 1;
+                eprintln!("[racing] no keys available for {}", model_id);
+                continue;
+            }
+        };
 
-        let key_idx_for_spawn = key_idx;
-        let handle = tokio::spawn(async move {
-            let key_label = key_label;
+        let key = key_lease.key.clone();
+        let key_idx_for_spawn = key_lease.idx;
+        let key_label = key_lease.label.clone();
 
+        tasks.spawn(async move {
+            let _upstream_permit = upstream_permit;
+            let _key_lease = key_lease;
             let t0 = Instant::now();
             let result = timeout(
                 std::time::Duration::from_millis(timeout_ms_for_model),
@@ -1077,7 +1252,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
             )
             .await;
 
-            match result {
+            let task_result: Result<(Response, u16, usize, u64), String> = match result {
                 Ok(Ok(resp)) => {
                     let latency = t0.elapsed().as_millis() as f64;
                     let status = resp.status();
@@ -1105,12 +1280,15 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                         let body_bytes = resp.bytes().await.unwrap_or_default();
                         let body_str = String::from_utf8_lossy(&body_bytes);
                         record_outcome(false);
-                        return Err(format!(
-                            "HTTP {} from {}: {}",
-                            status.as_u16(),
-                            model_id_clone,
-                            &body_str[..body_str.len().min(400)]
-                        ));
+                        return (
+                            model_id_for_task,
+                            Err(format!(
+                                "HTTP {} from {}: {}",
+                                status.as_u16(),
+                                model_id_clone,
+                                &body_str[..body_str.len().min(400)]
+                            )),
+                        );
                     }
                     record_outcome(status.is_success());
                     let content_type = resp
@@ -1120,10 +1298,39 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                         .unwrap_or("application/json")
                         .to_string();
 
-                    let stream = resp
-                        .bytes_stream()
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-                    let body = Body::from_stream(stream);
+                    let body_bytes = match timeout(
+                        std::time::Duration::from_millis(timeout_ms_for_model),
+                        resp.bytes(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(bytes)) => bytes,
+                        Ok(Err(e)) => {
+                            return (model_id_for_task, Err(format!("body error: {}", e)));
+                        }
+                        Err(_) => {
+                            state_clone.gateway_metrics.record_timeout();
+                            if let Some(ref label) = key_label {
+                                state_clone.model_stats.record_with_key(
+                                    &model_id_clone,
+                                    label,
+                                    timeout_ms_for_model as f64,
+                                    false,
+                                );
+                            } else {
+                                state_clone.model_stats.record(
+                                    &model_id_clone,
+                                    timeout_ms_for_model as f64,
+                                    false,
+                                );
+                            }
+                            return (
+                                model_id_for_task,
+                                Err(format!("body timeout after {}ms", timeout_ms_for_model)),
+                            );
+                        }
+                    };
+                    let body = Body::from(body_bytes);
 
                     let mut response = Response::new(body);
                     *response.status_mut() =
@@ -1165,6 +1372,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                     Err(format!("request error: {}", e))
                 }
                 Err(_) => {
+                    state_clone.gateway_metrics.record_timeout();
                     if let Some(ref label) = key_label {
                         state_clone.model_stats.record_with_key(
                             &model_id_clone,
@@ -1181,36 +1389,38 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                     }
                     Err(format!("timeout after {}ms", timeout_ms_for_model))
                 }
-            }
+            };
+            (model_id_for_task, task_result)
         });
-
-        handles.push((model_id.clone(), handle));
     }
 
-    if handles.is_empty() {
+    let actual_fanout = tasks.len();
+    state.gateway_metrics.record_fanout(actual_fanout);
+
+    if actual_fanout == 0 {
         if skipped_no_key > 0 {
+            state.gateway_metrics.record_no_key();
             return (StatusCode::TOO_MANY_REQUESTS, "all API keys rate-limited").into_response();
+        }
+        if skipped_overloaded > 0 {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "gateway overloaded; retry later",
+            )
+                .into_response();
         }
         return (StatusCode::BAD_REQUEST, "no valid models to race").into_response();
     }
-
-    // Use select_all to wait for results in completion order, not spawn order
-    // This ensures the first response wins, regardless of which model it comes from
-    use futures::future::select_all;
-    let mut pending: Vec<_> = handles
-        .into_iter()
-        .map(|(model_id, handle)| async move { (model_id, handle.await) }.boxed())
-        .collect();
 
     let mut last_error = None;
     let mut pending_rate_limited_keys: Vec<(usize, u64)> = Vec::new();
     let mut saw_non_rate_limit_failure = false;
 
-    while !pending.is_empty() {
-        let ((model_id, result), _idx, remaining) = select_all(pending).await;
-        match result {
-            Ok(Ok((response, status_code, key_idx, retry_after_secs))) => {
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok((model_id, Ok((response, status_code, key_idx, retry_after_secs)))) => {
                 if status_code == 429 {
+                    state.gateway_metrics.record_rate_limit();
                     eprintln!(
                         "[racing] {} → 429, key {} may be rate-limited {}s, trying next",
                         model_id, key_idx, retry_after_secs
@@ -1219,21 +1429,22 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                     last_error = Some(format!("429 rate-limited (key {})", key_idx));
                 } else {
                     eprintln!("[racing] {} → HTTP {} (winner)", model_id, status_code);
+                    state.gateway_metrics.record_racing_win(&model_id);
+                    tasks.abort_all();
                     return response;
                 }
             }
-            Ok(Err(e)) => {
+            Ok((model_id, Err(e))) => {
                 eprintln!("[racing] {} failed: {}", model_id, e);
                 saw_non_rate_limit_failure = true;
                 last_error = Some(e);
             }
             Err(e) => {
-                eprintln!("[racing] {} panicked: {}", model_id, e);
+                eprintln!("[racing] task failed: {}", e);
                 saw_non_rate_limit_failure = true;
                 last_error = Some(e.to_string());
             }
         }
-        pending = remaining;
     }
 
     for (key_idx, retry_after_secs) in pending_rate_limited_keys {
@@ -1262,31 +1473,72 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::fix_message_ordering;
     use crate::{
         config::{ModelCompat, ModelParams},
         key_pool::KeyPool,
         model_stats::ModelStatsStore,
+        RuntimeControls,
     };
     use serde_json::json;
     use std::collections::HashMap;
 
     fn create_test_app_state() -> AppState {
-        AppState {
-            pool: KeyPool::new(vec![]),
-            client: reqwest::Client::new(),
-            target: "https://test.api.nvidia.com".to_string(),
-            router: None,
-            model_stats: ModelStatsStore::new(3000.0),
-            racing_models: vec![],
-            racing_max_parallel: 3,
-            racing_timeout_ms: 8000,
-            racing_strategy: "complete".to_string(),
-            racing_cursor: std::sync::Mutex::new(0),
-            available_models: std::sync::Mutex::new(vec![]),
-            model_params: HashMap::new(),
-            model_compat: ModelCompat::default(),
+        let state = AppState::new(
+            vec![],
+            "https://test.api.nvidia.com".to_string(),
+            None,
+            ModelStatsStore::new(3000.0),
+            vec![],
+            3,
+            8000,
+            "complete".to_string(),
+            HashMap::new(),
+            ModelCompat::default(),
+        );
+        match Arc::try_unwrap(state) {
+            Ok(state) => state,
+            Err(_) => panic!("test state should have a single owner"),
         }
+    }
+
+    fn create_adaptive_test_state() -> Arc<AppState> {
+        AppState::new_with_controls(
+            vec![
+                crate::KeyEntry {
+                    key: "key-a".to_string(),
+                    label: Some("key-a".to_string()),
+                },
+                crate::KeyEntry {
+                    key: "key-b".to_string(),
+                    label: Some("key-b".to_string()),
+                },
+            ],
+            "https://test.api.nvidia.com".to_string(),
+            None,
+            ModelStatsStore::new(3000.0),
+            vec![
+                "fast-a".to_string(),
+                "fast-b".to_string(),
+                "fallback-a".to_string(),
+            ],
+            10,
+            15000,
+            "complete".to_string(),
+            HashMap::new(),
+            ModelCompat::default(),
+            RuntimeControls {
+                racing_adaptive: true,
+                racing_min_parallel: 2,
+                racing_pressure_parallel: 6,
+                racing_degraded_parallel: 3,
+                racing_fast_models: vec!["fast-a".to_string(), "fast-b".to_string()],
+                racing_fallback_models: vec!["fallback-a".to_string()],
+                max_upstream_in_flight: 6,
+                max_in_flight_per_key: 2,
+                min_dynamic_timeout_ms: 8000,
+                dynamic_sample_floor: 10,
+            },
+        )
     }
 
     #[test]
@@ -1327,6 +1579,41 @@ mod tests {
             json!("high")
         );
         assert!(json.get("thinking").is_none());
+    }
+
+    #[test]
+    fn test_adaptive_racing_parallel_clamps_to_available_key_slots() {
+        let state = create_adaptive_test_state();
+        let lease_a = state.pool.next_key_with_permit().unwrap();
+        let lease_b = state.pool.next_key_with_permit().unwrap();
+
+        assert_eq!(adaptive_racing_parallel(&state, 10), 2);
+
+        drop(lease_a);
+        drop(lease_b);
+        assert_eq!(adaptive_racing_parallel(&state, 10), 4);
+    }
+
+    #[test]
+    fn test_adaptive_racing_parallel_uses_pressure_level() {
+        let state = create_adaptive_test_state();
+        let _p1 = state.try_acquire_upstream().unwrap();
+        let _p2 = state.try_acquire_upstream().unwrap();
+
+        assert_eq!(adaptive_racing_parallel(&state, 10), 4);
+    }
+
+    #[test]
+    fn test_tiered_candidates_prefers_fast_pool() {
+        let state = create_adaptive_test_state();
+        let rotated = vec![
+            "fallback-a".to_string(),
+            "fast-b".to_string(),
+            "fast-a".to_string(),
+        ];
+
+        let result = tiered_candidates(&state, &rotated, 2);
+        assert_eq!(result, vec!["fast-b".to_string(), "fast-a".to_string()]);
     }
 
     #[test]
@@ -1894,6 +2181,7 @@ mod tests {
         let response = race_models(state, Bytes::from(body.to_string()), &models).await;
         assert!(
             response.status() == StatusCode::BAD_REQUEST
+                || response.status() == StatusCode::TOO_MANY_REQUESTS
                 || response.status() >= StatusCode::INTERNAL_SERVER_ERROR
         );
     }
@@ -2157,7 +2445,7 @@ fn log_turn_request(
     is_racing: bool,
     error: Option<String>,
 ) {
-    use crate::turn_log::{log_turn as log_turn_event, MessageLog, TurnLog};
+    use crate::turn_log::{log_turn as log_turn_event, TurnLog};
 
     let mut turn = TurnLog::new(
         requested_model.to_string(),
@@ -2183,6 +2471,7 @@ pub async fn completions(
     _headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    state.gateway_metrics.record_request(false);
     eprintln!("[nimaproxy] POST /v1/completions");
     let model_id = if let Ok(v) = serde_json::from_slice::<Value>(&body) {
         v.get("model")
@@ -2195,25 +2484,28 @@ pub async fn completions(
     let n = state.pool.len().min(MAX_RETRIES).max(1);
     eprintln!("[nimaproxy] POST /v1/completions - got n={}", n);
     for _ in 0..n {
-        let Some((key, idx)) = state.pool.next_key() else {
-            return (StatusCode::TOO_MANY_REQUESTS, "all keys rate-limited").into_response();
+        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state) {
+            Ok(permits) => permits,
+            Err(response) => return response,
         };
+        let _upstream_permit = upstream_permit;
+        let key_label = key_lease.label.clone();
         eprintln!("[nimaproxy] POST /v1/completions - about to send request");
         let t0 = Instant::now();
         let result = state
             .client
             .post(format!("{}/v1/completions", state.target))
-            .header("Authorization", format!("Bearer {}", key))
+            .header("Authorization", format!("Bearer {}", key_lease.key))
             .header("Content-Type", "application/json")
             .body(body.clone())
             .send()
             .await;
         match result {
             Err(e) => {
-                if let Some(label) = state.pool.get_key_label(idx) {
+                if let Some(label) = key_label.as_ref() {
                     state.model_stats.record_with_key(
                         &model_id,
-                        &label,
+                        label,
                         t0.elapsed().as_millis() as f64,
                         false,
                     );
@@ -2249,30 +2541,19 @@ pub async fn completions(
                 let (output_tokens, repetition_count, had_tool_call) =
                     extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
                 if output_tokens > 0 || repetition_count > 0 {
-                    if let Some(label) = state.pool.get_key_label(idx) {
-                        state.model_stats.record_with_circuit_breaker(
-                            &model_id,
-                            ttfc_ms,
-                            ok,
-                            output_tokens,
-                            repetition_count,
-                            had_tool_call,
-                        );
-                    } else {
-                        state.model_stats.record_with_circuit_breaker(
-                            &model_id,
-                            ttfc_ms,
-                            ok,
-                            output_tokens,
-                            repetition_count,
-                            had_tool_call,
-                        );
-                    }
+                    state.model_stats.record_with_circuit_breaker(
+                        &model_id,
+                        ttfc_ms,
+                        ok,
+                        output_tokens,
+                        repetition_count,
+                        had_tool_call,
+                    );
                 } else {
-                    if let Some(label) = state.pool.get_key_label(idx) {
+                    if let Some(label) = key_label.as_ref() {
                         state
                             .model_stats
-                            .record_with_key(&model_id, &label, ttfc_ms, ok);
+                            .record_with_key(&model_id, label, ttfc_ms, ok);
                     } else {
                         state.model_stats.record(&model_id, ttfc_ms, ok);
                     }
@@ -2285,10 +2566,10 @@ pub async fn completions(
                     HeaderValue::from_str(&content_type)
                         .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                 );
-                if let Some(label) = state.pool.get_key_label(idx) {
+                if let Some(label) = key_label.as_ref() {
                     response.headers_mut().insert(
                         "x-key-label",
-                        HeaderValue::from_str(&label)
+                        HeaderValue::from_str(label)
                             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                     );
                 }
@@ -2309,6 +2590,7 @@ pub async fn embeddings(
     _headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    state.gateway_metrics.record_request(false);
     eprintln!("[nimaproxy] POST /v1/embeddings");
     let model_id = if let Ok(v) = serde_json::from_slice::<Value>(&body) {
         v.get("model")
@@ -2320,24 +2602,27 @@ pub async fn embeddings(
     };
     let n = state.pool.len().min(MAX_RETRIES).max(1);
     for _ in 0..n {
-        let Some((key, idx)) = state.pool.next_key() else {
-            return (StatusCode::TOO_MANY_REQUESTS, "all keys rate-limited").into_response();
+        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state) {
+            Ok(permits) => permits,
+            Err(response) => return response,
         };
+        let _upstream_permit = upstream_permit;
+        let key_label = key_lease.label.clone();
         let t0 = Instant::now();
         let result = state
             .client
             .post(format!("{}/v1/embeddings", state.target))
-            .header("Authorization", format!("Bearer {}", key))
+            .header("Authorization", format!("Bearer {}", key_lease.key))
             .header("Content-Type", "application/json")
             .body(body.clone())
             .send()
             .await;
         match result {
             Err(e) => {
-                if let Some(label) = state.pool.get_key_label(idx) {
+                if let Some(label) = key_label.as_ref() {
                     state.model_stats.record_with_key(
                         &model_id,
-                        &label,
+                        label,
                         t0.elapsed().as_millis() as f64,
                         false,
                     );
@@ -2370,10 +2655,10 @@ pub async fn embeddings(
                     }
                 };
                 let full_body = collected.concat();
-                if let Some(label) = state.pool.get_key_label(idx) {
+                if let Some(label) = key_label.as_ref() {
                     state
                         .model_stats
-                        .record_with_key(&model_id, &label, ttfc_ms, ok);
+                        .record_with_key(&model_id, label, ttfc_ms, ok);
                 } else {
                     state.model_stats.record(&model_id, ttfc_ms, ok);
                 }
@@ -2385,10 +2670,10 @@ pub async fn embeddings(
                     HeaderValue::from_str(&content_type)
                         .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                 );
-                if let Some(label) = state.pool.get_key_label(idx) {
+                if let Some(label) = key_label.as_ref() {
                     response.headers_mut().insert(
                         "x-key-label",
-                        HeaderValue::from_str(&label)
+                        HeaderValue::from_str(label)
                             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                     );
                 }

@@ -342,10 +342,10 @@ proc printTable*(stats: seq[ModelStats], round: int,
   echo "  " & pagePart & " | " & filterPart & " | " & countPart
   if proxyStatus.isSome:
     let ph = proxyStatus.get
-    let proxyColor = if ph.status == "running": "\e[32m" else: "\e[33m"
+    let proxyColor = if ph.status in ["running", "UP"]: "\e[32m" else: "\e[33m"
     let keysStr = $ph.activeKeys & " key" & (if ph.activeKeys == 1: "" else: "s")
     let routeStr = if ph.routingEnabled: "routing" else: "no-routing"
-    let raceStr  = if ph.racingEnabled:  " racing" else: ""
+    let raceStr  = if ph.racingEnabled: (if ph.racingAdaptive: " adaptive-racing" else: " racing") else: ""
     echo "  " & proxyColor & "[proxy " & ph.status & "]\e[0m " &
          "\e[90m" & keysStr & " | " & routeStr & raceStr & "\e[0m"
   echo ""

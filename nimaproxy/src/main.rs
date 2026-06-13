@@ -1,13 +1,7 @@
-use nimaproxy::{config, AppState, ModelRouter, ModelStatsStore, Strategy};
-use axum::{
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    routing::post,
-    Router,
-};
-use tracing::{info, warn};
+use axum::{http::StatusCode, response::IntoResponse, routing::get, routing::post, Router};
 use nimaproxy::turn_log;
+use nimaproxy::{config, AppState, ModelRouter, ModelStatsStore, RuntimeControls, Strategy};
+use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn usage() -> ! {
@@ -38,12 +32,12 @@ async fn main() {
                 i += 1;
                 config_path = args.get(i).cloned();
             }
-        "--port" | "-p" => {
-            i += 1;
-            if let Some(p) = args.get(i).and_then(|v| v.parse::<u16>().ok()) {
-                port_override = Some(p);
+            "--port" | "-p" => {
+                i += 1;
+                if let Some(p) = args.get(i).and_then(|v| v.parse::<u16>().ok()) {
+                    port_override = Some(p);
+                }
             }
-        }
             "--pid-file" => {
                 i += 1;
                 pid_file_override = args.get(i).cloned();
@@ -58,22 +52,28 @@ async fn main() {
         std::env::set_var("NIMAPROXY_PID_FILE", pf);
     }
 
-    let pid_file_path = std::env::var("NIMAPROXY_PID_FILE")
-        .unwrap_or_else(|_| "/tmp/nimaproxy.pid".to_string());
+    let pid_file_path =
+        std::env::var("NIMAPROXY_PID_FILE").unwrap_or_else(|_| "/tmp/nimaproxy.pid".to_string());
 
     // Initialize tracing early for debugging
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,nimaproxy=debug"));
     let _ = tracing_subscriber::registry()
-        .with(fmt::layer().with_target(true).with_thread_ids(true).with_file(true).with_line_number(true))
+        .with(
+            fmt::layer()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true),
+        )
         .with(filter)
         .try_init();
 
     info!("nimaproxy starting up");
 
-// Initialize turn logging
-let _ = turn_log::init_logger("/var/log/nimaproxy/turns.jsonl", true);
-info!("Turn logging initialized");
+    // Initialize turn logging
+    let _ = turn_log::init_logger("/var/log/nimaproxy/turns.jsonl", true);
+    info!("Turn logging initialized");
 
     // Load config to determine actual port
     let config_path = config_path.unwrap_or_else(|| "nimaproxy.toml".to_string());
@@ -97,7 +97,11 @@ info!("Turn logging initialized");
     } else {
         cfg.listen_addr()
     };
-    let port: u16 = listen.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(8080);
+    let port: u16 = listen
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
 
     // CRITICAL: Write PID file AFTER determining actual port, BEFORE binding TCP.
     // Parent polls for: (1) PID file with correct PID:PORT, (2) TCP port accepting connections.
@@ -106,7 +110,10 @@ info!("Turn logging initialized");
     if let Err(e) = std::fs::write(&pid_file_path, &pid_content) {
         eprintln!("[nimaproxy main] FAILED to write PID file: {}", e);
     } else {
-        eprintln!("[nimaproxy main] WROTE PID FILE: {} -> {}", pid_file_path, pid_content);
+        eprintln!(
+            "[nimaproxy main] WROTE PID FILE: {} -> {}",
+            pid_file_path, pid_content
+        );
     }
 
     let target = cfg.target_url();
@@ -131,6 +138,18 @@ info!("Turn logging initialized");
     let racing_max_parallel = cfg.racing_max_parallel();
     let racing_timeout_ms = cfg.racing_timeout_ms();
     let racing_strategy = cfg.racing_strategy();
+    let runtime_controls = RuntimeControls {
+        racing_adaptive: cfg.racing_adaptive(),
+        racing_min_parallel: cfg.racing_min_parallel(),
+        racing_pressure_parallel: cfg.racing_pressure_parallel(),
+        racing_degraded_parallel: cfg.racing_degraded_parallel(),
+        racing_fast_models: cfg.racing_fast_models(),
+        racing_fallback_models: cfg.racing_fallback_models(),
+        max_upstream_in_flight: cfg.max_upstream_in_flight(),
+        max_in_flight_per_key: cfg.max_in_flight_per_key(),
+        min_dynamic_timeout_ms: cfg.min_dynamic_timeout_ms(),
+        dynamic_sample_floor: cfg.dynamic_sample_floor(),
+    };
     let keys = cfg.keys;
     let model_params = cfg.model_params.unwrap_or_default();
     let model_compat = cfg.model_compat.unwrap_or_default();
@@ -138,7 +157,7 @@ info!("Turn logging initialized");
     eprintln!("[nimaproxy main] model_compat loaded: supports_developer_role={:?}, supports_tool_messages={:?}", 
         model_compat.supports_developer_role, model_compat.supports_tool_messages);
 
-    let state = AppState::new(
+    let state = AppState::new_with_controls(
         keys,
         target.clone(),
         router,
@@ -149,10 +168,14 @@ info!("Turn logging initialized");
         racing_strategy,
         model_params,
         model_compat,
+        runtime_controls,
     );
 
     let app = Router::new()
-        .route("/v1/chat/completions", post(nimaproxy::proxy::chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(nimaproxy::proxy::chat_completions),
+        )
         .route("/test-post", post(nimaproxy::proxy::chat_completions))
         .route("/v1/models", get(nimaproxy::proxy::models))
         .route("/models", get(nimaproxy::proxy::models)) // alias: OMP polls /models without /v1/ prefix
@@ -169,7 +192,10 @@ info!("Turn logging initialized");
         method: axum::http::Method,
     ) -> impl IntoResponse {
         warn!(uri = %uri, method = %method, "unmatched route - 404");
-        (StatusCode::NOT_FOUND, format!("No route for {} {}", method, uri))
+        (
+            StatusCode::NOT_FOUND,
+            format!("No route for {} {}", method, uri),
+        )
     }
 
     let key_count = state.pool.len();
@@ -182,15 +208,34 @@ info!("Turn logging initialized");
             if !models.is_empty() {
                 let strategy = r.strategy.as_deref().unwrap_or("round_robin");
                 let threshold = r.spike_threshold_ms.unwrap_or(3000.0);
-                println!("  routing: {} strategy, {} models, spike>{:.0}ms", strategy, models.len(), threshold);
+                println!(
+                    "  routing: {} strategy, {} models, spike>{:.0}ms",
+                    strategy,
+                    models.len(),
+                    threshold
+                );
             }
         }
     }
 
     if !state.racing_models.is_empty() {
-        println!("  racing : {} models, max_parallel={}, timeout={}ms, strategy={}",
-            state.racing_models.len(), state.racing_max_parallel, state.racing_timeout_ms, state.racing_strategy);
+        println!(
+            "  racing : {} models, max_parallel={}, timeout={}ms, strategy={}, adaptive={}",
+            state.racing_models.len(),
+            state.racing_max_parallel,
+            state.racing_timeout_ms,
+            state.racing_strategy,
+            state.racing_adaptive
+        );
     }
+
+    println!(
+        "  limits : upstream={}, per_key={}, timeout_floor={}ms, sample_floor={}",
+        state.max_upstream_in_flight,
+        state.max_in_flight_per_key,
+        state.min_dynamic_timeout_ms,
+        state.dynamic_sample_floor
+    );
 
     println!("  routes : POST /v1/chat/completions POST /v1/completions POST /v1/embeddings GET /v1/models GET /props GET /health GET /stats");
 

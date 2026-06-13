@@ -2,6 +2,29 @@
 
 All notable changes to nimaproxy will be documented in this file.
 
+## [0.15.3] - 2026-06-12
+
+### Added
+
+- Adaptive racing controls: `adaptive`, `min_parallel`, `pressure_parallel`, `degraded_parallel`, `fast_models`, and `fallback_models`.
+- Gateway concurrency controls: `[limits].max_upstream_in_flight` and `[limits].max_in_flight_per_key`.
+- Timeout learning controls: `[timeouts].min_dynamic_timeout_ms` and `[timeouts].dynamic_sample_floor`.
+- `/health` and `/stats` now report gateway in-flight counts, configured limits, request counters, overload/no-key/timeout/429 counters, fanout average, racing wins, and per-key in-flight counts.
+- `NIMAPROXY_STRESS_TURNS` controls the live stress-test turn count for quota-aware production triage.
+
+### Changed
+
+- Version bump: 0.15.2 -> 0.15.3.
+- Racing uses tiered candidate selection when adaptive mode is enabled: healthy fast models first, healthy fallback models second, degraded candidates only as backfill.
+- Successful races abort losing tasks after the first successful upstream response to reduce wasted NVIDIA work.
+- Local latency degradation requires at least three latency samples; explicit NVIDIA server-degraded responses still take effect immediately.
+- Current non-live test counts: 262 lib, 45 integration, 32 proxy_error_paths, and 14 coverage_gaps.
+
+### Fixed
+
+- Gateway overload is handled before upstream dispatch; saturated global or per-key concurrency returns 503 locally.
+- Dynamic timeout calculation no longer shrinks below the configured floor until the configured sample floor is met.
+
 ## [0.15.2] - 2026-06-12
 
 ### Added
@@ -31,7 +54,7 @@ All notable changes to nimaproxy will be documented in this file.
 
 - Version bump: 0.13.7 → 0.15.1.
 - Updated docs and examples for the current eight-model pool and build.nvidia.com per-model defaults.
-- Current test counts: 251 lib, 45 integration, 31 proxy_error_paths, 14 coverage_gaps, 14 e2e_live, 22 live suite tests, and 1 stress test.
+- Test counts at this release: 251 lib, 45 integration, 31 proxy_error_paths, 14 coverage_gaps, 14 e2e_live, 22 live suite tests, and 1 stress test.
 
 ## [0.13.7] - 2026-04-27
 

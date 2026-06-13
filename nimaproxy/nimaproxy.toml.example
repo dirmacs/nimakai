@@ -80,6 +80,33 @@ label = "key4"
 # max_parallel = 10
 # timeout_ms = 15000
 # strategy = "complete"
+# adaptive = true
+# min_parallel = 2
+# pressure_parallel = 6
+# degraded_parallel = 3
+# fast_models = [
+#   "stepfun-ai/step-3.7-flash",
+#   "qwen/qwen3.5-397b-a17b",
+#   "z-ai/glm-5.1",
+#   "moonshotai/kimi-k2.6",
+#   "minimaxai/minimax-m3",
+# ]
+# fallback_models = [
+#   "minimaxai/minimax-m2.7",
+#   "deepseek-ai/deepseek-v4-flash",
+#   "mistralai/mistral-medium-3.5-128b",
+#   "deepseek-ai/deepseek-v4-pro",
+#   "nvidia/nemotron-3-ultra-550b-a55b",
+# ]
+
+# ── Gateway Concurrency and Timeout Controls ─────────────────────────────────
+# [limits]
+# max_upstream_in_flight = 48
+# max_in_flight_per_key = 3
+#
+# [timeouts]
+# min_dynamic_timeout_ms = 8000
+# dynamic_sample_floor = 10
 
 # ── NVIDIA Catalog Inference Defaults ─────────────────────────────────────
 # These values mirror the build.nvidia.com snippets for the current 10-model

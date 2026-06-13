@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tracing::debug;
 
 const RING_SIZE: usize = 100;
+const LATENCY_DEGRADATION_SAMPLE_FLOOR: usize = 3;
 
 /// Distinguishes between locally-declared "dead" status and server-side (API-declared) degradation.
 ///
@@ -38,12 +39,12 @@ pub enum RecordOutcome {
 /// Configuration for circuit breakers that detect problematic model behavior
 #[derive(Clone, Debug)]
 pub struct CircuitBreakerConfig {
- /// Max output tokens before triggering degradation (0 = disabled)
- pub max_output_tokens: u32,
- /// Max repeated n-gram count before triggering degradation (0 = disabled)
- pub max_repetitions: u32,
- /// Max consecutive assistant turns without tool calls (0 = disabled)
- pub max_consecutive_assistant_turns: u32,
+    /// Max output tokens before triggering degradation (0 = disabled)
+    pub max_output_tokens: u32,
+    /// Max repeated n-gram count before triggering degradation (0 = disabled)
+    pub max_repetitions: u32,
+    /// Max consecutive assistant turns without tool calls (0 = disabled)
+    pub max_consecutive_assistant_turns: u32,
 }
 
 impl Default for CircuitBreakerConfig {
@@ -57,19 +58,19 @@ impl Default for CircuitBreakerConfig {
 }
 
 struct ModelEntry {
- ring: [f64; RING_SIZE],
- ring_pos: usize,
- ring_len: usize,
- pub total: u64,
- pub success: u64,
- pub consecutive_failures: u32,
- pub last_ms: f64,
- pub output_token_count: u32,
- pub repetition_count: u32,
- pub consecutive_assistant_turns: u32,
- /// Track if this model has been marked as degraded by the server (NVIDIA)
- /// This is separate from local degradation (consecutive failures, high latency, etc.)
- pub server_degraded: bool,
+    ring: [f64; RING_SIZE],
+    ring_pos: usize,
+    ring_len: usize,
+    pub total: u64,
+    pub success: u64,
+    pub consecutive_failures: u32,
+    pub last_ms: f64,
+    pub output_token_count: u32,
+    pub repetition_count: u32,
+    pub consecutive_assistant_turns: u32,
+    /// Track if this model has been marked as degraded by the server (NVIDIA)
+    /// This is separate from local degradation (consecutive failures, high latency, etc.)
+    pub server_degraded: bool,
 }
 
 struct KeyFailureTracker {
@@ -97,21 +98,21 @@ impl KeyFailureTracker {
 }
 
 impl ModelEntry {
- fn new() -> Self {
- ModelEntry {
- ring: [0.0; RING_SIZE],
- ring_pos: 0,
- ring_len: 0,
- total: 0,
- success: 0,
- consecutive_failures: 0,
- last_ms: 0.0,
- output_token_count: 0,
- repetition_count: 0,
- consecutive_assistant_turns: 0,
- server_degraded: false,
- }
- }
+    fn new() -> Self {
+        ModelEntry {
+            ring: [0.0; RING_SIZE],
+            ring_pos: 0,
+            ring_len: 0,
+            total: 0,
+            success: 0,
+            consecutive_failures: 0,
+            last_ms: 0.0,
+            output_token_count: 0,
+            repetition_count: 0,
+            consecutive_assistant_turns: 0,
+            server_degraded: false,
+        }
+    }
 
     fn push(&mut self, ms: f64) {
         self.ring[self.ring_pos] = ms;
@@ -152,55 +153,74 @@ impl ModelEntry {
     /// Calculate dynamic timeout for this model based on historical P95.
     /// Returns timeout_ms with buffer: p95 + max(2000ms, p95 * 0.5), capped at max_timeout.
     pub fn dynamic_timeout_ms(&self, max_timeout_ms: u64) -> u64 {
+        self.dynamic_timeout_ms_with_policy(max_timeout_ms, 1000, 2)
+    }
+
+    pub fn dynamic_timeout_ms_with_policy(
+        &self,
+        max_timeout_ms: u64,
+        min_timeout_ms: u64,
+        sample_floor: usize,
+    ) -> u64 {
+        if self.ring_len < sample_floor {
+            return max_timeout_ms;
+        }
         let Some(p95) = self.p95_ms() else {
             return max_timeout_ms;
         };
         let buffer = (p95 * 0.5).max(2000.0);
         let timeout = (p95 + buffer).min(max_timeout_ms as f64) as u64;
-        timeout.max(1000) // minimum 1s timeout
+        timeout.max(min_timeout_ms.max(1000))
     }
 
-pub fn is_degraded(&self, model_id: &str, spike_threshold_ms: f64, cb_config: &CircuitBreakerConfig) -> bool {
- // Server-side degradation (NVIDIA-declared) takes precedence
- if self.server_degraded {
- return true;
- }
- if self.consecutive_failures >= 3 {
- return true;
- }
- if let Some(avg) = self.avg_ms() {
- if avg > spike_threshold_ms {
- return true;
- }
- }
- if cb_config.max_output_tokens > 0 && self.output_token_count > cb_config.max_output_tokens
- {
- return true;
- }
- if cb_config.max_repetitions > 0 && self.repetition_count >= cb_config.max_repetitions {
- return true;
- }
-    if cb_config.max_consecutive_assistant_turns > 0
-        && self.consecutive_assistant_turns >= cb_config.max_consecutive_assistant_turns
-    {
-        debug!(
+    pub fn is_degraded(
+        &self,
+        model_id: &str,
+        spike_threshold_ms: f64,
+        cb_config: &CircuitBreakerConfig,
+    ) -> bool {
+        // Server-side degradation (NVIDIA-declared) takes precedence
+        if self.server_degraded {
+            return true;
+        }
+        if self.consecutive_failures >= 3 {
+            return true;
+        }
+        if self.ring_len >= LATENCY_DEGRADATION_SAMPLE_FLOOR {
+            if let Some(avg) = self.avg_ms() {
+                if avg > spike_threshold_ms {
+                    return true;
+                }
+            }
+        }
+        if cb_config.max_output_tokens > 0 && self.output_token_count > cb_config.max_output_tokens
+        {
+            return true;
+        }
+        if cb_config.max_repetitions > 0 && self.repetition_count >= cb_config.max_repetitions {
+            return true;
+        }
+        if cb_config.max_consecutive_assistant_turns > 0
+            && self.consecutive_assistant_turns >= cb_config.max_consecutive_assistant_turns
+        {
+            debug!(
             "Circuit breaker triggered for model '{}': consecutive_assistant_turns={} >= max_consecutive_assistant_turns={}",
             model_id,
             self.consecutive_assistant_turns,
             cb_config.max_consecutive_assistant_turns
         );
-        return true;
+            return true;
+        }
+        false
     }
- false
- }
- 
- /// Mark this model as degraded by the server (NVIDIA API declaration).
- /// This is separate from local degradation heuristics.
- pub fn mark_server_degraded(&mut self) {
- self.server_degraded = true;
- // Also increment consecutive failures to ensure local degradation tracking stays in sync
- self.consecutive_failures = self.consecutive_failures.saturating_add(3);
- }
+
+    /// Mark this model as degraded by the server (NVIDIA API declaration).
+    /// This is separate from local degradation heuristics.
+    pub fn mark_server_degraded(&mut self) {
+        self.server_degraded = true;
+        // Also increment consecutive failures to ensure local degradation tracking stays in sync
+        self.consecutive_failures = self.consecutive_failures.saturating_add(3);
+    }
 }
 
 /// Snapshot exported to /stats endpoint - per model+key combination.
@@ -293,29 +313,32 @@ impl ModelStatsStore {
         }
     }
 
- pub fn record_with_key(&self, model_id: &str, key_label: &str, ms: f64, ok: bool) {
- self.record(model_id, ms, ok);
- let mut key_map = self.key_failures.lock().unwrap();
- let tracker = key_map
- .entry(model_id.to_string())
- .or_insert_with(KeyFailureTracker::new);
- if ok {
- tracker.record_success(key_label);
- } else {
- tracker.record_failure(key_label);
- }
- }
- 
- /// Record that a model has been marked as degraded by the server (NVIDIA API).
- /// This immediately marks the model as unavailable for routing until recovery.
- pub fn record_server_degraded(&self, model_id: &str) {
- let mut map = self.inner.lock().unwrap();
- let entry = map
- .entry(model_id.to_string())
- .or_insert_with(ModelEntry::new);
- entry.mark_server_degraded();
- eprintln!("[nimaproxy] Model '{}' marked as server-degraded (NVIDIA API block)", model_id);
- }
+    pub fn record_with_key(&self, model_id: &str, key_label: &str, ms: f64, ok: bool) {
+        self.record(model_id, ms, ok);
+        let mut key_map = self.key_failures.lock().unwrap();
+        let tracker = key_map
+            .entry(model_id.to_string())
+            .or_insert_with(KeyFailureTracker::new);
+        if ok {
+            tracker.record_success(key_label);
+        } else {
+            tracker.record_failure(key_label);
+        }
+    }
+
+    /// Record that a model has been marked as degraded by the server (NVIDIA API).
+    /// This immediately marks the model as unavailable for routing until recovery.
+    pub fn record_server_degraded(&self, model_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        let entry = map
+            .entry(model_id.to_string())
+            .or_insert_with(ModelEntry::new);
+        entry.mark_server_degraded();
+        eprintln!(
+            "[nimaproxy] Model '{}' marked as server-degraded (NVIDIA API block)",
+            model_id
+        );
+    }
 
     pub fn all_keys_failing_for_model(&self, model_id: &str) -> bool {
         let key_map = self.key_failures.lock().unwrap();
@@ -325,55 +348,55 @@ impl ModelStatsStore {
             .unwrap_or(false)
     }
 
- /// Pick the best model from `candidates` for the next request.
- ///
- /// Priority:
- /// 1. Models with < 3 samples (untried) — round-robin among them first
- /// 2. Non-degraded models sorted by avg_ms ascending
- /// 3. If all degraded, pick lowest avg_ms anyway (graceful degradation)
- ///
- /// Note: Server-degraded models (NVIDIA API block) are always excluded.
- pub fn best_model(&self, candidates: &[String]) -> Option<String> {
- if candidates.is_empty() {
- return None;
- }
- let map = self.inner.lock().unwrap();
- let threshold = self.spike_threshold_ms;
+    /// Pick the best model from `candidates` for the next request.
+    ///
+    /// Priority:
+    /// 1. Models with < 3 samples (untried) — round-robin among them first
+    /// 2. Non-degraded models sorted by avg_ms ascending
+    /// 3. If all degraded, pick lowest avg_ms anyway (graceful degradation)
+    ///
+    /// Note: Server-degraded models (NVIDIA API block) are always excluded.
+    pub fn best_model(&self, candidates: &[String]) -> Option<String> {
+        if candidates.is_empty() {
+            return None;
+        }
+        let map = self.inner.lock().unwrap();
+        let threshold = self.spike_threshold_ms;
 
- // Partition into (untried, tried_ok, tried_degraded)
- let mut untried: Vec<&String> = Vec::new();
- let mut ok: Vec<(&String, f64)> = Vec::new();
- let mut degraded: Vec<(&String, f64)> = Vec::new();
+        // Partition into (untried, tried_ok, tried_degraded)
+        let mut untried: Vec<&String> = Vec::new();
+        let mut ok: Vec<(&String, f64)> = Vec::new();
+        let mut degraded: Vec<(&String, f64)> = Vec::new();
 
- for m in candidates {
- match map.get(m) {
- None => untried.push(m),
- Some(e) => {
-// Server-degraded models are always excluded
- if e.server_degraded {
-     continue; // Skip this model entirely
- }
- // Models with < 3 total samples are "untried" — round-robin among them first
- // Use total (includes failures) not ring_len (only successes) to properly detect untried state
- if e.total == 0 || e.total < 3 {
-     untried.push(m);
- } else if e.is_degraded(m, threshold, &self.circuit_breaker) {
- degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
- } else {
- ok.push((m, e.avg_ms().unwrap_or(f64::MAX)));
- }
- }
- }
- }
+        for m in candidates {
+            match map.get(m) {
+                None => untried.push(m),
+                Some(e) => {
+                    // Server-degraded models are always excluded
+                    if e.server_degraded {
+                        continue; // Skip this model entirely
+                    }
+                    // Models with < 3 total samples are "untried" — round-robin among them first
+                    // Use total (includes failures) not ring_len (only successes) to properly detect untried state
+                    if e.total == 0 || e.total < 3 {
+                        untried.push(m);
+                    } else if e.is_degraded(m, threshold, &self.circuit_breaker) {
+                        degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
+                    } else {
+                        ok.push((m, e.avg_ms().unwrap_or(f64::MAX)));
+                    }
+                }
+            }
+        }
 
- if !untried.is_empty() {
- // Round-robin among untried using the total request count as seed
- let total: u64 = map.values().map(|e| e.total).sum();
- return Some(untried[(total as usize) % untried.len()].clone());
- }
+        if !untried.is_empty() {
+            // Round-robin among untried using the total request count as seed
+            let total: u64 = map.values().map(|e| e.total).sum();
+            return Some(untried[(total as usize) % untried.len()].clone());
+        }
 
- if !ok.is_empty() {
- ok.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        if !ok.is_empty() {
+            ok.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             return Some(ok[0].0.clone());
         }
 
@@ -437,6 +460,83 @@ impl ModelStatsStore {
             .collect()
     }
 
+    pub fn racing_candidates_tiered(
+        &self,
+        fast_candidates: &[String],
+        fallback_candidates: &[String],
+        max: usize,
+    ) -> Vec<String> {
+        let map = self.inner.lock().unwrap();
+        let threshold = self.spike_threshold_ms;
+        let key_failures = self.key_failures.lock().unwrap();
+
+        let collect = |candidates: &[String]| {
+            let mut healthy: Vec<(String, Option<f64>)> = Vec::new();
+            let mut degraded: Vec<(String, Option<f64>)> = Vec::new();
+            let mut seen = HashSet::new();
+
+            for m in candidates {
+                if !seen.insert(m.clone()) {
+                    continue;
+                }
+                let all_keys_failed = key_failures
+                    .get(m)
+                    .map(|t| t.all_keys_failed())
+                    .unwrap_or(false);
+                if all_keys_failed {
+                    continue;
+                }
+
+                if let Some(e) = map.get(m) {
+                    if e.server_degraded {
+                        continue;
+                    }
+                    if e.is_degraded(m, threshold, &self.circuit_breaker) {
+                        degraded.push((m.clone(), e.avg_ms()));
+                    } else {
+                        healthy.push((m.clone(), e.avg_ms()));
+                    }
+                } else {
+                    healthy.push((m.clone(), None));
+                }
+            }
+
+            let by_latency = |a: &(String, Option<f64>), b: &(String, Option<f64>)| match (a.1, b.1)
+            {
+                (Some(av), Some(bv)) => av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+
+            healthy.sort_by(by_latency);
+            degraded.sort_by(by_latency);
+            (healthy, degraded)
+        };
+
+        let (fast_healthy, fast_degraded) = collect(fast_candidates);
+        let (fallback_healthy, fallback_degraded) = collect(fallback_candidates);
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for bucket in [
+            fast_healthy,
+            fallback_healthy,
+            fast_degraded,
+            fallback_degraded,
+        ] {
+            for (model, _) in bucket {
+                if out.len() >= max {
+                    return out;
+                }
+                if seen.insert(model.clone()) {
+                    out.push(model);
+                }
+            }
+        }
+        out
+    }
+
     /// Export current stats for all tracked models (for /stats endpoint).
     pub fn snapshot(&self) -> Vec<ModelSnapshot> {
         let map = self.inner.lock().unwrap();
@@ -479,6 +579,22 @@ impl ModelStatsStore {
         let map = self.inner.lock().unwrap();
         match map.get(model_id) {
             Some(e) => e.dynamic_timeout_ms(max_timeout_ms),
+            None => max_timeout_ms,
+        }
+    }
+
+    pub fn get_model_timeout_with_policy(
+        &self,
+        model_id: &str,
+        max_timeout_ms: u64,
+        min_timeout_ms: u64,
+        sample_floor: usize,
+    ) -> u64 {
+        let map = self.inner.lock().unwrap();
+        match map.get(model_id) {
+            Some(e) => {
+                e.dynamic_timeout_ms_with_policy(max_timeout_ms, min_timeout_ms, sample_floor)
+            }
             None => max_timeout_ms,
         }
     }
@@ -577,6 +693,15 @@ mod tests {
         let cb = CircuitBreakerConfig::default();
 
         assert!(entry.is_degraded("test-model", 3000.0, &cb));
+    }
+
+    #[test]
+    fn test_is_not_degraded_by_single_slow_latency_sample() {
+        let mut entry = ModelEntry::new();
+        entry.push(9000.0);
+        let cb = CircuitBreakerConfig::default();
+
+        assert!(!entry.is_degraded("test-model", 3000.0, &cb));
     }
 
     #[test]
@@ -974,6 +1099,26 @@ mod getter_tests {
     }
 
     #[test]
+    fn test_get_model_timeout_policy_floor_and_sample_floor() {
+        let store = ModelStatsStore::new(3000.0);
+        let max_timeout = 15000u64;
+
+        for _ in 0..9 {
+            store.record("fast-model", 500.0, true);
+        }
+        assert_eq!(
+            store.get_model_timeout_with_policy("fast-model", max_timeout, 8000, 10),
+            max_timeout
+        );
+
+        store.record("fast-model", 500.0, true);
+        assert_eq!(
+            store.get_model_timeout_with_policy("fast-model", max_timeout, 8000, 10),
+            8000
+        );
+    }
+
+    #[test]
     fn test_get_model_timeout_unknown_model() {
         let store = ModelStatsStore::new(3000.0);
         let max_timeout = 60000u64;
@@ -990,6 +1135,29 @@ mod getter_tests {
 
         let result = store.racing_candidates(&candidates, 5);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_racing_candidates_tiered_prefers_healthy_fast_then_fallback() {
+        let store = ModelStatsStore::new(3000.0);
+        for _ in 0..3 {
+            store.record("fast-degraded", 5000.0, true);
+            store.record("fast-healthy", 700.0, true);
+            store.record("fallback-healthy", 600.0, true);
+        }
+
+        let fast = vec!["fast-degraded".to_string(), "fast-healthy".to_string()];
+        let fallback = vec!["fallback-healthy".to_string()];
+        let result = store.racing_candidates_tiered(&fast, &fallback, 3);
+
+        assert_eq!(
+            result,
+            vec![
+                "fast-healthy".to_string(),
+                "fallback-healthy".to_string(),
+                "fast-degraded".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1038,7 +1206,10 @@ mod getter_tests {
         ];
         let result = store.racing_candidates(&candidates, 2);
 
-        assert_eq!(result, vec!["healthy-a".to_string(), "healthy-b".to_string()]);
+        assert_eq!(
+            result,
+            vec!["healthy-a".to_string(), "healthy-b".to_string()]
+        );
         assert!(!result.contains(&"degraded".to_string()));
     }
 
@@ -1206,197 +1377,208 @@ mod getter_tests {
         // Zero total should return 100.0 (default success rate)
         assert_eq!(entry.success_rate(), 100.0);
     }
- 
-     // Test 19: Circuit breaker token threshold
-     #[test]
-     fn test_circuit_breaker_token_threshold() {
-         let cb_config = CircuitBreakerConfig {
-             max_output_tokens: 100,
-             max_repetitions: 3,
-             max_consecutive_assistant_turns: 5,
-         };
- 
-         let mut entry = ModelEntry::new();
- 
-         // Initially not degraded
-         assert!(!entry.is_degraded("test-model", 3000.0, &cb_config));
- 
-         // Set output token count above threshold
-         entry.output_token_count = 150;
-         assert!(entry.is_degraded("test-model", 3000.0, &cb_config), "Should be degraded due to token count");
-}
- 
- // Test 20: Best model with all degraded using consecutive failures
- #[test]
- fn test_best_model_all_degraded_by_failures() {
- let store = ModelStatsStore::new(3000.0);
- 
- // Make all models degraded with high consecutive failures (3+ failures = degraded)
- store.record("model-a", 5000.0, false);
- store.record("model-a", 5000.0, false);
- store.record("model-a", 5000.0, false);
- 
- store.record("model-b", 5000.0, false);
- store.record("model-b", 5000.0, false);
- store.record("model-b", 5000.0, false);
- 
- let candidates = vec!["model-a".to_string(), "model-b".to_string()];
- 
- // Should still return a model even if all are degraded (graceful degradation)
- let best = store.best_model(&candidates);
- assert!(best.is_some(), "Should return a model even if all are degraded");
- }
- 
- // ============ Server-Side Degradation Tests ============
- 
- #[test]
- fn test_server_degraded_flag_initially_false() {
- let mut entry = ModelEntry::new();
- assert!(!entry.server_degraded);
- }
- 
- #[test]
- fn test_mark_server_degraded() {
- let mut entry = ModelEntry::new();
- assert!(!entry.server_degraded);
- 
- entry.mark_server_degraded();
- assert!(entry.server_degraded);
- }
- 
- #[test]
- fn test_server_degraded_increments_consecutive_failures() {
- let mut entry = ModelEntry::new();
- let initial_failures = entry.consecutive_failures;
- 
- entry.mark_server_degraded();
- 
- // Should increment by 3 (the degradation threshold)
- assert!(entry.consecutive_failures >= initial_failures + 3);
- }
- 
- #[test]
- fn test_is_degraded_server_degraded_takes_precedence() {
- let mut entry = ModelEntry::new();
- let cb_config = CircuitBreakerConfig::default();
- 
- // Initially not degraded
- assert!(!entry.is_degraded("test-model", 3000.0, &cb_config));
- 
- // Mark as server degraded
- entry.mark_server_degraded();
- 
- // Should be degraded even with good latency and no failures
- assert!(entry.is_degraded("test-model", 3000.0, &cb_config));
- }
- 
- #[test]
- fn test_record_server_degraded() {
- let store = ModelStatsStore::new(3000.0);
- 
- // Record server degradation for a model
- store.record_server_degraded("test-model");
- 
- // Verify the model is now marked as degraded
- let snapshot = store.snapshot();
- let model_snapshot = snapshot.iter().find(|s| s.id == "test-model").unwrap();
- assert!(model_snapshot.degraded);
- }
- 
- #[test]
- fn test_server_degraded_model_excluded_from_best_model() {
- let store = ModelStatsStore::new(3000.0);
- 
- // Add some healthy samples
- store.record("healthy-model", 500.0, true);
- store.record("healthy-model", 600.0, true);
- store.record("healthy-model", 550.0, true);
- 
- // Mark another model as server-degraded
- store.record_server_degraded("server-degraded-model");
- 
- let candidates = vec![
- "healthy-model".to_string(),
- "server-degraded-model".to_string(),
- ];
- 
- // Should pick the healthy model, not the server-degraded one
- let best = store.best_model(&candidates).unwrap();
- assert_eq!(best, "healthy-model");
- }
- 
- #[test]
- fn test_server_degraded_racing_candidates_excluded() {
- let store = ModelStatsStore::new(3000.0);
- 
- // Add healthy samples
- store.record("fast-model", 200.0, true);
- store.record("fast-model", 250.0, true);
- store.record("fast-model", 300.0, true);
- 
- // Mark a model as server-degraded
- store.record_server_degraded("degraded-model");
- 
- let candidates = vec![
- "fast-model".to_string(),
- "degraded-model".to_string(),
- ];
- 
- // Get racing candidates
- let racing = store.racing_candidates(&candidates, 2);
- 
- // Should only include the healthy model
- assert_eq!(racing.len(), 1);
- assert_eq!(racing[0], "fast-model");
- }
- 
- #[test]
- fn test_server_degraded_persists_across_snapshots() {
- let store = ModelStatsStore::new(3000.0);
- 
- // Mark as server degraded
- store.record_server_degraded("persistent-model");
- 
- // Take multiple snapshots
- for _ in 0..3 {
- let snapshot = store.snapshot();
- let model = snapshot.iter().find(|s| s.id == "persistent-model").unwrap();
- assert!(model.degraded, "Model should remain degraded across snapshots");
- }
- }
- 
-#[test]
-fn test_server_degraded_vs_local_degraded() {
- let store = ModelStatsStore::new(3000.0);
 
- // Model A: locally degraded (3 consecutive failures)
- store.record("local-degraded", 5000.0, false);
- store.record("local-degraded", 5000.0, false);
- store.record("local-degraded", 5000.0, false);
+    // Test 19: Circuit breaker token threshold
+    #[test]
+    fn test_circuit_breaker_token_threshold() {
+        let cb_config = CircuitBreakerConfig {
+            max_output_tokens: 100,
+            max_repetitions: 3,
+            max_consecutive_assistant_turns: 5,
+        };
 
- // Model B: server degraded (excluded from routing)
- store.record_server_degraded("server-degraded");
+        let mut entry = ModelEntry::new();
 
- // Model C: healthy
- store.record("healthy", 500.0, true);
- store.record("healthy", 600.0, true);
- store.record("healthy", 550.0, true);
+        // Initially not degraded
+        assert!(!entry.is_degraded("test-model", 3000.0, &cb_config));
 
- // Debug: check snapshot to understand state
- let snapshot = store.snapshot();
- for s in &snapshot {
-     eprintln!("SNAPSHOT: id={}, total={}, ring_len={}, consec_fail={}, degraded={}",
-         s.id, s.total, s.sample_count, s.consecutive_failures, s.degraded);
- }
+        // Set output token count above threshold
+        entry.output_token_count = 150;
+        assert!(
+            entry.is_degraded("test-model", 3000.0, &cb_config),
+            "Should be degraded due to token count"
+        );
+    }
 
- let candidates = vec![
-     "local-degraded".to_string(),
-     "server-degraded".to_string(),
-     "healthy".to_string(),
- ];
+    // Test 20: Best model with all degraded using consecutive failures
+    #[test]
+    fn test_best_model_all_degraded_by_failures() {
+        let store = ModelStatsStore::new(3000.0);
 
- // Should pick healthy model (server-degraded is excluded, local-degraded is degraded)
- let best = store.best_model(&candidates).unwrap();
- assert_eq!(best, "healthy");
-}
+        // Make all models degraded with high consecutive failures (3+ failures = degraded)
+        store.record("model-a", 5000.0, false);
+        store.record("model-a", 5000.0, false);
+        store.record("model-a", 5000.0, false);
+
+        store.record("model-b", 5000.0, false);
+        store.record("model-b", 5000.0, false);
+        store.record("model-b", 5000.0, false);
+
+        let candidates = vec!["model-a".to_string(), "model-b".to_string()];
+
+        // Should still return a model even if all are degraded (graceful degradation)
+        let best = store.best_model(&candidates);
+        assert!(
+            best.is_some(),
+            "Should return a model even if all are degraded"
+        );
+    }
+
+    // ============ Server-Side Degradation Tests ============
+
+    #[test]
+    fn test_server_degraded_flag_initially_false() {
+        let mut entry = ModelEntry::new();
+        assert!(!entry.server_degraded);
+    }
+
+    #[test]
+    fn test_mark_server_degraded() {
+        let mut entry = ModelEntry::new();
+        assert!(!entry.server_degraded);
+
+        entry.mark_server_degraded();
+        assert!(entry.server_degraded);
+    }
+
+    #[test]
+    fn test_server_degraded_increments_consecutive_failures() {
+        let mut entry = ModelEntry::new();
+        let initial_failures = entry.consecutive_failures;
+
+        entry.mark_server_degraded();
+
+        // Should increment by 3 (the degradation threshold)
+        assert!(entry.consecutive_failures >= initial_failures + 3);
+    }
+
+    #[test]
+    fn test_is_degraded_server_degraded_takes_precedence() {
+        let mut entry = ModelEntry::new();
+        let cb_config = CircuitBreakerConfig::default();
+
+        // Initially not degraded
+        assert!(!entry.is_degraded("test-model", 3000.0, &cb_config));
+
+        // Mark as server degraded
+        entry.mark_server_degraded();
+
+        // Should be degraded even with good latency and no failures
+        assert!(entry.is_degraded("test-model", 3000.0, &cb_config));
+    }
+
+    #[test]
+    fn test_record_server_degraded() {
+        let store = ModelStatsStore::new(3000.0);
+
+        // Record server degradation for a model
+        store.record_server_degraded("test-model");
+
+        // Verify the model is now marked as degraded
+        let snapshot = store.snapshot();
+        let model_snapshot = snapshot.iter().find(|s| s.id == "test-model").unwrap();
+        assert!(model_snapshot.degraded);
+    }
+
+    #[test]
+    fn test_server_degraded_model_excluded_from_best_model() {
+        let store = ModelStatsStore::new(3000.0);
+
+        // Add some healthy samples
+        store.record("healthy-model", 500.0, true);
+        store.record("healthy-model", 600.0, true);
+        store.record("healthy-model", 550.0, true);
+
+        // Mark another model as server-degraded
+        store.record_server_degraded("server-degraded-model");
+
+        let candidates = vec![
+            "healthy-model".to_string(),
+            "server-degraded-model".to_string(),
+        ];
+
+        // Should pick the healthy model, not the server-degraded one
+        let best = store.best_model(&candidates).unwrap();
+        assert_eq!(best, "healthy-model");
+    }
+
+    #[test]
+    fn test_server_degraded_racing_candidates_excluded() {
+        let store = ModelStatsStore::new(3000.0);
+
+        // Add healthy samples
+        store.record("fast-model", 200.0, true);
+        store.record("fast-model", 250.0, true);
+        store.record("fast-model", 300.0, true);
+
+        // Mark a model as server-degraded
+        store.record_server_degraded("degraded-model");
+
+        let candidates = vec!["fast-model".to_string(), "degraded-model".to_string()];
+
+        // Get racing candidates
+        let racing = store.racing_candidates(&candidates, 2);
+
+        // Should only include the healthy model
+        assert_eq!(racing.len(), 1);
+        assert_eq!(racing[0], "fast-model");
+    }
+
+    #[test]
+    fn test_server_degraded_persists_across_snapshots() {
+        let store = ModelStatsStore::new(3000.0);
+
+        // Mark as server degraded
+        store.record_server_degraded("persistent-model");
+
+        // Take multiple snapshots
+        for _ in 0..3 {
+            let snapshot = store.snapshot();
+            let model = snapshot
+                .iter()
+                .find(|s| s.id == "persistent-model")
+                .unwrap();
+            assert!(
+                model.degraded,
+                "Model should remain degraded across snapshots"
+            );
+        }
+    }
+
+    #[test]
+    fn test_server_degraded_vs_local_degraded() {
+        let store = ModelStatsStore::new(3000.0);
+
+        // Model A: locally degraded (3 consecutive failures)
+        store.record("local-degraded", 5000.0, false);
+        store.record("local-degraded", 5000.0, false);
+        store.record("local-degraded", 5000.0, false);
+
+        // Model B: server degraded (excluded from routing)
+        store.record_server_degraded("server-degraded");
+
+        // Model C: healthy
+        store.record("healthy", 500.0, true);
+        store.record("healthy", 600.0, true);
+        store.record("healthy", 550.0, true);
+
+        // Debug: check snapshot to understand state
+        let snapshot = store.snapshot();
+        for s in &snapshot {
+            eprintln!(
+                "SNAPSHOT: id={}, total={}, ring_len={}, consec_fail={}, degraded={}",
+                s.id, s.total, s.sample_count, s.consecutive_failures, s.degraded
+            );
+        }
+
+        let candidates = vec![
+            "local-degraded".to_string(),
+            "server-degraded".to_string(),
+            "healthy".to_string(),
+        ];
+
+        // Should pick healthy model (server-degraded is excluded, local-degraded is degraded)
+        let best = store.best_model(&candidates).unwrap();
+        assert_eq!(best, "healthy");
+    }
 }

@@ -2,6 +2,30 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.15.3] - 2026-06-12
+
+### Added
+
+- **nimaproxy adaptive racing**: `racing.adaptive=true` can shrink fanout under gateway pressure or partial key degradation while keeping `max_parallel=10` as the healthy ceiling.
+- **Gateway limits**: New `[limits]` config caps total upstream in-flight requests and per-key in-flight requests before calls leave the proxy.
+- **Tiered racing pools**: `fast_models` and `fallback_models` let racing prefer the faster core pool, then backfill with heavier or slower models when needed.
+- **Gateway telemetry**: `/health`, `/stats`, and `nimakai proxy status` now expose upstream in-flight counts, request mix, overload/no-key/timeout/429 counts, fanout average, racing wins, and per-key in-flight counts.
+- **Proxy FFI parser tests**: Added coverage for legacy and v0.15.3 proxy health/stats JSON payloads.
+- **Quota-aware stress triage**: `NIMAPROXY_STRESS_TURNS` now controls the live stress-test turn count.
+
+### Changed
+
+- Version bump: nimakai/nimaproxy 0.15.2 -> 0.15.3.
+- Production `nimaproxy.toml` now keeps port `8080`, `max_parallel=10`, adaptive fanout defaults of `min=2`, `pressure=6`, and `degraded=3`.
+- Dynamic timeouts now use a configurable warm-up floor (`min_dynamic_timeout_ms=8000`, `dynamic_sample_floor=10`) before learned model latency can reduce request timeouts.
+- Local latency degradation now requires at least three latency samples, so one slow successful call does not remove a model from healthy routing.
+
+### Fixed
+
+- **Gateway overload behavior**: Requests are rejected locally with 503 when global or per-key concurrency is exhausted instead of piling up against NVIDIA until all keys cool down.
+- **Racing cleanup**: Losing racers are aborted after the first successful response, reducing unnecessary upstream work during successful races.
+- **TUI proxy footer**: `UP` from nimaproxy health is now rendered as healthy, and adaptive racing is visible in the footer.
+
 ## [0.15.2] - 2026-06-12
 
 ### Added

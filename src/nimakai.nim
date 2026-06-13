@@ -608,8 +608,9 @@ proc runProxy(cfg: Config) =
       stderr.writeLine "\e[33mNote: nimaproxy was not running\e[0m"
 
   of paStatus:
-    let healthOpt = proxyHealth()
-    let statsOpt = proxyStats()
+    let statusPort = if cfg.proxyPort > 0: cfg.proxyPort else: 8080
+    let healthOpt = proxyHealthWithHttpFallback(statusPort)
+    let statsOpt = proxyStatsWithHttpFallback(statusPort)
     if cfg.jsonOutput:
       var j = newJObject()
       if healthOpt.isSome:
@@ -617,8 +618,17 @@ proc runProxy(cfg: Config) =
         j["health"] = %*{
           "status": h.status,
           "active_keys": h.activeKeys,
+          "keys_total": h.keysTotal,
+          "gateway_in_flight": h.gatewayInFlight,
+          "gateway_limit": h.gatewayLimit,
           "routing_enabled": h.routingEnabled,
           "racing_enabled": h.racingEnabled,
+          "racing_max_parallel": h.racingMaxParallel,
+          "racing_timeout_ms": h.racingTimeoutMs,
+          "racing_adaptive": h.racingAdaptive,
+          "racing_min_parallel": h.racingMinParallel,
+          "racing_pressure_parallel": h.racingPressureParallel,
+          "racing_degraded_parallel": h.racingDegradedParallel,
         }
       if statsOpt.isSome:
         let s = statsOpt.get
@@ -637,8 +647,39 @@ proc runProxy(cfg: Config) =
             "key_hint": it.keyHint,
             "active": it.active,
             "cooldown_secs_remaining": it.cooldownSecsRemaining,
+            "in_flight": it.inFlight,
+            "max_in_flight": it.maxInFlight,
           }),
+          "gateway": {
+            "request_total": s.gateway.requestTotal,
+            "direct_requests": s.gateway.directRequests,
+            "racing_requests": s.gateway.racingRequests,
+            "upstream_attempts": s.gateway.upstreamAttempts,
+            "upstream_in_flight": s.gateway.upstreamInFlight,
+            "max_upstream_in_flight": s.gateway.maxUpstreamInFlight,
+            "max_in_flight_per_key": s.gateway.maxInFlightPerKey,
+            "overload_rejects": s.gateway.overloadRejects,
+            "no_key_rejects": s.gateway.noKeyRejects,
+            "timeout_count": s.gateway.timeoutCount,
+            "rate_limit_count": s.gateway.rateLimitCount,
+            "fanout_total": s.gateway.fanoutTotal,
+            "fanout_samples": s.gateway.fanoutSamples,
+            "fanout_avg": s.gateway.fanoutAvg,
+            "racing_wins": s.gateway.racingWins.mapIt(%*{
+              "model": it.model,
+              "wins": it.wins,
+            }),
+          },
           "racing_models": s.racingModels,
+          "racing_enabled": s.racingEnabled,
+          "racing_max_parallel": s.racingMaxParallel,
+          "racing_timeout_ms": s.racingTimeoutMs,
+          "racing_adaptive": s.racingAdaptive,
+          "racing_min_parallel": s.racingMinParallel,
+          "racing_pressure_parallel": s.racingPressureParallel,
+          "racing_degraded_parallel": s.racingDegradedParallel,
+          "racing_fast_models": s.racingFastModels,
+          "racing_fallback_models": s.racingFallbackModels,
         }
       echo $j
     else:
@@ -649,12 +690,25 @@ proc runProxy(cfg: Config) =
       echo ""
       echo &"\e[1m  nimaproxy status\e[0m"
       echo &"  status           : \e[92m{h.status}\e[0m"
-      echo &"  active keys      : {h.activeKeys}"
+      let keyTotal = if h.keysTotal > 0: h.keysTotal else: h.activeKeys
+      echo &"  active keys      : {h.activeKeys}/{keyTotal}"
       echo &"  routing enabled  : {h.routingEnabled}"
       echo &"  racing enabled   : {h.racingEnabled}"
+      if h.gatewayLimit > 0:
+        echo &"  gateway in-flight: {h.gatewayInFlight}/{h.gatewayLimit}"
+      if h.racingEnabled:
+        echo &"  racing fanout    : max={h.racingMaxParallel} adaptive={h.racingAdaptive} min={h.racingMinParallel} pressure={h.racingPressureParallel} degraded={h.racingDegradedParallel}"
       if statsOpt.isSome:
         let s = statsOpt.get
         echo ""
+        if s.gateway.maxUpstreamInFlight > 0 or s.gateway.requestTotal > 0:
+          echo &"  \e[1mgateway metrics\e[0m"
+          echo &"    requests={s.gateway.requestTotal} direct={s.gateway.directRequests} racing={s.gateway.racingRequests} upstream={s.gateway.upstreamAttempts} in_flight={s.gateway.upstreamInFlight}/{s.gateway.maxUpstreamInFlight}"
+          echo &"    rejects overload={s.gateway.overloadRejects} no_key={s.gateway.noKeyRejects} timeouts={s.gateway.timeoutCount} rate_limits={s.gateway.rateLimitCount} fanout_avg={s.gateway.fanoutAvg:.2f}"
+          if s.gateway.racingWins.len > 0:
+            let wins = s.gateway.racingWins.mapIt(&"{it.model}={it.wins}").join(", ")
+            echo &"    racing wins: {wins}"
+          echo ""
         if s.models.len > 0:
           echo &"  \e[1mmodel latency stats ({s.models.len} tracked)\e[0m"
           for m in s.models:
@@ -666,7 +720,8 @@ proc runProxy(cfg: Config) =
           echo &"  \e[1mkey pool ({s.keys.len} keys)\e[0m"
           for k in s.keys:
             let act = if k.active: "\e[92mactive\e[0m" else: &"\e[33mcooldown {k.cooldownSecsRemaining}s\e[0m"
-            echo &"    {k.label:<15} {act:>20}  hint={k.keyHint}"
+            let inflight = if k.maxInFlight > 0: &" in_flight={k.inFlight}/{k.maxInFlight}" else: ""
+            echo &"    {k.label:<15} {act:>20}  hint={k.keyHint}{inflight}"
       echo ""
 
 proc main() =

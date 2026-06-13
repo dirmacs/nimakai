@@ -31,6 +31,10 @@ fn get_test_keys() -> Vec<(String, String)> {
     }
 }
 
+fn live_unavailable(status: u16) -> bool {
+    matches!(status, 429 | 502 | 503 | 504)
+}
+
 fn make_state() -> Arc<AppState> {
     let keys = get_test_keys();
     let key_entries: Vec<KeyEntry> = keys
@@ -124,6 +128,14 @@ async fn test_tool_definition_with_empty_params() {
     let (status, resp) = send_chat(state.clone(), body).await;
     eprintln!("[test_tool_definition_with_empty_params] status={}", status);
 
+    if live_unavailable(status) {
+        eprintln!(
+            "[SKIP] test_tool_definition_with_empty_params: live upstream unavailable (status={})",
+            status
+        );
+        return;
+    }
+
     // Should succeed (2xx) or at least not be a 400 due to schema mismatch.
     // Some models may return 400 for empty parameters, but that's a model limitation.
     assert!(
@@ -172,6 +184,14 @@ async fn test_tool_definition_with_parameters() {
 
     let (status, resp) = send_chat(state.clone(), body).await;
     eprintln!("[test_tool_definition_with_parameters] status={}", status);
+
+    if live_unavailable(status) {
+        eprintln!(
+            "[SKIP] test_tool_definition_with_parameters: live upstream unavailable (status={})",
+            status
+        );
+        return;
+    }
 
     // Model may return tool calls or text; both are acceptable.
     assert!(
@@ -231,6 +251,13 @@ async fn test_tool_call_sequence() {
 
     let (status1, resp1) = send_chat(state.clone(), body1).await;
     eprintln!("[test_tool_call_sequence] turn1 status={}", status1);
+    if live_unavailable(status1) {
+        eprintln!(
+            "[SKIP] test_tool_call_sequence: live upstream unavailable on first turn (status={})",
+            status1
+        );
+        return;
+    }
     assert_eq!(status1, 200, "First turn should succeed");
 
     let resp1 = resp1.unwrap();
@@ -290,6 +317,13 @@ async fn test_tool_call_sequence() {
     // This is the critical test: the proxy must not break the message sequence.
     // If the proxy strips tool_call_id from assistant message or mis-handles tool role,
     // we may get a 400 error with "Not the same number of function calls and responses".
+    if live_unavailable(status2) {
+        eprintln!(
+            "[SKIP] test_tool_call_sequence: live upstream unavailable on second turn (status={})",
+            status2
+        );
+        return;
+    }
     assert_eq!(
         status2, 200,
         "Second turn with tool result should succeed, got {}",
@@ -361,6 +395,14 @@ async fn test_tool_role_transformation() {
     let (status, _) = send_chat(state.clone(), body).await;
     eprintln!("[test_tool_role_transformation] status={}", status);
 
+    if live_unavailable(status) {
+        eprintln!(
+            "[SKIP] test_tool_role_transformation: live upstream unavailable (status={})",
+            status
+        );
+        return;
+    }
+
     // Should succeed (200) or at least not crash with 500.
     assert!(
         status == 200 || status == 400,
@@ -421,6 +463,14 @@ async fn test_assistant_message_with_tool_calls_missing_content() {
         status
     );
 
+    if live_unavailable(status) {
+        eprintln!(
+            "[SKIP] test_assistant_message_with_tool_calls_missing_content: live upstream unavailable (status={})",
+            status
+        );
+        return;
+    }
+
     // Should not crash; likely returns 200 or 400 depending on model strictness.
     assert!(
         status == 200 || status == 400,
@@ -455,6 +505,14 @@ async fn test_reasoning_field_stripped() {
 
     let (status, _) = send_chat(state.clone(), body).await;
     eprintln!("[test_reasoning_field_stripped] status={}", status);
+
+    if live_unavailable(status) {
+        eprintln!(
+            "[SKIP] test_reasoning_field_stripped: live upstream unavailable (status={})",
+            status
+        );
+        return;
+    }
 
     assert!(
         status == 200 || status == 400,
@@ -507,6 +565,13 @@ async fn test_mismatched_tool_calls_and_responses() {
 
     let (status1, resp1) = send_chat(state.clone(), body1).await;
     eprintln!("[test_mismatched] turn1 status={}", status1);
+    if live_unavailable(status1) {
+        eprintln!(
+            "[SKIP] test_mismatched_tool_calls_and_responses: live upstream unavailable on first turn (status={})",
+            status1
+        );
+        return;
+    }
     assert_eq!(status1, 200);
     let resp1 = resp1.unwrap();
     let tool_calls = resp1["choices"][0]["message"]["tool_calls"]
