@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-const NUM_TURNS: usize = 25;
+const DEFAULT_NUM_TURNS: usize = 25;
 
 const SYSTEM_PROMPT: &str = r#"You are a coding assistant. Answer briefly."#;
 
@@ -10,6 +10,14 @@ fn proxy_url() -> String {
         .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
         .trim_end_matches('/')
         .to_string()
+}
+
+fn stress_turns() -> usize {
+    std::env::var("NIMAPROXY_STRESS_TURNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_NUM_TURNS)
 }
 
 fn assert_nimaproxy_target(client: &reqwest::blocking::Client, proxy_url: &str) {
@@ -61,11 +69,12 @@ fn assert_nimaproxy_target(client: &reqwest::blocking::Client, proxy_url: &str) 
 
 #[test]
 fn stress_test() {
+    let num_turns = stress_turns();
     let sep = "=".repeat(80);
     println!("{}", sep);
     println!(
         "nimaproxy STRESS TEST - {} turns with racing + key rotation",
-        NUM_TURNS
+        num_turns
     );
     println!("{}", sep);
     println!();
@@ -86,12 +95,14 @@ fn stress_test() {
     let mut key_usage = std::collections::HashMap::new();
     let mut model_wins = std::collections::HashMap::new();
     model_wins.insert("deepseek-ai/deepseek-v4-pro".to_string(), 0);
+    model_wins.insert("nvidia/nemotron-3-ultra-550b-a55b".to_string(), 0);
     model_wins.insert("deepseek-ai/deepseek-v4-flash".to_string(), 0);
     model_wins.insert("mistralai/mistral-medium-3.5-128b".to_string(), 0);
     model_wins.insert("z-ai/glm-5.1".to_string(), 0);
     model_wins.insert("stepfun-ai/step-3.7-flash".to_string(), 0);
     model_wins.insert("moonshotai/kimi-k2.6".to_string(), 0);
     model_wins.insert("qwen/qwen3.5-397b-a17b".to_string(), 0);
+    model_wins.insert("minimaxai/minimax-m3".to_string(), 0);
     model_wins.insert("minimaxai/minimax-m2.7".to_string(), 0);
     let mut errors = Vec::new();
 
@@ -123,7 +134,7 @@ fn stress_test() {
         "What is the difference between mutable and immutable in Rust?",
     ];
 
-    for turn in 0..NUM_TURNS {
+    for turn in 0..num_turns {
         let user_message = conversation[turn % conversation.len()];
         let start = Instant::now();
 
@@ -290,10 +301,10 @@ fn stress_test() {
         errors.iter().take(5).collect::<Vec<_>>()
     );
     assert!(
-        total_requests >= (NUM_TURNS / 2) as u64,
+        total_requests >= (num_turns / 2) as u64,
         "stress test completed too few successful requests: {}/{}; first errors: {:?}",
         total_requests,
-        NUM_TURNS,
+        num_turns,
         errors.iter().take(5).collect::<Vec<_>>()
     );
     assert!(

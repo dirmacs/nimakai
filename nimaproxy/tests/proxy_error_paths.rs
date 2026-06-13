@@ -708,6 +708,29 @@ async fn test_health_exposes_routing_and_racing_metadata() {
     );
 }
 
+#[tokio::test]
+async fn test_stats_exposes_gateway_metrics_and_limits() {
+    let state = make_racing_state_two_keys("http://127.0.0.1:9".to_string());
+    state.gateway_metrics.record_request(true);
+    state.gateway_metrics.record_fanout(2);
+    state.gateway_metrics.record_overload();
+
+    let resp = nimaproxy::proxy::stats(axum::extract::State(state))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+    let json = response_json(resp).await;
+    assert_eq!(json["gateway"]["request_total"], 1);
+    assert_eq!(json["gateway"]["racing_requests"], 1);
+    assert_eq!(json["gateway"]["fanout_total"], 2);
+    assert_eq!(json["gateway"]["overload_rejects"], 1);
+    assert_eq!(json["gateway"]["max_upstream_in_flight"], 48);
+    assert_eq!(json["gateway"]["max_in_flight_per_key"], 3);
+    assert_eq!(json["racing_enabled"], true);
+    assert_eq!(json["racing_adaptive"], false);
+}
+
 /// Test models endpoint with no keys
 #[tokio::test]
 async fn test_models_endpoint_no_keys() {

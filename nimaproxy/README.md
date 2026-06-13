@@ -24,11 +24,12 @@
 
 - Fire N parallel requests, return first response
 - Trade token budget for minimum P50 latency
-- Configurable timeout and parallelism
+- Adaptive fast/fallback pools and pressure-aware parallelism
+- Configurable timeout, global concurrency, and per-key concurrency
 
 ### 🛡️ Production Ready
 
-- 378 tests with ~92% coverage
+- Unit, integration, live, and stress test suites
 - Graceful error handling and retry logic
 - Comprehensive metrics and health checks
 
@@ -53,8 +54,7 @@ cargo build --release
 Create `nimaproxy.toml`:
 
 ```toml
-[keys]
-[[keys.entries]]
+[[keys]]
 key = "nvapi-YOUR-API-KEY"
 label = "primary"
 
@@ -91,6 +91,32 @@ models = [
 max_parallel = 10
 timeout_ms = 15000
 strategy = "complete"
+adaptive = true
+min_parallel = 2
+pressure_parallel = 6
+degraded_parallel = 3
+fast_models = [
+  "stepfun-ai/step-3.7-flash",
+  "qwen/qwen3.5-397b-a17b",
+  "z-ai/glm-5.1",
+  "moonshotai/kimi-k2.6",
+  "minimaxai/minimax-m3",
+]
+fallback_models = [
+  "minimaxai/minimax-m2.7",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+]
+
+[limits]
+max_upstream_in_flight = 48
+max_in_flight_per_key = 3
+
+[timeouts]
+min_dynamic_timeout_ms = 8000
+dynamic_sample_floor = 10
 ```
 
 ### Per-Model NVIDIA Defaults
@@ -155,7 +181,8 @@ curl http://localhost:8080/stats
 Client → nimaproxy → NVIDIA NIM API
          ├─ Key rotation
          ├─ Latency routing
-         ├─ Racing mode
+         ├─ Adaptive racing mode
+         ├─ Gateway concurrency limits
          └─ Circuit breaker
 ```
 
@@ -166,9 +193,9 @@ Client → nimaproxy → NVIDIA NIM API
 cargo test
 
 # Run specific test suite
-cargo test --lib          # Library tests (251)
+cargo test --lib          # Library tests
 cargo test --test integration  # Integration tests (45)
-cargo test --test proxy_error_paths  # Error paths (31)
+cargo test --test proxy_error_paths  # Error paths
 cargo test --test coverage_gaps  # Coverage gaps (14)
 cargo test --test e2e_live  # E2E live (14)
 
@@ -184,9 +211,28 @@ cargo test --test live_streaming    # Live streaming (2)
 cargo test --test live_circuit_breaker # Live circuit breaker (2)
 cargo test --test live_tool_calls   # Live tool calls (7)
                                      # Total live tests: 22
+
+# Live stress test against a running proxy (defaults to 25 turns)
+NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 ```
 
-## Recent Changes (v0.15.2)
+## Recent Changes (v0.15.3)
+
+### Added
+
+- Adaptive racing controls for healthy, pressure, and degraded fanout levels.
+- Fast/fallback racing pools for tiered candidate selection.
+- Gateway concurrency limits and `/stats` telemetry for request mix, in-flight counts, fanout average, rejects, timeouts, 429s, and racing wins.
+- `NIMAPROXY_STRESS_TURNS` for smaller live stress triage runs without editing the stress test.
+
+### Fixed
+
+- Gateway overload is rejected locally with 503 before upstream dispatch.
+- Successful races abort losing upstream tasks after the first 2xx response.
+- Dynamic timeout learning keeps a configured warm-up floor before enough latency samples exist.
+- Local latency degradation waits for three samples so a single slow successful call does not sideline a model.
+
+## Previous Changes (v0.15.2)
 
 ### Fixed
 

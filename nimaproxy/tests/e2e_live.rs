@@ -281,14 +281,16 @@ async fn test_e2e_racing_responds_with_key_label_header() {
     let parts = response.into_parts().0;
     let status = parts.status.as_u16();
 
-    // Skip if API is unavailable (429 rate limit or 502 gateway error)
-    if status == 429 || status == 502 {
+    // Skip if API is unavailable or the proxy returned a local gateway error.
+    if matches!(status, 429 | 502 | 503 | 504) {
         eprintln!(
             "[racing] skipping header check - API unavailable (status={})",
             status
         );
         return;
     }
+
+    assert_eq!(status, 200, "unexpected status from direct live request");
 
     let key_label = parts.headers.get("x-key-label");
     eprintln!("[racing] x-key-label header: {:?}", key_label);
@@ -398,6 +400,13 @@ async fn test_e2e_racing_latency_comparison() {
 #[tokio::test]
 async fn test_e2e_racing_3keys_round_robin() {
     let state = make_state();
+    if state.pool.len() < 3 {
+        eprintln!(
+            "[racing-keys] skipping three-key round-robin assertion: only {} key(s) configured",
+            state.pool.len()
+        );
+        return;
+    }
 
     let k1 = state.pool.next_key();
     let k2 = state.pool.next_key();
@@ -458,6 +467,13 @@ async fn test_e2e_racing_fails_gracefully_on_all_429() {
 #[tokio::test]
 async fn test_e2e_racing_429_key_cooldown_persists() {
     let state = make_state();
+    if state.pool.len() < 2 {
+        eprintln!(
+            "[e2e-429-cooldown] skipping multi-key cooldown assertion: only {} key(s) configured",
+            state.pool.len()
+        );
+        return;
+    }
 
     // Simulate: key 0 just got 429 with 30s cooldown
     state.pool.mark_rate_limited(0, 30);

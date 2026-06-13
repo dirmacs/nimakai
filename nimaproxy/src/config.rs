@@ -56,6 +56,8 @@ pub struct Config {
     pub keys: Vec<KeyEntry>,
     pub routing: Option<RoutingConfig>,
     pub racing: Option<RacingConfig>,
+    pub limits: Option<LimitsConfig>,
+    pub timeouts: Option<TimeoutsConfig>,
     pub model_params: Option<std::collections::HashMap<String, ModelParams>>,
     pub model_compat: Option<ModelCompat>,
     pub circuit_breaker: Option<CircuitBreakerConfig>,
@@ -140,6 +142,30 @@ pub struct RacingConfig {
     pub timeout_ms: Option<u64>,
     /// Strategy: "first_token" (return on first SSE token) or "complete" (default)
     pub strategy: Option<String>,
+    /// Enable adaptive runtime fan-out under key/upstream pressure.
+    pub adaptive: Option<bool>,
+    /// Minimum racing fan-out when adaptive mode has enough capacity.
+    pub min_parallel: Option<usize>,
+    /// Fan-out target when the gateway is under moderate pressure.
+    pub pressure_parallel: Option<usize>,
+    /// Fan-out target when keys are cooling down or the gateway is heavily loaded.
+    pub degraded_parallel: Option<usize>,
+    /// Preferred fast models for normal racing.
+    pub fast_models: Option<Vec<String>>,
+    /// Slower or more expensive models used as backfill/fallback candidates.
+    pub fallback_models: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct LimitsConfig {
+    pub max_upstream_in_flight: Option<usize>,
+    pub max_in_flight_per_key: Option<usize>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct TimeoutsConfig {
+    pub min_dynamic_timeout_ms: Option<u64>,
+    pub dynamic_sample_floor: Option<usize>,
 }
 
 impl Config {
@@ -188,6 +214,83 @@ impl Config {
             .as_ref()
             .and_then(|r| r.strategy.clone())
             .unwrap_or_else(|| "complete".to_string())
+    }
+
+    pub fn racing_adaptive(&self) -> bool {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.adaptive)
+            .unwrap_or(false)
+    }
+
+    pub fn racing_min_parallel(&self) -> usize {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.min_parallel)
+            .unwrap_or(2)
+            .max(2)
+    }
+
+    pub fn racing_pressure_parallel(&self) -> usize {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.pressure_parallel)
+            .unwrap_or(6)
+            .max(2)
+    }
+
+    pub fn racing_degraded_parallel(&self) -> usize {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.degraded_parallel)
+            .unwrap_or(3)
+            .max(2)
+    }
+
+    pub fn racing_fast_models(&self) -> Vec<String> {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.fast_models.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn racing_fallback_models(&self) -> Vec<String> {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.fallback_models.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn max_upstream_in_flight(&self) -> usize {
+        self.limits
+            .as_ref()
+            .and_then(|l| l.max_upstream_in_flight)
+            .unwrap_or(48)
+            .max(1)
+    }
+
+    pub fn max_in_flight_per_key(&self) -> usize {
+        self.limits
+            .as_ref()
+            .and_then(|l| l.max_in_flight_per_key)
+            .unwrap_or(3)
+            .max(1)
+    }
+
+    pub fn min_dynamic_timeout_ms(&self) -> u64 {
+        self.timeouts
+            .as_ref()
+            .and_then(|t| t.min_dynamic_timeout_ms)
+            .unwrap_or(8000)
+            .max(1000)
+    }
+
+    pub fn dynamic_sample_floor(&self) -> usize {
+        self.timeouts
+            .as_ref()
+            .and_then(|t| t.dynamic_sample_floor)
+            .unwrap_or(10)
+            .max(2)
     }
 
     pub fn routing_models(&self) -> Vec<String> {
@@ -397,10 +500,7 @@ max_tokens = 4096
         assert_eq!(llama.repetition_penalty, Some(1.0));
         assert_eq!(llama.reasoning_effort, Some("high".to_string()));
         assert_eq!(llama.get("thinking"), Some(&serde_json::json!(true)));
-        assert_eq!(
-            llama.get("enable_thinking"),
-            Some(&serde_json::json!(true))
-        );
+        assert_eq!(llama.get("enable_thinking"), Some(&serde_json::json!(true)));
 
         let coder_params = config.get_model_params("nvidia/coder");
         assert!(coder_params.is_some());
@@ -742,6 +842,62 @@ strategy = "first_token"
         );
         let config = load(file.path().to_str().unwrap()).unwrap();
         assert_eq!(config.racing_strategy(), "first_token");
+    }
+
+    #[test]
+    fn test_adaptive_racing_limits_and_timeouts_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+adaptive = true
+min_parallel = 2
+pressure_parallel = 6
+degraded_parallel = 3
+fast_models = ["fast-a", "fast-b"]
+fallback_models = ["slow-a"]
+
+[limits]
+max_upstream_in_flight = 48
+max_in_flight_per_key = 3
+
+[timeouts]
+min_dynamic_timeout_ms = 8000
+dynamic_sample_floor = 10
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert!(config.racing_adaptive());
+        assert_eq!(config.racing_min_parallel(), 2);
+        assert_eq!(config.racing_pressure_parallel(), 6);
+        assert_eq!(config.racing_degraded_parallel(), 3);
+        assert_eq!(config.racing_fast_models(), vec!["fast-a", "fast-b"]);
+        assert_eq!(config.racing_fallback_models(), vec!["slow-a"]);
+        assert_eq!(config.max_upstream_in_flight(), 48);
+        assert_eq!(config.max_in_flight_per_key(), 3);
+        assert_eq!(config.min_dynamic_timeout_ms(), 8000);
+        assert_eq!(config.dynamic_sample_floor(), 10);
+    }
+
+    #[test]
+    fn test_adaptive_racing_defaults() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert!(!config.racing_adaptive());
+        assert_eq!(config.racing_min_parallel(), 2);
+        assert_eq!(config.racing_pressure_parallel(), 6);
+        assert_eq!(config.racing_degraded_parallel(), 3);
+        assert_eq!(config.max_upstream_in_flight(), 48);
+        assert_eq!(config.max_in_flight_per_key(), 3);
+        assert_eq!(config.min_dynamic_timeout_ms(), 8000);
+        assert_eq!(config.dynamic_sample_floor(), 10);
     }
 
     #[test]

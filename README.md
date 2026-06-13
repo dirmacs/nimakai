@@ -158,8 +158,9 @@ nimakai proxy stop
 
 - Overall health status
 - Active key count
-- Routing and racing configuration
-- Per-key status (active/cooldown, key hint)
+- Routing, racing, and adaptive fanout configuration
+- Gateway request counters, fanout average, and overload/no-key/timeout/429 counts
+- Per-key status (active/cooldown, key hint, in-flight count)
 - Per-model latency stats (avg, P95, success rate, degradation)
 
 ## Options
@@ -238,11 +239,11 @@ src/
     sync.nim               Backup, apply, rollback for OMO config
     watch.nim              Watch mode alerting (down/recovered/degraded)
     discovery.nim          Live model discovery from NVIDIA API
-    proxyffi.nim   — Nim FFI bindings to libnimaproxy.so
-    rustffi.nim    — Rust FFI bridge for concurrent HTTP pinging
-    update.nim     — Fetch and update model catalog from NVIDIA NIM API
+    proxyffi.nim           FFI bindings and proxy health/stats JSON parsing
+    rustffi.nim            Rust FFI bridge for concurrent HTTP pinging
+    update.nim             Fetch and update model catalog from NVIDIA NIM API
 tests/
-    16 isolated suites run by `nimble test` (345 tests total)
+    17 isolated suites run by `nimble test`
     test_proxy.nim         Manual FFI/service tests; starts/stops nimaproxy
 
 ### nimaproxy (Rust)
@@ -265,9 +266,9 @@ nimaproxy/
   tests/
     integration.rs         45 integration tests
     e2e_live.rs            14 E2E tests with real NVIDIA API
-    stress_test.rs         1 live stress test
+    stress_test.rs         1 live stress test (`NIMAPROXY_STRESS_TURNS` configurable)
     coverage_gaps.rs       14 coverage gap tests
-    proxy_error_paths.rs   31 proxy error path tests
+    proxy_error_paths.rs   32 proxy error path tests
     live_chat.rs          5 live chat tests
     live_key_rotation.rs  2 key rotation tests
     live_routing.rs       2 routing tests
@@ -306,6 +307,8 @@ cp nimaproxy.toml.example nimaproxy.toml
 - Round-robin key rotation across multiple API keys
 - Automatic 429 handling with per-key cooldown
 - Latency-aware model routing (`"model": "auto"`)
+- Adaptive model racing with fast/fallback pools
+- Gateway concurrency limits before upstream dispatch
 - Per-model stats tracking (TTFC, success rate, degradation detection)
 - `x-key-label` response header: tracks which key was used for rotation debugging
 
@@ -351,6 +354,32 @@ models = [
 max_parallel = 10
 timeout_ms = 15000
 strategy = "complete"
+adaptive = true
+min_parallel = 2
+pressure_parallel = 6
+degraded_parallel = 3
+fast_models = [
+  "stepfun-ai/step-3.7-flash",
+  "qwen/qwen3.5-397b-a17b",
+  "z-ai/glm-5.1",
+  "moonshotai/kimi-k2.6",
+  "minimaxai/minimax-m3",
+]
+fallback_models = [
+  "minimaxai/minimax-m2.7",
+  "deepseek-ai/deepseek-v4-flash",
+  "mistralai/mistral-medium-3.5-128b",
+  "deepseek-ai/deepseek-v4-pro",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+]
+
+[limits]
+max_upstream_in_flight = 48
+max_in_flight_per_key = 3
+
+[timeouts]
+min_dynamic_timeout_ms = 8000
+dynamic_sample_floor = 10
 ```
 
 **Per-Model NVIDIA Defaults:**
@@ -375,12 +404,15 @@ fidelity, but the proxy streams only when the caller explicitly sends
 | `minimaxai/minimax-m2.7` | 8192 | 1.0 | 0.95 |  |
 
 Fires N parallel requests to N models, returns first response. Trades N×token
-budget for min(P50 latency). Keys are pre-allocated per race task to avoid 429
-rate-limit collisions. Models are selected in round-robin order via
-`racing_cursor` to prevent a single fast model from dominating and breaking
-inference loops. Server-degraded and all-keys-failed models are excluded;
-latency/failure-degraded models are used only as fallback capacity when there
-are not enough healthy models to fill the race.
+budget for min(P50 latency). With `adaptive=true`, the healthy ceiling remains
+`max_parallel=10`, but fanout drops to `pressure_parallel` or
+`degraded_parallel` when gateway pressure rises or some keys are unavailable.
+Keys and upstream slots are pre-allocated per race task, so saturated gateways
+return a local 503 instead of forcing all callers into NVIDIA-side cooldowns.
+Models are selected in round-robin order via `racing_cursor`, with fast models
+preferred and fallback models used when capacity or health requires it.
+Local latency degradation waits for three samples, while explicit
+NVIDIA-degraded responses are still removed from routing immediately.
 
 **Model Compatibility (Developer Role Transformation):**
 

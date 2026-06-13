@@ -11,7 +11,7 @@ pub mod turn_log;
 pub use proxy::validate_model_exists;
 
 pub use config::{load as config_load, Config, KeyEntry, ModelParams, RoutingConfig};
-pub use key_pool::KeyPool;
+pub use key_pool::{KeyAcquireError, KeyLease, KeyPool};
 pub use model_router::{ModelRouter, Strategy};
 pub use model_stats::{ModelSnapshot, ModelStatsStore, ModelStatus, RecordOutcome};
 pub use proxy::{completions, embeddings, props};
@@ -19,7 +19,9 @@ use reqwest::Client;
 use std::collections::HashMap;
 use std::os::raw::c_char;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 fn push_unique_model(models: &mut Vec<String>, model: &str) {
     if !model.is_empty() && !models.iter().any(|m| m == model) {
@@ -57,10 +59,194 @@ pub struct AppState {
     pub racing_max_parallel: usize,
     pub racing_timeout_ms: u64,
     pub racing_strategy: String,
+    pub racing_adaptive: bool,
+    pub racing_min_parallel: usize,
+    pub racing_pressure_parallel: usize,
+    pub racing_degraded_parallel: usize,
+    pub racing_fast_models: Vec<String>,
+    pub racing_fallback_models: Vec<String>,
     pub racing_cursor: Mutex<usize>,
     pub available_models: Mutex<Vec<String>>,
     pub model_params: HashMap<String, ModelParams>,
     pub model_compat: config::ModelCompat,
+    pub max_upstream_in_flight: usize,
+    pub max_in_flight_per_key: usize,
+    pub min_dynamic_timeout_ms: u64,
+    pub dynamic_sample_floor: usize,
+    upstream_permits: Arc<Semaphore>,
+    pub gateway_metrics: Arc<GatewayMetrics>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeControls {
+    pub racing_adaptive: bool,
+    pub racing_min_parallel: usize,
+    pub racing_pressure_parallel: usize,
+    pub racing_degraded_parallel: usize,
+    pub racing_fast_models: Vec<String>,
+    pub racing_fallback_models: Vec<String>,
+    pub max_upstream_in_flight: usize,
+    pub max_in_flight_per_key: usize,
+    pub min_dynamic_timeout_ms: u64,
+    pub dynamic_sample_floor: usize,
+}
+
+impl Default for RuntimeControls {
+    fn default() -> Self {
+        Self {
+            racing_adaptive: false,
+            racing_min_parallel: 2,
+            racing_pressure_parallel: 6,
+            racing_degraded_parallel: 3,
+            racing_fast_models: Vec::new(),
+            racing_fallback_models: Vec::new(),
+            max_upstream_in_flight: 48,
+            max_in_flight_per_key: 3,
+            min_dynamic_timeout_ms: 8000,
+            dynamic_sample_floor: 10,
+        }
+    }
+}
+
+pub struct GatewayMetrics {
+    request_total: AtomicU64,
+    direct_requests: AtomicU64,
+    racing_requests: AtomicU64,
+    upstream_attempts: AtomicU64,
+    upstream_in_flight: AtomicU64,
+    overload_rejects: AtomicU64,
+    no_key_rejects: AtomicU64,
+    timeout_count: AtomicU64,
+    rate_limit_count: AtomicU64,
+    fanout_total: AtomicU64,
+    fanout_samples: AtomicU64,
+    racing_wins: Mutex<HashMap<String, u64>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GatewayMetricsSnapshot {
+    pub request_total: u64,
+    pub direct_requests: u64,
+    pub racing_requests: u64,
+    pub upstream_attempts: u64,
+    pub upstream_in_flight: u64,
+    pub overload_rejects: u64,
+    pub no_key_rejects: u64,
+    pub timeout_count: u64,
+    pub rate_limit_count: u64,
+    pub fanout_total: u64,
+    pub fanout_samples: u64,
+    pub fanout_avg: f64,
+    pub racing_wins: HashMap<String, u64>,
+}
+
+impl GatewayMetrics {
+    pub fn new() -> Self {
+        Self {
+            request_total: AtomicU64::new(0),
+            direct_requests: AtomicU64::new(0),
+            racing_requests: AtomicU64::new(0),
+            upstream_attempts: AtomicU64::new(0),
+            upstream_in_flight: AtomicU64::new(0),
+            overload_rejects: AtomicU64::new(0),
+            no_key_rejects: AtomicU64::new(0),
+            timeout_count: AtomicU64::new(0),
+            rate_limit_count: AtomicU64::new(0),
+            fanout_total: AtomicU64::new(0),
+            fanout_samples: AtomicU64::new(0),
+            racing_wins: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn record_request(&self, racing: bool) {
+        self.request_total.fetch_add(1, Ordering::Relaxed);
+        if racing {
+            self.racing_requests.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.direct_requests.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_upstream_start(&self) {
+        self.upstream_attempts.fetch_add(1, Ordering::Relaxed);
+        self.upstream_in_flight.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_upstream_finish(&self) {
+        self.upstream_in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn record_overload(&self) {
+        self.overload_rejects.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_no_key(&self) {
+        self.no_key_rejects.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_timeout(&self) {
+        self.timeout_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_rate_limit(&self) {
+        self.rate_limit_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_fanout(&self, fanout: usize) {
+        self.fanout_total
+            .fetch_add(fanout as u64, Ordering::Relaxed);
+        self.fanout_samples.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_racing_win(&self, model_id: &str) {
+        let mut wins = self.racing_wins.lock().unwrap();
+        *wins.entry(model_id.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn upstream_in_flight(&self) -> u64 {
+        self.upstream_in_flight.load(Ordering::Relaxed)
+    }
+
+    pub fn snapshot(&self) -> GatewayMetricsSnapshot {
+        let fanout_total = self.fanout_total.load(Ordering::Relaxed);
+        let fanout_samples = self.fanout_samples.load(Ordering::Relaxed);
+        GatewayMetricsSnapshot {
+            request_total: self.request_total.load(Ordering::Relaxed),
+            direct_requests: self.direct_requests.load(Ordering::Relaxed),
+            racing_requests: self.racing_requests.load(Ordering::Relaxed),
+            upstream_attempts: self.upstream_attempts.load(Ordering::Relaxed),
+            upstream_in_flight: self.upstream_in_flight.load(Ordering::Relaxed),
+            overload_rejects: self.overload_rejects.load(Ordering::Relaxed),
+            no_key_rejects: self.no_key_rejects.load(Ordering::Relaxed),
+            timeout_count: self.timeout_count.load(Ordering::Relaxed),
+            rate_limit_count: self.rate_limit_count.load(Ordering::Relaxed),
+            fanout_total,
+            fanout_samples,
+            fanout_avg: if fanout_samples == 0 {
+                0.0
+            } else {
+                fanout_total as f64 / fanout_samples as f64
+            },
+            racing_wins: self.racing_wins.lock().unwrap().clone(),
+        }
+    }
+}
+
+impl Default for GatewayMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct UpstreamPermit {
+    _permit: OwnedSemaphorePermit,
+    metrics: Arc<GatewayMetrics>,
+}
+
+impl Drop for UpstreamPermit {
+    fn drop(&mut self) {
+        self.metrics.record_upstream_finish();
+    }
 }
 
 impl AppState {
@@ -76,6 +262,34 @@ impl AppState {
         model_params: HashMap<String, ModelParams>,
         model_compat: config::ModelCompat,
     ) -> Arc<Self> {
+        Self::new_with_controls(
+            keys,
+            target,
+            router,
+            model_stats,
+            racing_models,
+            racing_max_parallel,
+            racing_timeout_ms,
+            racing_strategy,
+            model_params,
+            model_compat,
+            RuntimeControls::default(),
+        )
+    }
+
+    pub fn new_with_controls(
+        keys: Vec<KeyEntry>,
+        target: String,
+        router: Option<ModelRouter>,
+        model_stats: ModelStatsStore,
+        racing_models: Vec<String>,
+        racing_max_parallel: usize,
+        racing_timeout_ms: u64,
+        racing_strategy: String,
+        model_params: HashMap<String, ModelParams>,
+        model_compat: config::ModelCompat,
+        controls: RuntimeControls,
+    ) -> Arc<Self> {
         let client = Client::builder()
             .use_rustls_tls()
             .timeout(std::time::Duration::from_secs(120))
@@ -85,7 +299,7 @@ impl AppState {
 
         let available_models = collect_configured_models(router.as_ref(), &racing_models, &[]);
         Arc::new(AppState {
-            pool: KeyPool::new(keys),
+            pool: KeyPool::with_max_in_flight(keys, controls.max_in_flight_per_key),
             client,
             target,
             router,
@@ -94,10 +308,22 @@ impl AppState {
             racing_max_parallel,
             racing_timeout_ms,
             racing_strategy,
+            racing_adaptive: controls.racing_adaptive,
+            racing_min_parallel: controls.racing_min_parallel.max(2),
+            racing_pressure_parallel: controls.racing_pressure_parallel.max(2),
+            racing_degraded_parallel: controls.racing_degraded_parallel.max(2),
+            racing_fast_models: controls.racing_fast_models,
+            racing_fallback_models: controls.racing_fallback_models,
             racing_cursor: Mutex::new(0),
             available_models: Mutex::new(available_models),
             model_params,
             model_compat,
+            max_upstream_in_flight: controls.max_upstream_in_flight.max(1),
+            max_in_flight_per_key: controls.max_in_flight_per_key.max(1),
+            min_dynamic_timeout_ms: controls.min_dynamic_timeout_ms.max(1000),
+            dynamic_sample_floor: controls.dynamic_sample_floor.max(2),
+            upstream_permits: Arc::new(Semaphore::new(controls.max_upstream_in_flight.max(1))),
+            gateway_metrics: Arc::new(GatewayMetrics::new()),
         })
     }
 
@@ -115,6 +341,15 @@ impl AppState {
 
     pub fn racing_enabled(&self) -> bool {
         self.racing_models.len() >= 2 && self.racing_max_parallel >= 2
+    }
+
+    pub fn try_acquire_upstream(&self) -> Option<UpstreamPermit> {
+        let permit = self.upstream_permits.clone().try_acquire_owned().ok()?;
+        self.gateway_metrics.record_upstream_start();
+        Some(UpstreamPermit {
+            _permit: permit,
+            metrics: self.gateway_metrics.clone(),
+        })
     }
 }
 
@@ -252,17 +487,17 @@ pub extern "C" fn proxy_start_with_pid_file(
         return -1;
     }
 
-    let port_cstr    = CString::new(port.to_string()).unwrap();
-    let config_cstr  = CString::new(path).unwrap();
+    let port_cstr = CString::new(port.to_string()).unwrap();
+    let config_cstr = CString::new(path).unwrap();
     let bin_path =
         CString::new(std::env::var("NIMAPROXY_BIN").unwrap_or_else(|_| "nimaproxy".to_string()))
             .unwrap();
-    let cf_flag      = CString::new("--config").unwrap();
-    let pt_flag      = CString::new("--port").unwrap();
-    let pid_flag     = CString::new("--pid-file").unwrap();
-    let pid_cstr     = CString::new(pfile.to_str().unwrap_or_default()).unwrap();
+    let cf_flag = CString::new("--config").unwrap();
+    let pt_flag = CString::new("--port").unwrap();
+    let pid_flag = CString::new("--pid-file").unwrap();
+    let pid_cstr = CString::new(pfile.to_str().unwrap_or_default()).unwrap();
 
-    let mut attrs:       libc::posix_spawnattr_t = unsafe { std::mem::zeroed() };
+    let mut attrs: libc::posix_spawnattr_t = unsafe { std::mem::zeroed() };
     let mut file_actions: libc::posix_spawn_file_actions_t = unsafe { std::mem::zeroed() };
 
     unsafe {
@@ -291,9 +526,9 @@ pub extern "C" fn proxy_start_with_pid_file(
     let mut child_pid: libc::pid_t = 0;
     let mut argv: Vec<*mut c_char> = vec![
         bin_path.as_ptr() as *mut c_char,
-        cf_flag.as_ptr()  as *mut c_char,
+        cf_flag.as_ptr() as *mut c_char,
         config_cstr.as_ptr() as *mut c_char,
-        pt_flag.as_ptr()  as *mut c_char,
+        pt_flag.as_ptr() as *mut c_char,
         port_cstr.as_ptr() as *mut c_char,
         pid_flag.as_ptr() as *mut c_char,
         pid_cstr.as_ptr() as *mut c_char,

@@ -1,7 +1,7 @@
 //! Turn log query engine - search and analyze nimaproxy turn logs
-//! 
+//!
 //! Usage: nimaproxy-query --path /var/log/nimaproxy/turns.jsonl "query"
-//! 
+//!
 //! Queries:
 //!   model=auto          - Filter by model
 //!   success=false       - Filter failed requests
@@ -110,7 +110,7 @@ impl Query {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() < 3 {
         eprintln!("Usage: nimaproxy-query <log_path> <query>");
         eprintln!();
@@ -158,15 +158,19 @@ fn main() {
         if query.matches(&log) {
             count += 1;
             total_latency += log.latency_ms;
-            if log.latency_ms < min_latency { min_latency = log.latency_ms; }
-            if log.latency_ms > max_latency { max_latency = log.latency_ms; }
-            
+            if log.latency_ms < min_latency {
+                min_latency = log.latency_ms;
+            }
+            if log.latency_ms > max_latency {
+                max_latency = log.latency_ms;
+            }
+
             if let Some(ref err) = log.error {
                 *errors.entry(err.clone()).or_insert(0) += 1;
             }
-            
+
             *models.entry(log.responding_model.clone()).or_insert(0) += 1;
-            
+
             latest = Some(log);
         }
     }
@@ -183,7 +187,7 @@ fn main() {
             println!("Avg latency: {}ms", total_latency / count);
             println!("Min latency: {}ms", min_latency);
             println!("Max latency: {}ms", max_latency);
-            
+
             if !errors.is_empty() {
                 println!("\nErrors:");
                 let mut sorted: Vec<_> = errors.iter().collect();
@@ -192,7 +196,7 @@ fn main() {
                     println!("  {}: {}", cnt, err);
                 }
             }
-            
+
             if !models.is_empty() {
                 println!("\nTop models:");
                 let mut sorted: Vec<_> = models.iter().collect();

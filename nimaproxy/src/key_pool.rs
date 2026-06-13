@@ -1,14 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use crate::config::KeyEntry;
+
+const DEFAULT_MAX_IN_FLIGHT_PER_KEY: usize = 1_000_000;
 
 pub struct KeyPool {
     keys: Vec<KeyEntry>,
     index: AtomicUsize,
     cooldowns: Vec<Mutex<Option<Instant>>>,
+    permits: Vec<Arc<Semaphore>>,
+    max_in_flight_per_key: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,15 +22,40 @@ pub struct KeyStatus {
     pub key_hint: String,
     pub active: bool,
     pub cooldown_secs_remaining: u64,
+    pub in_flight: usize,
+    pub max_in_flight: usize,
+}
+
+pub struct KeyLease {
+    pub key: String,
+    pub idx: usize,
+    pub label: Option<String>,
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAcquireError {
+    NoKeys,
+    AllCoolingDown,
+    AllBusy,
 }
 
 impl KeyPool {
     pub fn new(keys: Vec<KeyEntry>) -> Self {
+        Self::with_max_in_flight(keys, DEFAULT_MAX_IN_FLIGHT_PER_KEY)
+    }
+
+    pub fn with_max_in_flight(keys: Vec<KeyEntry>, max_in_flight_per_key: usize) -> Self {
         let n = keys.len();
+        let max_in_flight_per_key = max_in_flight_per_key.max(1);
         KeyPool {
             keys,
             index: AtomicUsize::new(0),
             cooldowns: (0..n).map(|_| Mutex::new(None)).collect(),
+            permits: (0..n)
+                .map(|_| Arc::new(Semaphore::new(max_in_flight_per_key)))
+                .collect(),
+            max_in_flight_per_key,
         }
     }
 
@@ -52,6 +82,51 @@ impl KeyPool {
         None
     }
 
+    pub fn next_key_with_permit(&self) -> Result<KeyLease, KeyAcquireError> {
+        let n = self.keys.len();
+        if n == 0 {
+            return Err(KeyAcquireError::NoKeys);
+        }
+
+        let start = self.index.fetch_add(1, Ordering::Relaxed) % n;
+        let now = Instant::now();
+        let mut active_seen = false;
+        let mut busy_seen = false;
+
+        for i in 0..n {
+            let idx = (start + i) % n;
+            let cd = self.cooldowns[idx].lock().unwrap();
+            if matches!(*cd, Some(expiry) if now < expiry) {
+                continue;
+            }
+            drop(cd);
+            active_seen = true;
+
+            match self.permits[idx].clone().try_acquire_owned() {
+                Ok(permit) => {
+                    return Ok(KeyLease {
+                        key: self.keys[idx].key.clone(),
+                        idx,
+                        label: self.get_key_label(idx),
+                        _permit: permit,
+                    });
+                }
+                Err(TryAcquireError::NoPermits) => {
+                    busy_seen = true;
+                }
+                Err(TryAcquireError::Closed) => {
+                    busy_seen = true;
+                }
+            }
+        }
+
+        if busy_seen || active_seen {
+            Err(KeyAcquireError::AllBusy)
+        } else {
+            Err(KeyAcquireError::AllCoolingDown)
+        }
+    }
+
     /// Mark a key as rate-limited for `secs` seconds.
     pub fn mark_rate_limited(&self, idx: usize, secs: u64) {
         if idx < self.cooldowns.len() {
@@ -64,6 +139,26 @@ impl KeyPool {
         self.keys
             .get(idx)
             .map(|k| k.label.clone().unwrap_or_else(|| format!("key-{}", idx)))
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.status().iter().filter(|s| s.active).count()
+    }
+
+    pub fn available_permits(&self) -> usize {
+        let now = Instant::now();
+        self.permits
+            .iter()
+            .enumerate()
+            .filter_map(|(i, sem)| {
+                let cd = self.cooldowns[i].lock().unwrap();
+                if matches!(*cd, Some(expiry) if now < expiry) {
+                    None
+                } else {
+                    Some(sem.available_permits())
+                }
+            })
+            .sum()
     }
 
     /// Return status of all keys (for /health endpoint).
@@ -88,6 +183,10 @@ impl KeyPool {
                     key_hint: hint,
                     active,
                     cooldown_secs_remaining: remaining,
+                    in_flight: self
+                        .max_in_flight_per_key
+                        .saturating_sub(self.permits[i].available_permits()),
+                    max_in_flight: self.max_in_flight_per_key,
                 }
             })
             .collect()
@@ -169,6 +268,36 @@ mod tests {
         let (k, idx) = pool.next_key().unwrap();
         assert_eq!(k, "key2");
         assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn test_next_key_with_permit_enforces_per_key_limit() {
+        let keys = vec![make_key_entry("key1", "a")];
+        let pool = KeyPool::with_max_in_flight(keys, 1);
+
+        let lease = pool.next_key_with_permit().unwrap();
+        assert_eq!(lease.idx, 0);
+        assert_eq!(pool.available_permits(), 0);
+        assert!(matches!(
+            pool.next_key_with_permit(),
+            Err(KeyAcquireError::AllBusy)
+        ));
+
+        drop(lease);
+        assert_eq!(pool.available_permits(), 1);
+        assert!(pool.next_key_with_permit().is_ok());
+    }
+
+    #[test]
+    fn test_next_key_with_permit_distinguishes_cooldown() {
+        let keys = vec![make_key_entry("key1", "a")];
+        let pool = KeyPool::with_max_in_flight(keys, 1);
+        pool.mark_rate_limited(0, 30);
+
+        assert!(matches!(
+            pool.next_key_with_permit(),
+            Err(KeyAcquireError::AllCoolingDown)
+        ));
     }
 
     #[test]
@@ -270,7 +399,9 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1) + Duration::from_millis(100));
 
         // Should now return the key
-        let (k, idx) = pool.next_key().expect("key should be available after cooldown");
+        let (k, idx) = pool
+            .next_key()
+            .expect("key should be available after cooldown");
         assert_eq!(k, "key1");
         assert_eq!(idx, 0);
     }

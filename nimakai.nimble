@@ -1,5 +1,5 @@
 # Package
-version = "0.15.2"
+version = "0.15.3"
 author        = "bkataru"
 description   = "NVIDIA NIM model latency benchmarker"
 license       = "MIT"
@@ -20,6 +20,7 @@ task proxy, "Build nimaproxy (Rust key-rotation proxy)":
 
 task test, "Run tests":
   exec "nim c -d:ssl --path:src -r tests/test_types.nim"
+  exec "nim c -d:ssl --path:src -r tests/test_proxyffi_parse.nim"
   exec "nim c -d:ssl --path:src -r tests/test_metrics.nim"
   exec "nim c -d:ssl --path:src -r tests/test_display.nim"
   exec "nim c -d:ssl --path:src -r tests/test_ping.nim"
