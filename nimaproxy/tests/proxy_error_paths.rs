@@ -9,7 +9,7 @@ use nimaproxy::config::{KeyEntry, ModelCompat, ModelParams};
 use nimaproxy::model_router::{ModelRouter, Strategy};
 use nimaproxy::model_stats::ModelStatsStore;
 use nimaproxy::proxy::chat_completions;
-use nimaproxy::AppState;
+use nimaproxy::{AppState, RuntimeControls};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -53,6 +53,98 @@ fn make_racing_state(api_url: String) -> Arc<AppState> {
     )
 }
 
+/// Create racing state that is forced into solo fallback by large prompt policy.
+fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
+    let key_entries = vec![
+        KeyEntry {
+            key: "test-key-a".to_string(),
+            label: Some("key-a".to_string()),
+        },
+        KeyEntry {
+            key: "test-key-b".to_string(),
+            label: Some("key-b".to_string()),
+        },
+    ];
+    AppState::new_with_controls(
+        key_entries,
+        api_url,
+        None,
+        ModelStatsStore::new(3000.0),
+        vec!["model-a".to_string(), "model-b".to_string()],
+        2,
+        5000,
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            racing_adaptive: true,
+            racing_min_parallel: 2,
+            racing_pressure_parallel: 2,
+            racing_degraded_parallel: 2,
+            racing_fast_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_fallback_models: vec![],
+            racing_large_prompt_char_threshold: 1,
+            racing_large_prompt_parallel: 1,
+            racing_solo_fallback: true,
+            max_upstream_in_flight: 1,
+            max_in_flight_per_key: 1,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 1000,
+            dynamic_sample_floor: 10,
+        },
+    )
+}
+
+/// Create racing state with more configured models than the race fanout.
+fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
+    let key_entries = vec![
+        KeyEntry {
+            key: "test-key-a".to_string(),
+            label: Some("key-a".to_string()),
+        },
+        KeyEntry {
+            key: "test-key-b".to_string(),
+            label: Some("key-b".to_string()),
+        },
+        KeyEntry {
+            key: "test-key-c".to_string(),
+            label: Some("key-c".to_string()),
+        },
+    ];
+    AppState::new_with_controls(
+        key_entries,
+        api_url,
+        None,
+        ModelStatsStore::new(3000.0),
+        vec![
+            "model-a".to_string(),
+            "model-b".to_string(),
+            "model-c".to_string(),
+        ],
+        2,
+        5000,
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            racing_adaptive: true,
+            racing_min_parallel: 2,
+            racing_pressure_parallel: 2,
+            racing_degraded_parallel: 2,
+            racing_fast_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_fallback_models: vec!["model-c".to_string()],
+            racing_large_prompt_char_threshold: 0,
+            racing_large_prompt_parallel: 1,
+            racing_solo_fallback: true,
+            max_upstream_in_flight: 2,
+            max_in_flight_per_key: 1,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 1000,
+            dynamic_sample_floor: 10,
+        },
+    )
+}
+
 async fn response_json(response: axum::response::Response) -> serde_json::Value {
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     serde_json::from_slice(&body).unwrap()
@@ -78,7 +170,7 @@ async fn test_proxy_bad_gateway_on_connection_error() {
     });
 
     let resp = chat_completions(
-        axum::extract::State(state),
+        axum::extract::State(state.clone()),
         HeaderMap::new(),
         Bytes::from(body.to_string()),
     )
@@ -116,7 +208,7 @@ async fn test_proxy_handles_429_rate_limit() {
     });
 
     let resp = chat_completions(
-        axum::extract::State(state),
+        axum::extract::State(state.clone()),
         HeaderMap::new(),
         Bytes::from(body.to_string()),
     )
@@ -150,7 +242,7 @@ async fn test_proxy_handles_500_server_error() {
     });
 
     let resp = chat_completions(
-        axum::extract::State(state),
+        axum::extract::State(state.clone()),
         HeaderMap::new(),
         Bytes::from(body.to_string()),
     )
@@ -257,6 +349,151 @@ async fn test_racing_auto_model_selection() {
     .await;
 
     mock.assert();
+}
+
+/// Test provider-prefixed auto model selector used by OMP-style model IDs.
+#[tokio::test]
+async fn test_racing_accepts_nimaproxy_auto_alias() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"id":"test","choices":[{"message":{"content":"hello"}}]}"#)
+        .expect_at_least(1)
+        .create();
+
+    let state = make_racing_state(server.url());
+    let body = serde_json::json!({
+        "model": "nimaproxy/auto",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    mock.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+}
+
+/// Test solo fallback walks to the next model on transient upstream 503.
+#[tokio::test]
+async fn test_solo_fallback_retries_next_model_on_503() {
+    use mockito::{Matcher, Server};
+
+    let mut server = Server::new_async().await;
+
+    let first = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "model-a"
+        })))
+        .with_status(503)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"message":"ResourceExhausted: All workers are busy"}"#)
+        .expect(1)
+        .create();
+    let second = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "model-b"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"id":"test","choices":[{"message":{"content":"ok"}}]}"#)
+        .expect(1)
+        .create();
+
+    let state = make_solo_fallback_state(server.url());
+    for _ in 0..3 {
+        state.model_stats.record("model-a", 100.0, true);
+    }
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "large prompt body"}]
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    first.assert();
+    second.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let wins = state.gateway_metrics.snapshot().racing_wins;
+    assert_eq!(wins.get("model-b"), Some(&1));
+}
+
+/// Test an all-failed race can recover by trying unused fallback models sequentially.
+#[tokio::test]
+async fn test_all_failed_race_tries_unused_sequential_fallback() {
+    use mockito::{Matcher, Server};
+
+    let mut server = Server::new_async().await;
+
+    let race_a = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "model-a"
+        })))
+        .with_status(503)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"message":"busy a"}"#)
+        .expect(1)
+        .create();
+    let race_b = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "model-b"
+        })))
+        .with_status(503)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"message":"busy b"}"#)
+        .expect(1)
+        .create();
+    let fallback_c = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "model-c"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"id":"test","choices":[{"message":{"content":"ok"}}]}"#)
+        .expect(1)
+        .create();
+
+    let state = make_racing_with_unused_fallback_state(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    race_a.assert();
+    race_b.assert();
+    fallback_c.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let wins = state.gateway_metrics.snapshot().racing_wins;
+    assert_eq!(wins.get("model-c"), Some(&1));
 }
 
 /// Test racing with all models failing
@@ -701,6 +938,11 @@ async fn test_health_exposes_routing_and_racing_metadata() {
 
     assert_eq!(json["routing_enabled"], true);
     assert_eq!(json["racing_enabled"], true);
+    assert_eq!(json["key_window_capacity"], 3);
+    assert_eq!(json["key_available_permits"], 3);
+    assert_eq!(json["admission_wait_ms"], 1500);
+    assert_eq!(json["racing_solo_fallback"], true);
+    assert_eq!(json["racing_large_prompt_parallel"], 1);
     assert_eq!(json["routing_models"], serde_json::json!(["router-a"]));
     assert_eq!(
         json["racing_models"],
@@ -727,8 +969,14 @@ async fn test_stats_exposes_gateway_metrics_and_limits() {
     assert_eq!(json["gateway"]["overload_rejects"], 1);
     assert_eq!(json["gateway"]["max_upstream_in_flight"], 48);
     assert_eq!(json["gateway"]["max_in_flight_per_key"], 3);
+    assert_eq!(json["gateway"]["key_window_capacity"], 6);
+    assert_eq!(json["gateway"]["key_available_permits"], 6);
+    assert_eq!(json["gateway"]["admission_wait_ms"], 1500);
+    assert_eq!(json["keys"][0]["configured_max_in_flight"], 3);
     assert_eq!(json["racing_enabled"], true);
     assert_eq!(json["racing_adaptive"], false);
+    assert_eq!(json["racing_solo_fallback"], true);
+    assert_eq!(json["racing_large_prompt_parallel"], 1);
 }
 
 /// Test models endpoint with no keys

@@ -71,10 +71,6 @@ async fn main() {
 
     info!("nimaproxy starting up");
 
-    // Initialize turn logging
-    let _ = turn_log::init_logger("/var/log/nimaproxy/turns.jsonl", true);
-    info!("Turn logging initialized");
-
     // Load config to determine actual port
     let config_path = config_path.unwrap_or_else(|| "nimaproxy.toml".to_string());
     let cfg = match config::load(&config_path) {
@@ -88,6 +84,14 @@ async fn main() {
     if cfg.keys.is_empty() {
         eprintln!("error: no keys defined in config — add at least one [[keys]] entry");
         std::process::exit(1);
+    }
+
+    if cfg.logging_enabled() {
+        let log_path = cfg.logging_path();
+        match turn_log::init_logger(&log_path, true) {
+            Ok(()) => info!(path = %log_path, "Turn logging initialized"),
+            Err(e) => warn!(path = %log_path, error = %e, "Turn logging disabled"),
+        }
     }
 
     // Determine actual listen address and port
@@ -145,8 +149,12 @@ async fn main() {
         racing_degraded_parallel: cfg.racing_degraded_parallel(),
         racing_fast_models: cfg.racing_fast_models(),
         racing_fallback_models: cfg.racing_fallback_models(),
+        racing_large_prompt_char_threshold: cfg.racing_large_prompt_char_threshold(),
+        racing_large_prompt_parallel: cfg.racing_large_prompt_parallel(),
+        racing_solo_fallback: cfg.racing_solo_fallback(),
         max_upstream_in_flight: cfg.max_upstream_in_flight(),
         max_in_flight_per_key: cfg.max_in_flight_per_key(),
+        admission_wait_ms: cfg.admission_wait_ms(),
         min_dynamic_timeout_ms: cfg.min_dynamic_timeout_ms(),
         dynamic_sample_floor: cfg.dynamic_sample_floor(),
     };
@@ -230,12 +238,21 @@ async fn main() {
     }
 
     println!(
-        "  limits : upstream={}, per_key={}, timeout_floor={}ms, sample_floor={}",
+        "  limits : upstream={}, per_key={}, admission_wait={}ms, timeout_floor={}ms, sample_floor={}",
         state.max_upstream_in_flight,
         state.max_in_flight_per_key,
+        state.admission_wait_ms,
         state.min_dynamic_timeout_ms,
         state.dynamic_sample_floor
     );
+    if state.racing_large_prompt_char_threshold > 0 {
+        println!(
+            "  uptime : large_prompt_threshold={}, large_prompt_parallel={}, solo_fallback={}",
+            state.racing_large_prompt_char_threshold,
+            state.racing_large_prompt_parallel,
+            state.racing_solo_fallback
+        );
+    }
 
     println!("  routes : POST /v1/chat/completions POST /v1/completions POST /v1/embeddings GET /v1/models GET /props GET /health GET /stats");
 

@@ -1,8 +1,8 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.3. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.4. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.3 includes the ten-model NVIDIA catalog-default pool, adaptive racing/gateway limits, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.4 includes the uptime-oriented NVIDIA pool, dynamic per-key AIMD windows, bounded admission wait, solo racing fallback, large-prompt fanout caps, config-driven turn logging, adaptive racing/gateway limits, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
 
 ## FFI Integration (v0.15+)
 
@@ -72,54 +72,54 @@ nimaproxy/
 ## Racing (Speculative Execution)
 
 V3 feature: fires N parallel requests to N models, returns first response.
-Trades N×token budget for min(P50 latency). v0.15.3 adds adaptive fanout and
-gateway concurrency limits so the healthy ceiling remains 10 while pressure and
-degraded states back off before NVIDIA-side cooldowns dominate.
+Trades extra token budget for min(P50 latency). v0.15.4 keeps the production
+healthy ceiling at 3 racers, backs off to 2 under pressure, and falls back to a
+single best model when fewer than two viable racers/key slots exist.
 
 ```toml
 [racing]
 enabled = true
 models = [
-  "deepseek-ai/deepseek-v4-pro",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
+  "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
-  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "deepseek-ai/deepseek-v4-flash",
 ]
-max_parallel = 10
+max_parallel = 3
 timeout_ms = 15000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
-pressure_parallel = 6
-degraded_parallel = 3
+pressure_parallel = 2
+degraded_parallel = 2
+solo_fallback = true
+large_prompt_char_threshold = 12000
+large_prompt_parallel = 1
 fast_models = [
-  "stepfun-ai/step-3.7-flash",
-  "qwen/qwen3.5-397b-a17b",
-  "z-ai/glm-5.1",
-  "moonshotai/kimi-k2.6",
   "minimaxai/minimax-m3",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
 ]
 fallback_models = [
-  "minimaxai/minimax-m2.7",
+  "qwen/qwen3.5-397b-a17b",
   "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
-  "deepseek-ai/deepseek-v4-pro",
+  "minimaxai/minimax-m2.7",
   "nvidia/nemotron-3-ultra-550b-a55b",
 ]
 
 [limits]
-max_upstream_in_flight = 48
-max_in_flight_per_key = 3
+max_upstream_in_flight = 8
+max_in_flight_per_key = 2
+admission_wait_ms = 5000
 
 [timeouts]
-min_dynamic_timeout_ms = 8000
-dynamic_sample_floor = 10
+min_dynamic_timeout_ms = 15000
+dynamic_sample_floor = 25
 ```
 
 ## Model Routing (V2)
@@ -136,20 +136,18 @@ Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skip
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "deepseek-ai/deepseek-v4-pro",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
+  "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
-  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "deepseek-ai/deepseek-v4-flash",
 ]
 ```
 
-Available racing models (current pool, 10 total): deepseek-ai/deepseek-v4-pro, nvidia/nemotron-3-ultra-550b-a55b, deepseek-ai/deepseek-v4-flash, mistralai/mistral-medium-3.5-128b, z-ai/glm-5.1, stepfun-ai/step-3.7-flash, moonshotai/kimi-k2.6, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m3, minimaxai/minimax-m2.7
+Available racing models (current active pool, 8 total): minimaxai/minimax-m3, z-ai/glm-5.1, stepfun-ai/step-3.7-flash, moonshotai/kimi-k2.6, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m2.7, nvidia/nemotron-3-ultra-550b-a55b, deepseek-ai/deepseek-v4-flash
 
 Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested
@@ -212,20 +210,26 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 
 ```bash
 ./nimakai recommend --task coding --format json
-# → {"primary": "mistralai/mistral-medium-3.5-128b", "fallback": "stepfun-ai/step-3.7-flash"}
+# → {"primary": "minimaxai/minimax-m3", "fallback": "stepfun-ai/step-3.7-flash"}
 ```
 
-## nimaproxy v0.15.3 Critical Fixes (cumulative)
+## nimaproxy v0.15.4 Critical Fixes (cumulative)
 
 ### Racing, Timeout, and Model Defaults
 
-- Applies build.nvidia.com per-model defaults for the current ten-model pool.
+- Applies build.nvidia.com per-model defaults for the current catalog-default pool.
 - Treats `stream=true` as caller-controlled response mode, not a forced model hyperparameter.
 - Direct chat requests honor configured dynamic upstream timeouts and return 504 on timeout.
 - New or failure-only models keep the configured max timeout until enough latency history exists, then learned timeouts are clamped by `min_dynamic_timeout_ms`.
-- Adaptive racing uses fast/fallback tiers and backs off from `max_parallel=10` to pressure/degraded fanout when gateway pressure rises.
+- Adaptive racing uses fast/fallback tiers and backs off from `max_parallel=3` to pressure/degraded fanout when gateway pressure rises.
+- Dynamic per-key windows halve on 429 and reopen slowly after successful requests.
+- Bounded admission wait gives key slots a short chance to free up before local 503/429 responses.
+- Solo fallback keeps `auto` useful when racing cannot safely launch at least two upstream requests.
+- Solo fallback and exhausted races can walk unused fallback candidates sequentially after transient 5xx/timeouts.
+- Provider-prefixed `nimaproxy/auto` is accepted as an alias for `auto`.
+- Large prompts can cap racing fanout to avoid burning multiple full-context requests.
 - Gateway limits cap total upstream in-flight requests and per-key in-flight requests; saturated gateways return local 503s.
-- `/health`, `/stats`, and `nimakai proxy status` expose gateway in-flight counts, request counters, fanout average, racing wins, and per-key in-flight counts.
+- `/health`, `/stats`, and `nimakai proxy status` expose gateway in-flight counts, key window capacity, request counters, fanout average, racing wins, and per-key in-flight counts.
 - Racing excludes server-degraded/all-keys-failed models, but can backfill with least-bad degraded latency/failure candidates when healthy capacity is insufficient.
 - Local latency degradation requires three samples; NVIDIA server-degraded responses are still honored immediately.
 - Losing 429 racers do not globally cool keys when another model wins; all-key/all-race rate-limit cases return 429.

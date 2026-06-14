@@ -1,12 +1,13 @@
 //! Structured turn logging for observability and analysis.
-//! Logs each request/response pair to JSONL format with message content.
+//! Logs request/response metadata to JSONL format. Message capture is available
+//! in the data model, but the proxy path currently writes counts and status only.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// A single message in a conversation
 #[derive(Serialize, Debug, Clone)]
@@ -205,23 +206,23 @@ impl TurnLogger {
 }
 
 /// Global turn logger instance
-static mut GLOBAL_LOGGER: Option<TurnLogger> = None;
+static GLOBAL_LOGGER: OnceLock<TurnLogger> = OnceLock::new();
 
 /// Initialize the global turn logger
 pub fn init_logger(path: &str, enabled: bool) -> io::Result<()> {
     let logger = TurnLogger::new(path, enabled)?;
-    unsafe {
-        GLOBAL_LOGGER = Some(logger);
-    }
-    Ok(())
+    GLOBAL_LOGGER.set(logger).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "turn logger is already initialized",
+        )
+    })
 }
 
 /// Log a turn to the global logger
 pub fn log_turn(turn: &TurnLog) {
-    unsafe {
-        if let Some(logger) = &GLOBAL_LOGGER {
-            let _ = logger.log(turn);
-        }
+    if let Some(logger) = GLOBAL_LOGGER.get() {
+        let _ = logger.log(turn);
     }
 }
 
@@ -230,16 +231,12 @@ pub fn with_logger<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&TurnLogger) -> R,
 {
-    unsafe { GLOBAL_LOGGER.as_ref().map(|logger| f(logger)) }
+    GLOBAL_LOGGER.get().map(f)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::io::BufRead;
-    use tempfile::NamedTempFile;
-
     #[test]
     fn test_turn_log_creation() {
         let turn = TurnLog::new(

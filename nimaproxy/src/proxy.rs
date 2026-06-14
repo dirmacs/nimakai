@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -11,7 +11,7 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use serde_json::Value;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use crate::{AppState, KeyAcquireError, KeyLease, UpstreamPermit};
 
@@ -88,6 +88,8 @@ fn extract_response_metrics(text: &str) -> (u32, u32, bool) {
 /// Returns Ok(()) for valid models (including "auto" and empty).
 /// Returns Err with message for invalid models not in the available list.
 pub fn validate_model_exists(model: &str, state: &AppState) -> Result<(), String> {
+    let model = normalize_requested_model(model);
+
     // "auto" and empty are always valid - they'll be resolved via router
     if model.is_empty() || model == "auto" {
         return Ok(());
@@ -105,6 +107,14 @@ pub fn validate_model_exists(model: &str, state: &AppState) -> Result<(), String
     // This preserves backward compatibility: when no models are configured,
     // passthrough mode allows any model through
     Ok(())
+}
+
+fn normalize_requested_model(model: &str) -> &str {
+    if model == "nimaproxy/auto" {
+        "auto"
+    } else {
+        model
+    }
 }
 
 fn mistral_validation_error(model_id: &str, body: &Bytes) -> Option<Response> {
@@ -202,6 +212,11 @@ fn timeout_for_model(state: &AppState, model_id: &str) -> u64 {
     )
 }
 
+enum GatewayAcquireError {
+    Overloaded,
+    NoKeys,
+}
+
 fn gateway_overloaded_response(state: &AppState) -> Response {
     state.gateway_metrics.record_overload();
     (
@@ -216,17 +231,93 @@ fn no_key_response(state: &AppState) -> Response {
     (StatusCode::TOO_MANY_REQUESTS, "all API keys rate-limited").into_response()
 }
 
-fn acquire_gateway_permits(state: &AppState) -> Result<(UpstreamPermit, KeyLease), Response> {
+fn try_acquire_gateway_permits(
+    state: &AppState,
+) -> Result<(UpstreamPermit, KeyLease), GatewayAcquireError> {
     let upstream_permit = state
         .try_acquire_upstream()
-        .ok_or_else(|| gateway_overloaded_response(state))?;
+        .ok_or(GatewayAcquireError::Overloaded)?;
 
     match state.pool.next_key_with_permit() {
         Ok(key_lease) => Ok((upstream_permit, key_lease)),
-        Err(KeyAcquireError::AllBusy) => Err(gateway_overloaded_response(state)),
+        Err(KeyAcquireError::AllBusy) => Err(GatewayAcquireError::Overloaded),
         Err(KeyAcquireError::NoKeys | KeyAcquireError::AllCoolingDown) => {
-            Err(no_key_response(state))
+            Err(GatewayAcquireError::NoKeys)
         }
+    }
+}
+
+async fn acquire_gateway_permits(state: &AppState) -> Result<(UpstreamPermit, KeyLease), Response> {
+    let start = Instant::now();
+    let wait = Duration::from_millis(state.admission_wait_ms);
+    let sleep_step = Duration::from_millis(25);
+
+    loop {
+        match try_acquire_gateway_permits(state) {
+            Ok(permits) => return Ok(permits),
+            Err(GatewayAcquireError::NoKeys) if state.pool.len() == 0 => {
+                return Err(no_key_response(state));
+            }
+            Err(err) => {
+                if start.elapsed() >= wait {
+                    return Err(match err {
+                        GatewayAcquireError::NoKeys => no_key_response(state),
+                        GatewayAcquireError::Overloaded => gateway_overloaded_response(state),
+                    });
+                }
+                sleep(sleep_step).await;
+            }
+        }
+    }
+}
+
+fn request_turn_summary(body: &Bytes) -> (usize, bool, usize) {
+    let Ok(json) = serde_json::from_slice::<Value>(body) else {
+        return (0, false, 0);
+    };
+
+    let Some(messages) = json.get("messages").and_then(|m| m.as_array()) else {
+        return (0, false, 0);
+    };
+
+    let mut tool_count = 0usize;
+    let mut has_tool_role = false;
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) == Some("tool") {
+            has_tool_role = true;
+            tool_count += 1;
+        }
+        if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
+            tool_count += tool_calls.len();
+        }
+    }
+
+    (messages.len(), has_tool_role || tool_count > 0, tool_count)
+}
+
+fn prompt_chars(body: &Bytes) -> usize {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("messages").cloned())
+        .and_then(|m| m.as_array().cloned())
+        .map(|messages| {
+            messages
+                .iter()
+                .map(|msg| msg.get("content").map(|c| c.to_string().len()).unwrap_or(0))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn prompt_parallel_cap(state: &AppState, body: &Bytes) -> Option<usize> {
+    let threshold = state.racing_large_prompt_char_threshold;
+    if threshold == 0 {
+        return None;
+    }
+    if prompt_chars(body) >= threshold {
+        Some(state.racing_large_prompt_parallel.max(1))
+    } else {
+        None
     }
 }
 
@@ -250,9 +341,10 @@ fn adaptive_racing_parallel(state: &AppState, candidate_count: usize) -> usize {
         return 0;
     }
 
-    let in_flight = state.gateway_metrics.upstream_in_flight() as usize;
-    let pressure_mark = (state.max_upstream_in_flight / 3).max(1);
-    let degraded_mark = ((state.max_upstream_in_flight * 2) / 3).max(1);
+    let key_window_capacity = state.pool.window_capacity().max(1);
+    let in_flight = key_window_capacity.saturating_sub(available_key_slots);
+    let pressure_mark = (key_window_capacity / 3).max(1);
+    let degraded_mark = ((key_window_capacity * 2) / 3).max(1);
 
     let desired = if active_keys < state.pool.len() || in_flight >= degraded_mark {
         state.racing_degraded_parallel
@@ -303,6 +395,303 @@ fn tiered_candidates(state: &AppState, rotated: &[String], max_parallel: usize) 
         .racing_candidates_tiered(&fast, &fallback, max_parallel)
 }
 
+fn solo_candidate_models(state: &AppState, models: &[String]) -> Vec<String> {
+    tiered_candidates(state, models, models.len().max(1))
+}
+
+#[cfg(test)]
+fn solo_candidate_model(state: &AppState, models: &[String]) -> Option<String> {
+    solo_candidate_models(state, models).into_iter().next()
+}
+
+fn prepare_model_body(state: &AppState, body: &Bytes, model_id: &str) -> Option<Bytes> {
+    let mut json: Value = serde_json::from_slice(body).ok()?;
+    json["model"] = Value::String(model_id.to_string());
+
+    inject_mistral_tool_params(&mut json, model_id);
+    inject_minimax_system_message(&mut json, model_id);
+    sanitize_tool_calls(&mut json);
+    transform_message_roles(&mut json, model_id, state);
+    fix_message_ordering(&mut json);
+    normalize_assistant_messages(&mut json);
+
+    if let Some(params) = state.model_params.get(model_id) {
+        apply_model_params(&mut json, params);
+    }
+
+    serde_json::to_vec(&json).ok().map(Bytes::from)
+}
+
+async fn solo_model_fallback(
+    state: Arc<AppState>,
+    body: Bytes,
+    model_ids: Vec<String>,
+) -> Response {
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for model_id in model_ids {
+        let Some(req_body) = prepare_model_body(&state, &body, &model_id) else {
+            return (StatusCode::BAD_REQUEST, "invalid JSON body").into_response();
+        };
+        if let Some(response) = mistral_validation_error(&model_id, &req_body) {
+            return response;
+        }
+
+        let n = state.pool.len().min(MAX_RETRIES).max(1);
+        for _ in 0..n {
+            let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
+                Ok(permits) => permits,
+                Err(response) => return response,
+            };
+            let _upstream_permit = upstream_permit;
+            let key_idx = key_lease.idx;
+            let key_label = key_lease.label.clone();
+            let request_timeout_ms = timeout_for_model(&state, &model_id);
+            let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&req_body);
+            let t0 = Instant::now();
+            let result = timeout(
+                Duration::from_millis(request_timeout_ms),
+                state
+                    .client
+                    .post(format!("{}/v1/chat/completions", state.target))
+                    .header("Authorization", format!("Bearer {}", key_lease.key))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", accept_header_for_body(&req_body))
+                    .body(req_body.clone())
+                    .send(),
+            )
+            .await;
+
+            let resp = match result {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
+                    let msg = e.to_string();
+                    if let Some(label) = key_label.as_ref() {
+                        state.model_stats.record_with_key(
+                            &model_id,
+                            label,
+                            t0.elapsed().as_millis() as f64,
+                            false,
+                        );
+                    } else {
+                        state
+                            .model_stats
+                            .record(&model_id, t0.elapsed().as_millis() as f64, false);
+                    }
+                    log_turn_request(
+                        "auto",
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        StatusCode::BAD_GATEWAY.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        true,
+                        Some(msg.clone()),
+                    );
+                    last_error = Some((StatusCode::BAD_GATEWAY, msg));
+                    break;
+                }
+                Err(_) => {
+                    state.gateway_metrics.record_timeout();
+                    let msg = format!("upstream timeout after {}ms", request_timeout_ms);
+                    if let Some(label) = key_label.as_ref() {
+                        state.model_stats.record_with_key(
+                            &model_id,
+                            label,
+                            request_timeout_ms as f64,
+                            false,
+                        );
+                    } else {
+                        state
+                            .model_stats
+                            .record(&model_id, request_timeout_ms as f64, false);
+                    }
+                    log_turn_request(
+                        "auto",
+                        &model_id,
+                        request_timeout_ms as u128,
+                        false,
+                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        true,
+                        Some(msg.clone()),
+                    );
+                    last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
+                    break;
+                }
+            };
+
+            let status = resp.status();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                state.gateway_metrics.record_rate_limit();
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(60);
+                state.pool.mark_rate_limited(key_idx, retry_after);
+                last_error = Some((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "all API keys rate-limited".to_string(),
+                ));
+                continue;
+            }
+
+            let ttfc_ms = t0.elapsed().as_millis() as f64;
+            let ok = status.is_success();
+            let resp_status =
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string();
+            let body_bytes =
+                match timeout(Duration::from_millis(request_timeout_ms), resp.bytes()).await {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        log_turn_request(
+                            "auto",
+                            &model_id,
+                            t0.elapsed().as_millis(),
+                            false,
+                            StatusCode::BAD_GATEWAY.as_u16(),
+                            message_count,
+                            has_tool_calls,
+                            tool_call_count,
+                            key_label.as_deref(),
+                            true,
+                            Some(msg.clone()),
+                        );
+                        last_error = Some((StatusCode::BAD_GATEWAY, msg));
+                        break;
+                    }
+                    Err(_) => {
+                        state.gateway_metrics.record_timeout();
+                        let msg = format!("upstream body timeout after {}ms", request_timeout_ms);
+                        if let Some(label) = key_label.as_ref() {
+                            state.model_stats.record_with_key(
+                                &model_id,
+                                label,
+                                request_timeout_ms as f64,
+                                false,
+                            );
+                        } else {
+                            state
+                                .model_stats
+                                .record(&model_id, request_timeout_ms as f64, false);
+                        }
+                        log_turn_request(
+                            "auto",
+                            &model_id,
+                            request_timeout_ms as u128,
+                            false,
+                            StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                            message_count,
+                            has_tool_calls,
+                            tool_call_count,
+                            key_label.as_deref(),
+                            true,
+                            Some(msg.clone()),
+                        );
+                        last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
+                        break;
+                    }
+                };
+            let body_str = std::str::from_utf8(&body_bytes).unwrap_or("");
+            let error_excerpt = body_str.chars().take(400).collect::<String>();
+            let hard_model_error = status == StatusCode::BAD_REQUEST
+                && is_hard_model_error(&format!("HTTP 400 {body_str}"));
+            if hard_model_error {
+                state.model_stats.record_hard_error(&model_id, body_str);
+            }
+            if ok {
+                state.pool.record_success(key_idx);
+            }
+            if let Some(label) = key_label.as_ref() {
+                state
+                    .model_stats
+                    .record_with_key(&model_id, label, ttfc_ms, ok);
+            } else {
+                state.model_stats.record(&model_id, ttfc_ms, ok);
+            }
+
+            log_turn_request(
+                "auto",
+                &model_id,
+                ttfc_ms as u128,
+                ok,
+                status.as_u16(),
+                message_count,
+                has_tool_calls,
+                tool_call_count,
+                key_label.as_deref(),
+                true,
+                if ok {
+                    None
+                } else {
+                    Some(error_excerpt.clone())
+                },
+            );
+
+            if ok {
+                state.gateway_metrics.record_racing_win(&model_id);
+                let mut response = Response::new(Body::from(body_bytes));
+                *response.status_mut() = resp_status;
+                response.headers_mut().insert(
+                    "content-type",
+                    HeaderValue::from_str(&content_type)
+                        .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                );
+                if let Some(label) = key_label.as_ref() {
+                    response.headers_mut().insert(
+                        "x-key-label",
+                        HeaderValue::from_str(label)
+                            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                    );
+                }
+                return response;
+            }
+
+            if resp_status.is_server_error() || hard_model_error {
+                last_error = Some((resp_status, error_excerpt));
+                break;
+            }
+
+            let mut response = Response::new(Body::from(body_bytes));
+            *response.status_mut() = resp_status;
+            response.headers_mut().insert(
+                "content-type",
+                HeaderValue::from_str(&content_type)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+            );
+            if let Some(label) = key_label.as_ref() {
+                response.headers_mut().insert(
+                    "x-key-label",
+                    HeaderValue::from_str(label)
+                        .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                );
+            }
+            return response;
+        }
+    }
+
+    if let Some((status, msg)) = last_error {
+        return (status, msg).into_response();
+    }
+
+    no_key_response(&state)
+}
+
 /// POST /v1/chat/completions
 ///
 /// V1: injects key, retries on 429, streams SSE byte-for-byte.
@@ -330,11 +719,12 @@ pub async fn chat_completions(
     if let Err(msg) = validate_model_exists(&original_model, &state) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
+    let routing_model = normalize_requested_model(&original_model).to_string();
 
     // Racing owns per-model body rewriting. Passing the original auto request
     // avoids leaking router-picked model params into race candidates that do
     // not define the same fields.
-    if original_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2
+    if routing_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2
     {
         state.gateway_metrics.record_request(true);
         let racing_models = state.racing_models.clone();
@@ -349,10 +739,11 @@ pub async fn chat_completions(
         return response;
     }
 
+    let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&body);
     let n = state.pool.len().min(MAX_RETRIES).max(1);
 
     for _ in 0..n {
-        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state) {
+        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
             Ok(permits) => permits,
             Err(response) => return response,
         };
@@ -390,6 +781,19 @@ pub async fn chat_completions(
                         .model_stats
                         .record(&model_id, request_timeout_ms as f64, false);
                 }
+                log_turn_request(
+                    &original_model,
+                    &model_id,
+                    request_timeout_ms as u128,
+                    false,
+                    StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                    message_count,
+                    has_tool_calls,
+                    tool_call_count,
+                    key_label.as_deref(),
+                    false,
+                    Some(format!("upstream timeout after {}ms", request_timeout_ms)),
+                );
                 return (
                     StatusCode::GATEWAY_TIMEOUT,
                     format!("upstream timeout after {}ms", request_timeout_ms),
@@ -409,6 +813,19 @@ pub async fn chat_completions(
                         .model_stats
                         .record(&model_id, t0.elapsed().as_millis() as f64, false);
                 }
+                log_turn_request(
+                    &original_model,
+                    &model_id,
+                    t0.elapsed().as_millis(),
+                    false,
+                    StatusCode::BAD_GATEWAY.as_u16(),
+                    message_count,
+                    has_tool_calls,
+                    tool_call_count,
+                    key_label.as_deref(),
+                    false,
+                    Some(e.to_string()),
+                );
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
             Ok(Ok(resp)) => {
@@ -430,6 +847,9 @@ pub async fn chat_completions(
                 // Record TTFC (response headers received = first bytes available)
                 let ttfc_ms = t0.elapsed().as_millis() as f64;
                 let ok = status.is_success();
+                if ok {
+                    state.pool.record_success(idx);
+                }
 
                 // Forward response — stream bytes directly (works for JSON + SSE)
                 let resp_status = axum::http::StatusCode::from_u16(status.as_u16())
@@ -470,6 +890,22 @@ pub async fn chat_completions(
                                 .model_stats
                                 .record(&model_id, request_timeout_ms as f64, false);
                         }
+                        log_turn_request(
+                            &original_model,
+                            &model_id,
+                            request_timeout_ms as u128,
+                            false,
+                            StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                            message_count,
+                            has_tool_calls,
+                            tool_call_count,
+                            key_label.as_deref(),
+                            false,
+                            Some(format!(
+                                "upstream body timeout after {}ms",
+                                request_timeout_ms
+                            )),
+                        );
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
                             format!("upstream body timeout after {}ms", request_timeout_ms),
@@ -482,12 +918,13 @@ pub async fn chat_completions(
                 // Check for server-side degradation from NVIDIA API
                 // NVIDIA returns: {"status":400,"title":"Bad Request","detail":"Function id '...': DEGRADED function cannot be invoked"}
                 let body_str = std::str::from_utf8(&full_body).unwrap_or("");
+                let error_excerpt = body_str.chars().take(400).collect::<String>();
                 if status == 400 && (body_str.contains("DEGRADED") || body_str.contains("degraded"))
                 {
                     eprintln!("[nimaproxy] SERVER-DEGRADED: model '{}' returned DEGRADED error from NVIDIA (server-side block)", model_id);
                     // Record as server-side degraded - this immediately marks the model as unavailable
                     state.model_stats.record_server_degraded(&model_id);
-                    if original_model == "auto" {
+                    if routing_model == "auto" {
                         let (next_model_id, next_body) =
                             resolve_model(original_body.clone(), &state);
                         model_id = next_model_id;
@@ -504,6 +941,20 @@ pub async fn chat_completions(
                         || body_str.contains("invalid assistant"))
                 {
                     eprintln!("[nimaproxy] INVALID-ASSISTANT: model '{}' rejected message structure (400): {} — retrying with next key", model_id, &body_str[..body_str.len().min(200)]);
+                    state.model_stats.record_hard_error(&model_id, body_str);
+                    log_turn_request(
+                        &original_model,
+                        &model_id,
+                        ttfc_ms as u128,
+                        false,
+                        status.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        false,
+                        Some(error_excerpt.clone()),
+                    );
                     continue;
                 }
 
@@ -565,6 +1016,19 @@ pub async fn chat_completions(
                         .headers_mut()
                         .insert("x-accel-buffering", HeaderValue::from_static("no"));
                 }
+                log_turn_request(
+                    &original_model,
+                    &model_id,
+                    ttfc_ms as u128,
+                    ok,
+                    status.as_u16(),
+                    message_count,
+                    has_tool_calls,
+                    tool_call_count,
+                    key_label.as_deref(),
+                    false,
+                    if ok { None } else { Some(error_excerpt) },
+                );
                 return response;
             }
         }
@@ -670,6 +1134,59 @@ fn sanitize_tool_calls(json: &mut Value) {
         }
     }
 }
+
+fn normalize_assistant_messages(json: &mut Value) {
+    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages.iter_mut() {
+            if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                continue;
+            }
+            let Some(obj) = msg.as_object_mut() else {
+                continue;
+            };
+
+            obj.remove("tool_call_id");
+            obj.remove("reasoning");
+
+            let has_tool_calls = obj
+                .get("tool_calls")
+                .and_then(|tc| tc.as_array())
+                .is_some_and(|tc| !tc.is_empty());
+
+            if has_tool_calls {
+                obj.insert("content".to_string(), Value::Null);
+            } else {
+                obj.remove("tool_calls");
+                let missing_or_null = obj
+                    .get("content")
+                    .map(|content| content.is_null())
+                    .unwrap_or(true);
+                if missing_or_null {
+                    obj.insert("content".to_string(), Value::String(String::new()));
+                }
+            }
+        }
+    }
+}
+
+fn is_hard_model_error(error: &str) -> bool {
+    error.contains("HTTP 400")
+        && (error.contains("Invalid assistant message")
+            || error.contains("invalid assistant")
+            || error.contains("tool_calls=None")
+            || error.contains("BadRequestError"))
+}
+
+fn is_transient_race_error(error: &str) -> bool {
+    error.contains("timeout")
+        || error.contains("request error")
+        || error.contains("body error")
+        || error.contains("HTTP 500")
+        || error.contains("HTTP 502")
+        || error.contains("HTTP 503")
+        || error.contains("HTTP 504")
+}
+
 /// Validate tool call IDs for Mistral models.
 /// Mistral requires tool call IDs to be exactly 9 alphanumeric characters.
 /// Also validates that the number of tool calls matches the number of tool responses
@@ -757,7 +1274,7 @@ pub fn fix_message_ordering(json: &mut Value) {
                         // NVIDIA NIM rejects messages with both content AND tool_calls
                         let empty_assistant = serde_json::json!({
                             "role": "assistant",
-                            "content": null,
+                            "content": "",
                         });
                         messages.insert(i + 1, empty_assistant);
                         i += 2; // Skip the inserted message
@@ -903,13 +1420,15 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
         Err(_) => return ("unknown".to_string(), body),
     };
 
-    let requested = json["model"].as_str().unwrap_or("").to_string();
+    let requested = normalize_requested_model(json["model"].as_str().unwrap_or("")).to_string();
 
     if requested.is_empty() || requested == "auto" {
         if let Some(router) = &state.router {
             if let Some(picked) = router.pick(&state.model_stats) {
                 json["model"] = Value::String(picked.clone());
             }
+        } else if requested == "auto" {
+            json["model"] = Value::String("auto".to_string());
         }
     }
 
@@ -930,6 +1449,7 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     transform_message_roles(&mut json, &model_id, state);
 
     fix_message_ordering(&mut json);
+    normalize_assistant_messages(&mut json);
 
     if let Some(params) = state.model_params.get(&model_id) {
         apply_model_params(&mut json, params);
@@ -1013,6 +1533,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "cooldown_secs_remaining": s.cooldown_secs_remaining,
                 "in_flight": s.in_flight,
                 "max_in_flight": s.max_in_flight,
+                "configured_max_in_flight": s.configured_max_in_flight,
             })
         })
         .collect();
@@ -1026,6 +1547,9 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "keys": keys_json,
         "gateway_in_flight": metrics.upstream_in_flight,
         "gateway_limit": state.max_upstream_in_flight,
+        "key_window_capacity": state.pool.window_capacity(),
+        "key_available_permits": state.pool.available_permits(),
+        "admission_wait_ms": state.admission_wait_ms,
         "routing_enabled": state.routing_enabled(),
         "racing_enabled": state.racing_enabled(),
         "routing_models": routing_models,
@@ -1036,6 +1560,9 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "racing_min_parallel": state.racing_min_parallel,
         "racing_pressure_parallel": state.racing_pressure_parallel,
         "racing_degraded_parallel": state.racing_degraded_parallel,
+        "racing_large_prompt_char_threshold": state.racing_large_prompt_char_threshold,
+        "racing_large_prompt_parallel": state.racing_large_prompt_parallel,
+        "racing_solo_fallback": state.racing_solo_fallback,
     });
 
     (
@@ -1077,6 +1604,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "cooldown_secs_remaining": s.cooldown_secs_remaining,
                 "in_flight": s.in_flight,
                 "max_in_flight": s.max_in_flight,
+                "configured_max_in_flight": s.configured_max_in_flight,
             })
         })
         .collect();
@@ -1099,6 +1627,9 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "upstream_in_flight": metrics.upstream_in_flight,
             "max_upstream_in_flight": state.max_upstream_in_flight,
             "max_in_flight_per_key": state.max_in_flight_per_key,
+            "key_window_capacity": state.pool.window_capacity(),
+            "key_available_permits": state.pool.available_permits(),
+            "admission_wait_ms": state.admission_wait_ms,
             "overload_rejects": metrics.overload_rejects,
             "no_key_rejects": metrics.no_key_rejects,
             "timeout_count": metrics.timeout_count,
@@ -1116,6 +1647,9 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "racing_min_parallel": state.racing_min_parallel,
         "racing_pressure_parallel": state.racing_pressure_parallel,
         "racing_degraded_parallel": state.racing_degraded_parallel,
+        "racing_large_prompt_char_threshold": state.racing_large_prompt_char_threshold,
+        "racing_large_prompt_parallel": state.racing_large_prompt_parallel,
+        "racing_solo_fallback": state.racing_solo_fallback,
         "racing_fast_models": state.racing_fast_models.clone(),
         "racing_fallback_models": state.racing_fallback_models.clone(),
     });
@@ -1128,9 +1662,19 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Response {
-    let max_parallel = adaptive_racing_parallel(&state, models.len());
+    let mut max_parallel = adaptive_racing_parallel(&state, models.len());
+    if let Some(prompt_cap) = prompt_parallel_cap(&state, &body) {
+        max_parallel = max_parallel.min(prompt_cap);
+    }
 
     if max_parallel < 2 {
+        if state.racing_solo_fallback {
+            let solo_models = solo_candidate_models(&state, models);
+            if !solo_models.is_empty() {
+                state.gateway_metrics.record_fanout(1);
+                return solo_model_fallback(state, body, solo_models).await;
+            }
+        }
         if state.pool.active_count() == 0 {
             return no_key_response(&state);
         }
@@ -1151,6 +1695,18 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
     let candidates_for_race = tiered_candidates(&state, &candidates, max_parallel);
 
     if candidates_for_race.len() < 2 {
+        if state.racing_solo_fallback {
+            let mut solo_models = candidates_for_race.clone();
+            for model_id in solo_candidate_models(&state, models) {
+                if !solo_models.iter().any(|m| m == &model_id) {
+                    solo_models.push(model_id);
+                }
+            }
+            if !solo_models.is_empty() {
+                state.gateway_metrics.record_fanout(1);
+                return solo_model_fallback(state, body, solo_models).await;
+            }
+        }
         eprintln!("[racing] not enough viable models after filtering (need ≥2)");
         return (StatusCode::BAD_GATEWAY, "not enough viable racing models").into_response();
     }
@@ -1189,6 +1745,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
 
         // Fix message ordering: insert empty assistant between tool→user transitions
         fix_message_ordering(&mut json);
+        normalize_assistant_messages(&mut json);
 
         // Inject per-model catalog defaults and hyperparameters.
         if let Some(params) = state.model_params.get(model_id) {
@@ -1200,6 +1757,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
             Ok(b) => Bytes::from(b),
             Err(_) => continue,
         };
+        let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&req_body);
 
         let target = state.target.clone();
         let client = state.client.clone();
@@ -1280,6 +1838,27 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                         let body_bytes = resp.bytes().await.unwrap_or_default();
                         let body_str = String::from_utf8_lossy(&body_bytes);
                         record_outcome(false);
+                        if status.as_u16() == 400 {
+                            let err = format!("HTTP 400 from {}: {}", model_id_clone, body_str);
+                            if is_hard_model_error(&err) {
+                                state_clone
+                                    .model_stats
+                                    .record_hard_error(&model_id_clone, &err);
+                            }
+                        }
+                        log_turn_request(
+                            "auto",
+                            &model_id_clone,
+                            latency as u128,
+                            false,
+                            status.as_u16(),
+                            message_count,
+                            has_tool_calls,
+                            tool_call_count,
+                            key_label.as_deref(),
+                            true,
+                            Some(body_str[..body_str.len().min(400)].to_string()),
+                        );
                         return (
                             model_id_for_task,
                             Err(format!(
@@ -1291,6 +1870,11 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                         );
                     }
                     record_outcome(status.is_success());
+                    if status.as_u16() == 429 {
+                        state_clone.pool.record_rate_limited(key_idx_for_spawn);
+                    } else if status.is_success() {
+                        state_clone.pool.record_success(key_idx_for_spawn);
+                    }
                     let content_type = resp
                         .headers()
                         .get("content-type")
@@ -1306,6 +1890,19 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                     {
                         Ok(Ok(bytes)) => bytes,
                         Ok(Err(e)) => {
+                            log_turn_request(
+                                "auto",
+                                &model_id_clone,
+                                t0.elapsed().as_millis(),
+                                false,
+                                StatusCode::BAD_GATEWAY.as_u16(),
+                                message_count,
+                                has_tool_calls,
+                                tool_call_count,
+                                key_label.as_deref(),
+                                true,
+                                Some(e.to_string()),
+                            );
                             return (model_id_for_task, Err(format!("body error: {}", e)));
                         }
                         Err(_) => {
@@ -1324,6 +1921,19 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                                     false,
                                 );
                             }
+                            log_turn_request(
+                                "auto",
+                                &model_id_clone,
+                                timeout_ms_for_model as u128,
+                                false,
+                                StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                                message_count,
+                                has_tool_calls,
+                                tool_call_count,
+                                key_label.as_deref(),
+                                true,
+                                Some(format!("body timeout after {}ms", timeout_ms_for_model)),
+                            );
                             return (
                                 model_id_for_task,
                                 Err(format!("body timeout after {}ms", timeout_ms_for_model)),
@@ -1347,6 +1957,23 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                                 .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                         );
                     }
+                    log_turn_request(
+                        "auto",
+                        &model_id_clone,
+                        latency as u128,
+                        status.is_success(),
+                        status.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        true,
+                        if status.is_success() {
+                            None
+                        } else {
+                            Some(format!("HTTP {}", status.as_u16()))
+                        },
+                    );
                     Ok::<(Response, u16, usize, u64), String>((
                         response,
                         status.as_u16(),
@@ -1369,6 +1996,19 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                             false,
                         );
                     }
+                    log_turn_request(
+                        "auto",
+                        &model_id_clone,
+                        t0.elapsed().as_millis(),
+                        false,
+                        StatusCode::BAD_GATEWAY.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        true,
+                        Some(e.to_string()),
+                    );
                     Err(format!("request error: {}", e))
                 }
                 Err(_) => {
@@ -1387,6 +2027,19 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                             false,
                         );
                     }
+                    log_turn_request(
+                        "auto",
+                        &model_id_clone,
+                        timeout_ms_for_model as u128,
+                        false,
+                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        true,
+                        Some(format!("timeout after {}ms", timeout_ms_for_model)),
+                    );
                     Err(format!("timeout after {}ms", timeout_ms_for_model))
                 }
             };
@@ -1398,6 +2051,13 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
     state.gateway_metrics.record_fanout(actual_fanout);
 
     if actual_fanout == 0 {
+        if state.racing_solo_fallback {
+            let solo_models = solo_candidate_models(&state, models);
+            if !solo_models.is_empty() {
+                state.gateway_metrics.record_fanout(1);
+                return solo_model_fallback(state, body, solo_models).await;
+            }
+        }
         if skipped_no_key > 0 {
             state.gateway_metrics.record_no_key();
             return (StatusCode::TOO_MANY_REQUESTS, "all API keys rate-limited").into_response();
@@ -1415,6 +2075,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
     let mut last_error = None;
     let mut pending_rate_limited_keys: Vec<(usize, u64)> = Vec::new();
     let mut saw_non_rate_limit_failure = false;
+    let mut saw_transient_failure = false;
 
     while let Some(joined) = tasks.join_next().await {
         match joined {
@@ -1437,11 +2098,15 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
             Ok((model_id, Err(e))) => {
                 eprintln!("[racing] {} failed: {}", model_id, e);
                 saw_non_rate_limit_failure = true;
+                if is_transient_race_error(&e) {
+                    saw_transient_failure = true;
+                }
                 last_error = Some(e);
             }
             Err(e) => {
                 eprintln!("[racing] task failed: {}", e);
                 saw_non_rate_limit_failure = true;
+                saw_transient_failure = true;
                 last_error = Some(e.to_string());
             }
         }
@@ -1449,6 +2114,20 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
 
     for (key_idx, retry_after_secs) in pending_rate_limited_keys {
         state.pool.mark_rate_limited(key_idx, retry_after_secs);
+    }
+
+    if state.racing_solo_fallback && saw_transient_failure {
+        let mut solo_models: Vec<String> = solo_candidate_models(&state, models)
+            .into_iter()
+            .filter(|model| !models_to_race.iter().any(|raced| raced == model))
+            .collect();
+        if solo_models.is_empty() {
+            solo_models = solo_candidate_models(&state, models);
+        }
+        if !solo_models.is_empty() {
+            state.gateway_metrics.record_fanout(1);
+            return solo_model_fallback(state, body, solo_models).await;
+        }
     }
 
     if last_error
@@ -1533,8 +2212,12 @@ mod tests {
                 racing_degraded_parallel: 3,
                 racing_fast_models: vec!["fast-a".to_string(), "fast-b".to_string()],
                 racing_fallback_models: vec!["fallback-a".to_string()],
+                racing_large_prompt_char_threshold: 0,
+                racing_large_prompt_parallel: 1,
+                racing_solo_fallback: true,
                 max_upstream_in_flight: 6,
                 max_in_flight_per_key: 2,
+                admission_wait_ms: 0,
                 min_dynamic_timeout_ms: 8000,
                 dynamic_sample_floor: 10,
             },
@@ -1617,6 +2300,55 @@ mod tests {
     }
 
     #[test]
+    fn test_solo_candidate_prefers_fast_pool() {
+        let state = create_adaptive_test_state();
+        let rotated = vec![
+            "fallback-a".to_string(),
+            "fast-b".to_string(),
+            "fast-a".to_string(),
+        ];
+
+        let result = solo_candidate_model(&state, &rotated);
+
+        assert_eq!(result, Some("fast-b".to_string()));
+    }
+
+    #[test]
+    fn test_solo_candidate_uses_fallback_when_fast_pool_degraded() {
+        let state = create_adaptive_test_state();
+        for _ in 0..3 {
+            state.model_stats.record("fast-a", 5000.0, true);
+            state.model_stats.record("fast-b", 5000.0, true);
+            state.model_stats.record("fallback-a", 600.0, true);
+        }
+        let rotated = vec![
+            "fallback-a".to_string(),
+            "fast-b".to_string(),
+            "fast-a".to_string(),
+        ];
+
+        let result = solo_candidate_model(&state, &rotated);
+
+        assert_eq!(result, Some("fallback-a".to_string()));
+    }
+
+    #[test]
+    fn test_prompt_parallel_cap_limits_large_prompts() {
+        let mut state = create_adaptive_test_state();
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .racing_large_prompt_char_threshold = 10;
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .racing_large_prompt_parallel = 1;
+        let body = Bytes::from(
+            r#"{"messages":[{"role":"user","content":"this prompt is definitely large"}]}"#,
+        );
+
+        assert_eq!(prompt_parallel_cap(&state, &body), Some(1));
+    }
+
+    #[test]
     fn test_apply_model_params_preserves_explicit_stream_choice() {
         let mut json = json!({
             "model": "z-ai/glm-5.1",
@@ -1663,6 +2395,12 @@ mod tests {
     fn test_validate_model_exists_auto_model() {
         let state = create_test_app_state();
         assert!(validate_model_exists("auto", &state).is_ok());
+    }
+
+    #[test]
+    fn test_validate_model_exists_nimaproxy_auto_alias() {
+        let state = create_test_app_state();
+        assert!(validate_model_exists("nimaproxy/auto", &state).is_ok());
     }
 
     #[test]
@@ -2125,6 +2863,44 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_assistant_adds_empty_content_without_tool_calls() {
+        let mut json = json!({
+            "messages": [
+                {"role": "assistant", "content": null, "tool_calls": []}
+            ]
+        });
+
+        normalize_assistant_messages(&mut json);
+
+        let msg = &json["messages"][0];
+        assert_eq!(msg["content"], json!(""));
+        assert!(!msg.as_object().unwrap().contains_key("tool_calls"));
+    }
+
+    #[test]
+    fn test_normalize_assistant_tool_calls_keep_null_content() {
+        let mut json = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "will be replaced",
+                    "tool_call_id": "bad-extra",
+                    "tool_calls": [
+                        {"id": "abc123XYZ", "type": "function", "function": {"name": "read", "arguments": "{}"}}
+                    ]
+                }
+            ]
+        });
+
+        normalize_assistant_messages(&mut json);
+
+        let msg = &json["messages"][0];
+        assert_eq!(msg["content"], serde_json::Value::Null);
+        assert!(msg.as_object().unwrap().contains_key("tool_calls"));
+        assert!(!msg.as_object().unwrap().contains_key("tool_call_id"));
+    }
+
+    #[test]
     fn test_sanitize_tool_calls_mixed_valid_and_empty_tools() {
         let mut json = json!({
             "tools": [
@@ -2336,7 +3112,7 @@ mod tool_call_id_tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "tool");
         assert_eq!(msgs[1]["role"], "assistant");
-        assert_eq!(msgs[1]["content"], serde_json::Value::Null);
+        assert_eq!(msgs[1]["content"], serde_json::Value::String(String::new()));
         assert_eq!(msgs[2]["role"], "user");
     }
 
@@ -2359,7 +3135,7 @@ mod tool_call_id_tests {
         assert_eq!(msgs[0]["role"], "assistant");
         assert_eq!(msgs[1]["role"], "tool");
         assert_eq!(msgs[2]["role"], "assistant"); // inserted
-        assert!(msgs[2]["content"].is_null());
+        assert_eq!(msgs[2]["content"], serde_json::Value::String(String::new()));
         assert_eq!(msgs[3]["role"], "developer");
         assert_eq!(msgs[4]["role"], "user");
     }
@@ -2484,7 +3260,7 @@ pub async fn completions(
     let n = state.pool.len().min(MAX_RETRIES).max(1);
     eprintln!("[nimaproxy] POST /v1/completions - got n={}", n);
     for _ in 0..n {
-        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state) {
+        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
             Ok(permits) => permits,
             Err(response) => return response,
         };
@@ -2519,6 +3295,14 @@ pub async fn completions(
             Ok(resp) => {
                 let status = resp.status();
                 let ok = status.is_success();
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    state.gateway_metrics.record_rate_limit();
+                    state.pool.mark_rate_limited(key_lease.idx, 60);
+                    continue;
+                }
+                if ok {
+                    state.pool.record_success(key_lease.idx);
+                }
                 let ttfc_ms = t0.elapsed().as_millis() as f64;
                 let resp_status =
                     StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -2602,7 +3386,7 @@ pub async fn embeddings(
     };
     let n = state.pool.len().min(MAX_RETRIES).max(1);
     for _ in 0..n {
-        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state) {
+        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
             Ok(permits) => permits,
             Err(response) => return response,
         };
@@ -2636,6 +3420,14 @@ pub async fn embeddings(
             Ok(resp) => {
                 let status = resp.status();
                 let ok = status.is_success();
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    state.gateway_metrics.record_rate_limit();
+                    state.pool.mark_rate_limited(key_lease.idx, 60);
+                    continue;
+                }
+                if ok {
+                    state.pool.record_success(key_lease.idx);
+                }
                 let ttfc_ms = t0.elapsed().as_millis() as f64;
                 let resp_status =
                     StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);

@@ -3,7 +3,7 @@
 import std/strutils
 
 const
-  Version* = "0.15.3"
+  Version* = "0.15.4"
   GitCommit* = staticExec("git rev-parse --short HEAD 2>/dev/null || echo unknown").strip()
   BuildDate* = CompileDate & " " & CompileTime
   BaseURL* = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -74,6 +74,9 @@ type
     keysTotal*: int
     gatewayInFlight*: int
     gatewayLimit*: int
+    keyWindowCapacity*: int
+    keyAvailablePermits*: int
+    admissionWaitMs*: int
     routingEnabled*: bool
     racingEnabled*: bool
     racingMaxParallel*: int
@@ -82,6 +85,9 @@ type
     racingMinParallel*: int
     racingPressureParallel*: int
     racingDegradedParallel*: int
+    racingLargePromptCharThreshold*: int
+    racingLargePromptParallel*: int
+    racingSoloFallback*: bool
 
   ProxyModelStats* = object
     model*: string
@@ -101,6 +107,7 @@ type
     cooldownSecsRemaining*: int
     inFlight*: int
     maxInFlight*: int
+    configuredMaxInFlight*: int
 
   ProxyRacingWin* = object
     model*: string
@@ -114,6 +121,9 @@ type
     upstreamInFlight*: int
     maxUpstreamInFlight*: int
     maxInFlightPerKey*: int
+    keyWindowCapacity*: int
+    keyAvailablePermits*: int
+    admissionWaitMs*: int
     overloadRejects*: int
     noKeyRejects*: int
     timeoutCount*: int
@@ -135,6 +145,9 @@ type
     racingMinParallel*: int
     racingPressureParallel*: int
     racingDegradedParallel*: int
+    racingLargePromptCharThreshold*: int
+    racingLargePromptParallel*: int
+    racingSoloFallback*: bool
     racingFastModels*: seq[string]
     racingFallbackModels*: seq[string]
 
