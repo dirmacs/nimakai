@@ -98,6 +98,9 @@ proc parseGatewayStats(node: JsonNode): ProxyGatewayStats =
     upstreamInFlight: jsonInt(gateway, "upstream_in_flight"),
     maxUpstreamInFlight: jsonInt(gateway, "max_upstream_in_flight"),
     maxInFlightPerKey: jsonInt(gateway, "max_in_flight_per_key"),
+    keyWindowCapacity: jsonInt(gateway, "key_window_capacity"),
+    keyAvailablePermits: jsonInt(gateway, "key_available_permits"),
+    admissionWaitMs: jsonInt(gateway, "admission_wait_ms"),
     overloadRejects: jsonInt(gateway, "overload_rejects"),
     noKeyRejects: jsonInt(gateway, "no_key_rejects"),
     timeoutCount: jsonInt(gateway, "timeout_count"),
@@ -118,6 +121,9 @@ proc parseProxyHealthJson*(js: string): Option[ProxyHealth] =
       keysTotal: jsonInt(node, "keys_total"),
       gatewayInFlight: jsonInt(node, "gateway_in_flight"),
       gatewayLimit: jsonInt(node, "gateway_limit"),
+      keyWindowCapacity: jsonInt(node, "key_window_capacity"),
+      keyAvailablePermits: jsonInt(node, "key_available_permits"),
+      admissionWaitMs: jsonInt(node, "admission_wait_ms"),
       routingEnabled: jsonBool(node, "routing_enabled"),
       racingEnabled: jsonBool(node, "racing_enabled"),
       racingMaxParallel: jsonInt(node, "racing_max_parallel"),
@@ -126,6 +132,9 @@ proc parseProxyHealthJson*(js: string): Option[ProxyHealth] =
       racingMinParallel: jsonInt(node, "racing_min_parallel"),
       racingPressureParallel: jsonInt(node, "racing_pressure_parallel"),
       racingDegradedParallel: jsonInt(node, "racing_degraded_parallel"),
+      racingLargePromptCharThreshold: jsonInt(node, "racing_large_prompt_char_threshold"),
+      racingLargePromptParallel: jsonInt(node, "racing_large_prompt_parallel"),
+      racingSoloFallback: jsonBool(node, "racing_solo_fallback"),
     ))
   except:
     return none(ProxyHealth)
@@ -155,6 +164,7 @@ proc parseProxyStatsJson*(js: string): Option[ProxyStats] =
         cooldownSecsRemaining: jsonInt(k, "cooldown_secs_remaining"),
         inFlight: jsonInt(k, "in_flight"),
         maxInFlight: jsonInt(k, "max_in_flight"),
+        configuredMaxInFlight: jsonInt(k, "configured_max_in_flight"),
       ))
     return some(ProxyStats(
       models: models,
@@ -168,6 +178,9 @@ proc parseProxyStatsJson*(js: string): Option[ProxyStats] =
       racingMinParallel: jsonInt(node, "racing_min_parallel"),
       racingPressureParallel: jsonInt(node, "racing_pressure_parallel"),
       racingDegradedParallel: jsonInt(node, "racing_degraded_parallel"),
+      racingLargePromptCharThreshold: jsonInt(node, "racing_large_prompt_char_threshold"),
+      racingLargePromptParallel: jsonInt(node, "racing_large_prompt_parallel"),
+      racingSoloFallback: jsonBool(node, "racing_solo_fallback"),
       racingFastModels: parseStringArray(node, "racing_fast_models"),
       racingFallbackModels: parseStringArray(node, "racing_fallback_models"),
     ))

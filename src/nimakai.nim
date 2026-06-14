@@ -621,6 +621,9 @@ proc runProxy(cfg: Config) =
           "keys_total": h.keysTotal,
           "gateway_in_flight": h.gatewayInFlight,
           "gateway_limit": h.gatewayLimit,
+          "key_window_capacity": h.keyWindowCapacity,
+          "key_available_permits": h.keyAvailablePermits,
+          "admission_wait_ms": h.admissionWaitMs,
           "routing_enabled": h.routingEnabled,
           "racing_enabled": h.racingEnabled,
           "racing_max_parallel": h.racingMaxParallel,
@@ -629,6 +632,9 @@ proc runProxy(cfg: Config) =
           "racing_min_parallel": h.racingMinParallel,
           "racing_pressure_parallel": h.racingPressureParallel,
           "racing_degraded_parallel": h.racingDegradedParallel,
+          "racing_large_prompt_char_threshold": h.racingLargePromptCharThreshold,
+          "racing_large_prompt_parallel": h.racingLargePromptParallel,
+          "racing_solo_fallback": h.racingSoloFallback,
         }
       if statsOpt.isSome:
         let s = statsOpt.get
@@ -649,6 +655,7 @@ proc runProxy(cfg: Config) =
             "cooldown_secs_remaining": it.cooldownSecsRemaining,
             "in_flight": it.inFlight,
             "max_in_flight": it.maxInFlight,
+            "configured_max_in_flight": it.configuredMaxInFlight,
           }),
           "gateway": {
             "request_total": s.gateway.requestTotal,
@@ -658,6 +665,9 @@ proc runProxy(cfg: Config) =
             "upstream_in_flight": s.gateway.upstreamInFlight,
             "max_upstream_in_flight": s.gateway.maxUpstreamInFlight,
             "max_in_flight_per_key": s.gateway.maxInFlightPerKey,
+            "key_window_capacity": s.gateway.keyWindowCapacity,
+            "key_available_permits": s.gateway.keyAvailablePermits,
+            "admission_wait_ms": s.gateway.admissionWaitMs,
             "overload_rejects": s.gateway.overloadRejects,
             "no_key_rejects": s.gateway.noKeyRejects,
             "timeout_count": s.gateway.timeoutCount,
@@ -678,6 +688,9 @@ proc runProxy(cfg: Config) =
           "racing_min_parallel": s.racingMinParallel,
           "racing_pressure_parallel": s.racingPressureParallel,
           "racing_degraded_parallel": s.racingDegradedParallel,
+          "racing_large_prompt_char_threshold": s.racingLargePromptCharThreshold,
+          "racing_large_prompt_parallel": s.racingLargePromptParallel,
+          "racing_solo_fallback": s.racingSoloFallback,
           "racing_fast_models": s.racingFastModels,
           "racing_fallback_models": s.racingFallbackModels,
         }
@@ -696,14 +709,22 @@ proc runProxy(cfg: Config) =
       echo &"  racing enabled   : {h.racingEnabled}"
       if h.gatewayLimit > 0:
         echo &"  gateway in-flight: {h.gatewayInFlight}/{h.gatewayLimit}"
+      if h.keyWindowCapacity > 0:
+        echo &"  key window slots : {h.keyAvailablePermits}/{h.keyWindowCapacity} available"
+      if h.admissionWaitMs > 0:
+        echo &"  admission wait   : {h.admissionWaitMs}ms"
       if h.racingEnabled:
         echo &"  racing fanout    : max={h.racingMaxParallel} adaptive={h.racingAdaptive} min={h.racingMinParallel} pressure={h.racingPressureParallel} degraded={h.racingDegradedParallel}"
+        if h.racingLargePromptCharThreshold > 0 or h.racingSoloFallback:
+          echo &"  racing uptime    : solo={h.racingSoloFallback} large_prompt={h.racingLargePromptParallel}@{h.racingLargePromptCharThreshold} chars"
       if statsOpt.isSome:
         let s = statsOpt.get
         echo ""
         if s.gateway.maxUpstreamInFlight > 0 or s.gateway.requestTotal > 0:
           echo &"  \e[1mgateway metrics\e[0m"
           echo &"    requests={s.gateway.requestTotal} direct={s.gateway.directRequests} racing={s.gateway.racingRequests} upstream={s.gateway.upstreamAttempts} in_flight={s.gateway.upstreamInFlight}/{s.gateway.maxUpstreamInFlight}"
+          if s.gateway.keyWindowCapacity > 0:
+            echo &"    key_slots={s.gateway.keyAvailablePermits}/{s.gateway.keyWindowCapacity} per_key_limit={s.gateway.maxInFlightPerKey} admission_wait={s.gateway.admissionWaitMs}ms"
           echo &"    rejects overload={s.gateway.overloadRejects} no_key={s.gateway.noKeyRejects} timeouts={s.gateway.timeoutCount} rate_limits={s.gateway.rateLimitCount} fanout_avg={s.gateway.fanoutAvg:.2f}"
           if s.gateway.racingWins.len > 0:
             let wins = s.gateway.racingWins.mapIt(&"{it.model}={it.wins}").join(", ")
@@ -720,7 +741,8 @@ proc runProxy(cfg: Config) =
           echo &"  \e[1mkey pool ({s.keys.len} keys)\e[0m"
           for k in s.keys:
             let act = if k.active: "\e[92mactive\e[0m" else: &"\e[33mcooldown {k.cooldownSecsRemaining}s\e[0m"
-            let inflight = if k.maxInFlight > 0: &" in_flight={k.inFlight}/{k.maxInFlight}" else: ""
+            let configured = if k.configuredMaxInFlight > 0 and k.configuredMaxInFlight != k.maxInFlight: &" configured={k.configuredMaxInFlight}" else: ""
+            let inflight = if k.maxInFlight > 0: &" in_flight={k.inFlight}/{k.maxInFlight}{configured}" else: ""
             echo &"    {k.label:<15} {act:>20}  hint={k.keyHint}{inflight}"
       echo ""
 

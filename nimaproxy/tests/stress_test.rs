@@ -94,16 +94,14 @@ fn stress_test() {
     let mut total_latency_ms = 0u64;
     let mut key_usage = std::collections::HashMap::new();
     let mut model_wins = std::collections::HashMap::new();
-    model_wins.insert("deepseek-ai/deepseek-v4-pro".to_string(), 0);
-    model_wins.insert("nvidia/nemotron-3-ultra-550b-a55b".to_string(), 0);
-    model_wins.insert("deepseek-ai/deepseek-v4-flash".to_string(), 0);
-    model_wins.insert("mistralai/mistral-medium-3.5-128b".to_string(), 0);
+    model_wins.insert("minimaxai/minimax-m3".to_string(), 0);
     model_wins.insert("z-ai/glm-5.1".to_string(), 0);
     model_wins.insert("stepfun-ai/step-3.7-flash".to_string(), 0);
     model_wins.insert("moonshotai/kimi-k2.6".to_string(), 0);
     model_wins.insert("qwen/qwen3.5-397b-a17b".to_string(), 0);
-    model_wins.insert("minimaxai/minimax-m3".to_string(), 0);
     model_wins.insert("minimaxai/minimax-m2.7".to_string(), 0);
+    model_wins.insert("nvidia/nemotron-3-ultra-550b-a55b".to_string(), 0);
+    model_wins.insert("deepseek-ai/deepseek-v4-flash".to_string(), 0);
     let mut errors = Vec::new();
 
     let conversation: Vec<&str> = vec![

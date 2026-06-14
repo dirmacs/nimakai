@@ -24,8 +24,11 @@
 
 - Fire N parallel requests, return first response
 - Trade token budget for minimum P50 latency
-- Adaptive fast/fallback pools and pressure-aware parallelism
-- Configurable timeout, global concurrency, and per-key concurrency
+- Adaptive fast/fallback pools, pressure-aware parallelism, and solo fallback
+- Sequential fallback across unused candidates on transient solo/race failures
+- `nimaproxy/auto` alias for provider-prefixed client configs
+- Configurable timeout, global concurrency, per-key concurrency, and admission wait
+- Dynamic per-key windows shrink on 429s and reopen after successful requests
 
 ### 🛡️ Production Ready
 
@@ -62,61 +65,63 @@ label = "primary"
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "deepseek-ai/deepseek-v4-pro",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
+  "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
-  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "deepseek-ai/deepseek-v4-flash",
 ]
 
 [racing]
 enabled = true
 models = [
-  "deepseek-ai/deepseek-v4-pro",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
+  "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
-  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "deepseek-ai/deepseek-v4-flash",
 ]
-max_parallel = 10
+max_parallel = 3
 timeout_ms = 15000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
-pressure_parallel = 6
-degraded_parallel = 3
+pressure_parallel = 2
+degraded_parallel = 2
+solo_fallback = true
+large_prompt_char_threshold = 12000
+large_prompt_parallel = 1
 fast_models = [
-  "stepfun-ai/step-3.7-flash",
-  "qwen/qwen3.5-397b-a17b",
-  "z-ai/glm-5.1",
-  "moonshotai/kimi-k2.6",
   "minimaxai/minimax-m3",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
 ]
 fallback_models = [
-  "minimaxai/minimax-m2.7",
+  "qwen/qwen3.5-397b-a17b",
   "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
-  "deepseek-ai/deepseek-v4-pro",
+  "minimaxai/minimax-m2.7",
   "nvidia/nemotron-3-ultra-550b-a55b",
 ]
 
 [limits]
-max_upstream_in_flight = 48
-max_in_flight_per_key = 3
+max_upstream_in_flight = 8
+max_in_flight_per_key = 2
+admission_wait_ms = 5000
+
+[logging]
+enabled = true
+path = "/var/log/nimaproxy/turns.jsonl"
 
 [timeouts]
-min_dynamic_timeout_ms = 8000
-dynamic_sample_floor = 10
+min_dynamic_timeout_ms = 15000
+dynamic_sample_floor = 25
 ```
 
 ### Per-Model NVIDIA Defaults
@@ -216,7 +221,31 @@ cargo test --test live_tool_calls   # Live tool calls (7)
 NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 ```
 
-## Recent Changes (v0.15.3)
+## Recent Changes (v0.15.4)
+
+### Added
+
+- Dynamic per-key AIMD windows: 429s immediately shrink a key's usable concurrency; successful requests gradually reopen it.
+- Bounded admission wait before returning local overload/no-key responses.
+- Solo fallback when racing has fewer than two viable models/key slots, plus large-prompt fanout caps.
+- Sequential fallback through the ordered model pool after transient 5xx/timeouts in solo mode or exhausted races.
+- `nimaproxy/auto` is accepted as an alias for `auto`.
+- `/health` and `/stats` expose dynamic key window capacity, available key permits, configured per-key ceilings, admission wait, and solo/large-prompt racing controls.
+- Config-driven turn logging with a safe `OnceLock` logger.
+
+### Changed
+
+- Active routing/racing examples now use the eight-model uptime pool and keep Mistral Medium 3.5 / DeepSeek Pro out of the active race after observed hard/schema failures.
+- Production-oriented defaults now use `max_parallel=3`, pressure/degraded fanout of `2`, `max_upstream_in_flight=8`, `max_in_flight_per_key=2`, `admission_wait_ms=5000`, and a 15s dynamic timeout floor.
+
+### Fixed
+
+- Assistant messages with no usable `tool_calls` are normalized to `content=""`; assistant messages with real tool calls keep `content=null`.
+- Deterministic 400 assistant/schema errors are recorded as hard model degradation instead of being treated like ordinary latency noise.
+- Sequential solo/fallback wins are included in `gateway.racing_wins` telemetry.
+- Turn logging is initialized from `[logging]` instead of a hard-coded path.
+
+## Previous Changes (v0.15.3)
 
 ### Added
 
@@ -244,7 +273,7 @@ NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 
 ### Added
 
-- Build.nvidia.com per-model defaults for the ten-model nimaproxy pool.
+- Build.nvidia.com per-model defaults for the catalog-default nimaproxy pool.
 
 See [CHANGELOG.md](CHANGELOG.md) for full history.
 

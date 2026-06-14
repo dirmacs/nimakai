@@ -2,6 +2,32 @@
 
 All notable changes to nimaproxy will be documented in this file.
 
+## [0.15.4] - 2026-06-14
+
+### Added
+
+- Dynamic per-key AIMD windows: 429s halve a key's usable concurrency window; successful requests gradually reopen the window up to the configured per-key ceiling.
+- `[limits].admission_wait_ms` for bounded local waiting before returning overload/no-key responses.
+- Racing solo fallback and large-prompt fanout caps.
+- Sequential fallback through the ordered model pool when solo mode or an exhausted race sees transient 5xx/timeouts.
+- `nimaproxy/auto` model alias support for OMP/OpenAI-compatible provider configs.
+- `/health` and `/stats` telemetry for key window capacity, available key permits, configured per-key ceilings, admission wait, and racing uptime controls.
+- Config-driven turn logging through `[logging]`.
+
+### Changed
+
+- Version bump: 0.15.3 -> 0.15.4.
+- Active routing/racing examples now use the eight-model uptime pool and omit Mistral Medium 3.5 / DeepSeek Pro from active races after observed hard/schema failures.
+- Production-oriented defaults now use `max_parallel=3`, pressure/degraded fanout of `2`, `max_upstream_in_flight=8`, `max_in_flight_per_key=2`, `admission_wait_ms=5000`, and a 15s timeout floor.
+
+### Fixed
+
+- Assistant messages without real tool calls now keep string content, avoiding NVIDIA `content=None tool_calls=None` rejects.
+- Assistant messages with real tool calls keep `content=null`.
+- Deterministic 400 assistant/schema errors now quarantine the model immediately.
+- Sequential solo/fallback wins are counted in `gateway.racing_wins`.
+- The turn logger no longer uses a mutable static global.
+
 ## [0.15.3] - 2026-06-12
 
 ### Added

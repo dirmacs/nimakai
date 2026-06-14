@@ -2,6 +2,31 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [0.15.4] - 2026-06-14
+
+### Added
+
+- **nimaproxy uptime controls**: Dynamic per-key AIMD windows shrink usable key concurrency on 429 and reopen gradually after successful requests.
+- **Admission wait**: `[limits].admission_wait_ms` lets saturated gateways wait briefly for a key/upstream slot before returning local 503/429.
+- **Solo fallback and large-prompt caps**: Racing can fall back to one best model when fewer than two viable racers/key slots exist, and large prompts can cap fanout to avoid multiplying full-context requests.
+- **Sequential fallback**: Solo mode and exhausted races can walk the ordered fallback pool on transient 5xx/timeouts before returning failure to the caller.
+- **OMP model alias**: Requests using `"model": "nimaproxy/auto"` are normalized to `"auto"` for OpenAI-compatible client configs.
+- **Turn logging**: `[logging]` now controls the turn log path, and the production service can write request metadata to `/var/log/nimaproxy/turns.jsonl`.
+- **Telemetry**: `/health`, `/stats`, `nimakai proxy status`, and parser tests now expose key window capacity, available key permits, admission wait, configured per-key ceilings, and racing uptime controls.
+
+### Changed
+
+- Version bump: nimakai/nimaproxy 0.15.3 -> 0.15.4.
+- Production-oriented racing defaults now use the eight-model uptime pool, `max_parallel=3`, pressure/degraded fanout of `2`, `max_upstream_in_flight=8`, `max_in_flight_per_key=2`, `admission_wait_ms=5000`, and a 15s dynamic timeout floor.
+- Mistral Medium 3.5 and DeepSeek Pro remain documented in per-model params but are kept out of active routing/racing defaults after observed hard/schema failures.
+
+### Fixed
+
+- **Assistant normalization**: Assistant messages with no usable `tool_calls` are normalized to `content=""`; assistant messages with real tool calls keep `content=null`.
+- **Hard model errors**: Deterministic 400 assistant/schema errors mark the model server-degraded immediately instead of being treated like ordinary latency noise.
+- **Fallback telemetry**: Sequential solo/fallback wins are counted in `gateway.racing_wins`.
+- **Turn logger safety**: Replaced the mutable global logger with `OnceLock`.
+
 ## [0.15.3] - 2026-06-12
 
 ### Added

@@ -65,12 +65,16 @@ pub struct AppState {
     pub racing_degraded_parallel: usize,
     pub racing_fast_models: Vec<String>,
     pub racing_fallback_models: Vec<String>,
+    pub racing_large_prompt_char_threshold: usize,
+    pub racing_large_prompt_parallel: usize,
+    pub racing_solo_fallback: bool,
     pub racing_cursor: Mutex<usize>,
     pub available_models: Mutex<Vec<String>>,
     pub model_params: HashMap<String, ModelParams>,
     pub model_compat: config::ModelCompat,
     pub max_upstream_in_flight: usize,
     pub max_in_flight_per_key: usize,
+    pub admission_wait_ms: u64,
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
     upstream_permits: Arc<Semaphore>,
@@ -85,8 +89,12 @@ pub struct RuntimeControls {
     pub racing_degraded_parallel: usize,
     pub racing_fast_models: Vec<String>,
     pub racing_fallback_models: Vec<String>,
+    pub racing_large_prompt_char_threshold: usize,
+    pub racing_large_prompt_parallel: usize,
+    pub racing_solo_fallback: bool,
     pub max_upstream_in_flight: usize,
     pub max_in_flight_per_key: usize,
+    pub admission_wait_ms: u64,
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
 }
@@ -100,8 +108,12 @@ impl Default for RuntimeControls {
             racing_degraded_parallel: 3,
             racing_fast_models: Vec::new(),
             racing_fallback_models: Vec::new(),
+            racing_large_prompt_char_threshold: 0,
+            racing_large_prompt_parallel: 1,
+            racing_solo_fallback: true,
             max_upstream_in_flight: 48,
             max_in_flight_per_key: 3,
+            admission_wait_ms: 1500,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
         }
@@ -314,12 +326,16 @@ impl AppState {
             racing_degraded_parallel: controls.racing_degraded_parallel.max(2),
             racing_fast_models: controls.racing_fast_models,
             racing_fallback_models: controls.racing_fallback_models,
+            racing_large_prompt_char_threshold: controls.racing_large_prompt_char_threshold,
+            racing_large_prompt_parallel: controls.racing_large_prompt_parallel.max(1),
+            racing_solo_fallback: controls.racing_solo_fallback,
             racing_cursor: Mutex::new(0),
             available_models: Mutex::new(available_models),
             model_params,
             model_compat,
             max_upstream_in_flight: controls.max_upstream_in_flight.max(1),
             max_in_flight_per_key: controls.max_in_flight_per_key.max(1),
+            admission_wait_ms: controls.admission_wait_ms,
             min_dynamic_timeout_ms: controls.min_dynamic_timeout_ms.max(1000),
             dynamic_sample_floor: controls.dynamic_sample_floor.max(2),
             upstream_permits: Arc::new(Semaphore::new(controls.max_upstream_in_flight.max(1))),
@@ -413,6 +429,43 @@ fn check_proxy_alive(port: u16) -> bool {
     }
 }
 
+fn resolve_proxy_binary() -> String {
+    if let Ok(path) = std::env::var("NIMAPROXY_BIN") {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(dir) = current_exe.parent() {
+            candidates.push(dir.join("nimaproxy"));
+            candidates.push(dir.join("nimaproxy-bin"));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("nimaproxy"));
+                candidates.push(parent.join("nimaproxy-bin"));
+            }
+        }
+    }
+
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        let manifest_dir = PathBuf::from(manifest_dir);
+        candidates.push(manifest_dir.join("target/debug/nimaproxy"));
+        candidates.push(manifest_dir.join("target/release/nimaproxy"));
+    }
+
+    candidates.push(PathBuf::from("/usr/local/bin/nimaproxy-bin"));
+    candidates.push(PathBuf::from("/usr/local/bin/nimaproxy"));
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+
+    "nimaproxy".to_string()
+}
+
 fn wait_for_proxy_ready(port: u16, timeout_ms: u64) -> bool {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(500))
@@ -489,9 +542,9 @@ pub extern "C" fn proxy_start_with_pid_file(
 
     let port_cstr = CString::new(port.to_string()).unwrap();
     let config_cstr = CString::new(path).unwrap();
-    let bin_path =
-        CString::new(std::env::var("NIMAPROXY_BIN").unwrap_or_else(|_| "nimaproxy".to_string()))
-            .unwrap();
+    let bin_path_string = resolve_proxy_binary();
+    let bin_path_has_slash = bin_path_string.contains('/');
+    let bin_path = CString::new(bin_path_string).unwrap();
     let cf_flag = CString::new("--config").unwrap();
     let pt_flag = CString::new("--port").unwrap();
     let pid_flag = CString::new("--pid-file").unwrap();
@@ -547,14 +600,25 @@ pub extern "C" fn proxy_start_with_pid_file(
         .collect();
 
     let spawn_result = unsafe {
-        libc::posix_spawn(
-            &mut child_pid,
-            bin_path.as_ptr(),
-            &file_actions,
-            &mut attrs,
-            argv.as_mut_ptr(),
-            envp.as_ptr(),
-        )
+        if bin_path_has_slash {
+            libc::posix_spawn(
+                &mut child_pid,
+                bin_path.as_ptr(),
+                &file_actions,
+                &mut attrs,
+                argv.as_mut_ptr(),
+                envp.as_ptr(),
+            )
+        } else {
+            libc::posix_spawnp(
+                &mut child_pid,
+                bin_path.as_ptr(),
+                &file_actions,
+                &mut attrs,
+                argv.as_mut_ptr(),
+                envp.as_ptr(),
+            )
+        }
     };
 
     for env_str in envp.iter().take(envp.len() - 1) {
@@ -965,6 +1029,20 @@ label = "test"
         std::env::remove_var("NIMAPROXY_PID_FILE");
         let result = pid_file_path(None);
         assert_eq!(result, PathBuf::from("/tmp/nimaproxy.pid"));
+    }
+
+    #[test]
+    fn test_resolve_proxy_binary_prefers_env() {
+        let previous = std::env::var("NIMAPROXY_BIN").ok();
+        std::env::set_var("NIMAPROXY_BIN", "/tmp/custom-nimaproxy");
+
+        assert_eq!(resolve_proxy_binary(), "/tmp/custom-nimaproxy");
+
+        if let Some(previous) = previous {
+            std::env::set_var("NIMAPROXY_BIN", previous);
+        } else {
+            std::env::remove_var("NIMAPROXY_BIN");
+        }
     }
 
     /// Test is_process_alive with current process

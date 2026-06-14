@@ -1,6 +1,6 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.3. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.4. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
@@ -90,7 +90,7 @@ timeout_ms = 5000
 num_results = 100
 
 [profile.work]
-models = ["mistralai/mistral-medium-3.5-128b", "stepfun-ai/step-3.7-flash"]
+models = ["minimaxai/minimax-m3", "stepfun-ai/step-3.7-flash"]
 interval_ms = 2000
 ```
 
@@ -136,65 +136,69 @@ label = "production"
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "deepseek-ai/deepseek-v4-pro",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
+  "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
-  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "deepseek-ai/deepseek-v4-flash",
 ]
 
 [racing]
 enabled = true
 models = [
-  "deepseek-ai/deepseek-v4-pro",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
+  "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
-  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "deepseek-ai/deepseek-v4-flash",
 ]
-max_parallel = 10
+max_parallel = 3
 timeout_ms = 15000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
-pressure_parallel = 6
-degraded_parallel = 3
+pressure_parallel = 2
+degraded_parallel = 2
+solo_fallback = true
+large_prompt_char_threshold = 12000
+large_prompt_parallel = 1
 fast_models = [
-  "stepfun-ai/step-3.7-flash",
-  "qwen/qwen3.5-397b-a17b",
-  "z-ai/glm-5.1",
-  "moonshotai/kimi-k2.6",
   "minimaxai/minimax-m3",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
 ]
 fallback_models = [
-  "minimaxai/minimax-m2.7",
+  "qwen/qwen3.5-397b-a17b",
   "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
-  "deepseek-ai/deepseek-v4-pro",
+  "minimaxai/minimax-m2.7",
   "nvidia/nemotron-3-ultra-550b-a55b",
 ]
 
 [limits]
-max_upstream_in_flight = 48
-max_in_flight_per_key = 3
+max_upstream_in_flight = 8
+max_in_flight_per_key = 2
+admission_wait_ms = 5000
+
+[logging]
+enabled = true
+path = "/var/log/nimaproxy/turns.jsonl"
 
 [timeouts]
-min_dynamic_timeout_ms = 8000
-dynamic_sample_floor = 10
+min_dynamic_timeout_ms = 15000
+dynamic_sample_floor = 25
 ```
 
 Local latency degradation requires three samples; NVIDIA server-degraded
-responses are still honored immediately.
+responses are still honored immediately. Solo mode and exhausted races can walk
+unused fallback candidates sequentially after transient 5xx/timeouts. Clients
+may send either `"auto"` or `"nimaproxy/auto"`.
 
 Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested

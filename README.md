@@ -307,8 +307,11 @@ cp nimaproxy.toml.example nimaproxy.toml
 - Round-robin key rotation across multiple API keys
 - Automatic 429 handling with per-key cooldown
 - Latency-aware model routing (`"model": "auto"`)
-- Adaptive model racing with fast/fallback pools
+- Adaptive model racing with fast/fallback pools, solo fallback, and large-prompt fanout caps
+- Sequential fallback across the ordered model pool for transient solo/race failures
+- `nimaproxy/auto` alias support for provider-prefixed client configs
 - Gateway concurrency limits before upstream dispatch
+- Dynamic per-key concurrency windows that shrink on 429s and reopen after successful requests
 - Per-model stats tracking (TTFC, success rate, degradation detection)
 - `x-key-label` response header: tracks which key was used for rotation debugging
 
@@ -319,16 +322,14 @@ cp nimaproxy.toml.example nimaproxy.toml
 strategy = "latency_aware"
 spike_threshold_ms = 3000
 models = [
-  "deepseek-ai/deepseek-v4-pro",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
+  "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
-  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "deepseek-ai/deepseek-v4-flash",
 ]
 ```
 
@@ -340,46 +341,50 @@ When a request arrives with `"model": "auto"`, the proxy picks the best model fr
 [racing]
 enabled = true
 models = [
-  "deepseek-ai/deepseek-v4-pro",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
+  "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
   "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
-  "minimaxai/minimax-m3",
   "minimaxai/minimax-m2.7",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "deepseek-ai/deepseek-v4-flash",
 ]
-max_parallel = 10
+max_parallel = 3
 timeout_ms = 15000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
-pressure_parallel = 6
-degraded_parallel = 3
+pressure_parallel = 2
+degraded_parallel = 2
+solo_fallback = true
+large_prompt_char_threshold = 12000
+large_prompt_parallel = 1
 fast_models = [
-  "stepfun-ai/step-3.7-flash",
-  "qwen/qwen3.5-397b-a17b",
-  "z-ai/glm-5.1",
-  "moonshotai/kimi-k2.6",
   "minimaxai/minimax-m3",
+  "z-ai/glm-5.1",
+  "stepfun-ai/step-3.7-flash",
+  "moonshotai/kimi-k2.6",
 ]
 fallback_models = [
-  "minimaxai/minimax-m2.7",
+  "qwen/qwen3.5-397b-a17b",
   "deepseek-ai/deepseek-v4-flash",
-  "mistralai/mistral-medium-3.5-128b",
-  "deepseek-ai/deepseek-v4-pro",
+  "minimaxai/minimax-m2.7",
   "nvidia/nemotron-3-ultra-550b-a55b",
 ]
 
 [limits]
-max_upstream_in_flight = 48
-max_in_flight_per_key = 3
+max_upstream_in_flight = 8
+max_in_flight_per_key = 2
+admission_wait_ms = 5000
+
+[logging]
+enabled = true
+path = "/var/log/nimaproxy/turns.jsonl"
 
 [timeouts]
-min_dynamic_timeout_ms = 8000
-dynamic_sample_floor = 10
+min_dynamic_timeout_ms = 15000
+dynamic_sample_floor = 25
 ```
 
 **Per-Model NVIDIA Defaults:**
@@ -403,14 +408,21 @@ fidelity, but the proxy streams only when the caller explicitly sends
 | `minimaxai/minimax-m3` | 8192 | 1.0 | 0.95 | multimodal |
 | `minimaxai/minimax-m2.7` | 8192 | 1.0 | 0.95 |  |
 
-Fires N parallel requests to N models, returns first response. Trades N×token
-budget for min(P50 latency). With `adaptive=true`, the healthy ceiling remains
-`max_parallel=10`, but fanout drops to `pressure_parallel` or
-`degraded_parallel` when gateway pressure rises or some keys are unavailable.
-Keys and upstream slots are pre-allocated per race task, so saturated gateways
-return a local 503 instead of forcing all callers into NVIDIA-side cooldowns.
+Fires N parallel requests to N models, returns first response. Trades token
+budget for min(P50 latency). The production-oriented default keeps the healthy
+ceiling at `max_parallel=3`, drops to two racers under pressure, and falls back
+to one model for large prompts or when fewer than two viable racers/key slots
+exist. Keys and upstream slots are pre-allocated per race task, so saturated
+gateways wait briefly via `admission_wait_ms` and then return a local 503/429
+instead of forcing all callers into NVIDIA-side cooldowns.
 Models are selected in round-robin order via `racing_cursor`, with fast models
 preferred and fallback models used when capacity or health requires it.
+Per-key concurrency windows shrink on 429s and reopen only after successful
+requests, which keeps the gateway useful longer during quota pressure.
+When racing collapses to one model, or when every launched racer fails with a
+transient timeout/5xx, nimaproxy can continue through unused fallback candidates
+sequentially before returning an error. Clients may send either `"auto"` or the
+provider-prefixed `"nimaproxy/auto"` alias.
 Local latency degradation waits for three samples, while explicit
 NVIDIA-degraded responses are still removed from routing immediately.
 

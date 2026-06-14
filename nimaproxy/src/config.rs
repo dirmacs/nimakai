@@ -58,6 +58,7 @@ pub struct Config {
     pub racing: Option<RacingConfig>,
     pub limits: Option<LimitsConfig>,
     pub timeouts: Option<TimeoutsConfig>,
+    pub logging: Option<LoggingConfig>,
     pub model_params: Option<std::collections::HashMap<String, ModelParams>>,
     pub model_compat: Option<ModelCompat>,
     pub circuit_breaker: Option<CircuitBreakerConfig>,
@@ -154,18 +155,31 @@ pub struct RacingConfig {
     pub fast_models: Option<Vec<String>>,
     /// Slower or more expensive models used as backfill/fallback candidates.
     pub fallback_models: Option<Vec<String>>,
+    /// If prompt text exceeds this many chars, cap racing fan-out.
+    pub large_prompt_char_threshold: Option<usize>,
+    /// Fan-out cap for large prompt requests. A value of 1 enables solo fallback.
+    pub large_prompt_parallel: Option<usize>,
+    /// Allow racing to degrade to a single model when fewer than two racers are viable.
+    pub solo_fallback: Option<bool>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct LimitsConfig {
     pub max_upstream_in_flight: Option<usize>,
     pub max_in_flight_per_key: Option<usize>,
+    pub admission_wait_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct TimeoutsConfig {
     pub min_dynamic_timeout_ms: Option<u64>,
     pub dynamic_sample_floor: Option<usize>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct LoggingConfig {
+    pub enabled: Option<bool>,
+    pub path: Option<String>,
 }
 
 impl Config {
@@ -261,6 +275,28 @@ impl Config {
             .unwrap_or_default()
     }
 
+    pub fn racing_large_prompt_char_threshold(&self) -> usize {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.large_prompt_char_threshold)
+            .unwrap_or(0)
+    }
+
+    pub fn racing_large_prompt_parallel(&self) -> usize {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.large_prompt_parallel)
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    pub fn racing_solo_fallback(&self) -> bool {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.solo_fallback)
+            .unwrap_or(true)
+    }
+
     pub fn max_upstream_in_flight(&self) -> usize {
         self.limits
             .as_ref()
@@ -275,6 +311,13 @@ impl Config {
             .and_then(|l| l.max_in_flight_per_key)
             .unwrap_or(3)
             .max(1)
+    }
+
+    pub fn admission_wait_ms(&self) -> u64 {
+        self.limits
+            .as_ref()
+            .and_then(|l| l.admission_wait_ms)
+            .unwrap_or(1500)
     }
 
     pub fn min_dynamic_timeout_ms(&self) -> u64 {
@@ -338,6 +381,20 @@ impl Config {
             .as_ref()
             .map(|c| c.should_transform_tool_messages(model_id))
             .unwrap_or(true)
+    }
+
+    pub fn logging_enabled(&self) -> bool {
+        self.logging
+            .as_ref()
+            .and_then(|l| l.enabled)
+            .unwrap_or(false)
+    }
+
+    pub fn logging_path(&self) -> String {
+        self.logging
+            .as_ref()
+            .and_then(|l| l.path.clone())
+            .unwrap_or_else(|| "/var/log/nimaproxy/turns.jsonl".to_string())
     }
 }
 
@@ -858,10 +915,18 @@ pressure_parallel = 6
 degraded_parallel = 3
 fast_models = ["fast-a", "fast-b"]
 fallback_models = ["slow-a"]
+large_prompt_char_threshold = 12000
+large_prompt_parallel = 1
+solo_fallback = true
 
 [limits]
 max_upstream_in_flight = 48
 max_in_flight_per_key = 3
+admission_wait_ms = 5000
+
+[logging]
+enabled = true
+path = "/tmp/nimaproxy-turns.jsonl"
 
 [timeouts]
 min_dynamic_timeout_ms = 8000
@@ -875,8 +940,14 @@ dynamic_sample_floor = 10
         assert_eq!(config.racing_degraded_parallel(), 3);
         assert_eq!(config.racing_fast_models(), vec!["fast-a", "fast-b"]);
         assert_eq!(config.racing_fallback_models(), vec!["slow-a"]);
+        assert_eq!(config.racing_large_prompt_char_threshold(), 12000);
+        assert_eq!(config.racing_large_prompt_parallel(), 1);
+        assert!(config.racing_solo_fallback());
         assert_eq!(config.max_upstream_in_flight(), 48);
         assert_eq!(config.max_in_flight_per_key(), 3);
+        assert_eq!(config.admission_wait_ms(), 5000);
+        assert!(config.logging_enabled());
+        assert_eq!(config.logging_path(), "/tmp/nimaproxy-turns.jsonl");
         assert_eq!(config.min_dynamic_timeout_ms(), 8000);
         assert_eq!(config.dynamic_sample_floor(), 10);
     }
@@ -894,8 +965,14 @@ key = "test"
         assert_eq!(config.racing_min_parallel(), 2);
         assert_eq!(config.racing_pressure_parallel(), 6);
         assert_eq!(config.racing_degraded_parallel(), 3);
+        assert_eq!(config.racing_large_prompt_char_threshold(), 0);
+        assert_eq!(config.racing_large_prompt_parallel(), 1);
+        assert!(config.racing_solo_fallback());
         assert_eq!(config.max_upstream_in_flight(), 48);
         assert_eq!(config.max_in_flight_per_key(), 3);
+        assert_eq!(config.admission_wait_ms(), 1500);
+        assert!(!config.logging_enabled());
+        assert_eq!(config.logging_path(), "/var/log/nimaproxy/turns.jsonl");
         assert_eq!(config.min_dynamic_timeout_ms(), 8000);
         assert_eq!(config.dynamic_sample_floor(), 10);
     }

@@ -340,6 +340,19 @@ impl ModelStatsStore {
         );
     }
 
+    pub fn record_hard_error(&self, model_id: &str, reason: &str) {
+        let mut map = self.inner.lock().unwrap();
+        let entry = map
+            .entry(model_id.to_string())
+            .or_insert_with(ModelEntry::new);
+        entry.mark_server_degraded();
+        eprintln!(
+            "[nimaproxy] Model '{}' quarantined after hard error: {}",
+            model_id,
+            &reason[..reason.len().min(240)]
+        );
+    }
+
     pub fn all_keys_failing_for_model(&self, model_id: &str) -> bool {
         let key_map = self.key_failures.lock().unwrap();
         key_map

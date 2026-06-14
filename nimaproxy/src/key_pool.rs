@@ -7,13 +7,21 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use crate::config::KeyEntry;
 
 const DEFAULT_MAX_IN_FLIGHT_PER_KEY: usize = 1_000_000;
+const AIMD_SUCCESS_THRESHOLD: usize = 8;
 
 pub struct KeyPool {
     keys: Vec<KeyEntry>,
     index: AtomicUsize,
     cooldowns: Vec<Mutex<Option<Instant>>>,
     permits: Vec<Arc<Semaphore>>,
+    windows: Vec<Mutex<KeyWindow>>,
     max_in_flight_per_key: usize,
+}
+
+#[derive(Debug, Clone)]
+struct KeyWindow {
+    current: usize,
+    successes_since_increase: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +32,7 @@ pub struct KeyStatus {
     pub cooldown_secs_remaining: u64,
     pub in_flight: usize,
     pub max_in_flight: usize,
+    pub configured_max_in_flight: usize,
 }
 
 pub struct KeyLease {
@@ -54,6 +63,14 @@ impl KeyPool {
             cooldowns: (0..n).map(|_| Mutex::new(None)).collect(),
             permits: (0..n)
                 .map(|_| Arc::new(Semaphore::new(max_in_flight_per_key)))
+                .collect(),
+            windows: (0..n)
+                .map(|_| {
+                    Mutex::new(KeyWindow {
+                        current: max_in_flight_per_key,
+                        successes_since_increase: 0,
+                    })
+                })
                 .collect(),
             max_in_flight_per_key,
         }
@@ -102,6 +119,11 @@ impl KeyPool {
             drop(cd);
             active_seen = true;
 
+            if self.in_flight_for_key(idx) >= self.current_window(idx) {
+                busy_seen = true;
+                continue;
+            }
+
             match self.permits[idx].clone().try_acquire_owned() {
                 Ok(permit) => {
                     return Ok(KeyLease {
@@ -130,9 +152,45 @@ impl KeyPool {
     /// Mark a key as rate-limited for `secs` seconds.
     pub fn mark_rate_limited(&self, idx: usize, secs: u64) {
         if idx < self.cooldowns.len() {
+            self.record_rate_limited(idx);
             let mut cd = self.cooldowns[idx].lock().unwrap();
             *cd = Some(Instant::now() + Duration::from_secs(secs));
         }
+    }
+
+    pub fn record_rate_limited(&self, idx: usize) {
+        if let Some(window) = self.windows.get(idx) {
+            let mut window = window.lock().unwrap();
+            window.current = (window.current / 2).max(1);
+            window.successes_since_increase = 0;
+        }
+    }
+
+    pub fn record_success(&self, idx: usize) {
+        if let Some(window) = self.windows.get(idx) {
+            let mut window = window.lock().unwrap();
+            if window.current < self.max_in_flight_per_key {
+                window.successes_since_increase += 1;
+                if window.successes_since_increase >= AIMD_SUCCESS_THRESHOLD {
+                    window.current += 1;
+                    window.successes_since_increase = 0;
+                }
+            } else {
+                window.successes_since_increase = 0;
+            }
+        }
+    }
+
+    fn current_window(&self, idx: usize) -> usize {
+        self.windows
+            .get(idx)
+            .map(|w| w.lock().unwrap().current)
+            .unwrap_or(self.max_in_flight_per_key)
+    }
+
+    fn in_flight_for_key(&self, idx: usize) -> usize {
+        self.max_in_flight_per_key
+            .saturating_sub(self.permits[idx].available_permits())
     }
 
     pub fn get_key_label(&self, idx: usize) -> Option<String> {
@@ -155,7 +213,26 @@ impl KeyPool {
                 if matches!(*cd, Some(expiry) if now < expiry) {
                     None
                 } else {
-                    Some(sem.available_permits())
+                    let in_flight = self
+                        .max_in_flight_per_key
+                        .saturating_sub(sem.available_permits());
+                    Some(self.current_window(i).saturating_sub(in_flight))
+                }
+            })
+            .sum()
+    }
+
+    pub fn window_capacity(&self) -> usize {
+        let now = Instant::now();
+        self.windows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, window)| {
+                let cd = self.cooldowns[i].lock().unwrap();
+                if matches!(*cd, Some(expiry) if now < expiry) {
+                    None
+                } else {
+                    Some(window.lock().unwrap().current)
                 }
             })
             .sum()
@@ -183,10 +260,9 @@ impl KeyPool {
                     key_hint: hint,
                     active,
                     cooldown_secs_remaining: remaining,
-                    in_flight: self
-                        .max_in_flight_per_key
-                        .saturating_sub(self.permits[i].available_permits()),
-                    max_in_flight: self.max_in_flight_per_key,
+                    in_flight: self.in_flight_for_key(i),
+                    max_in_flight: self.current_window(i),
+                    configured_max_in_flight: self.max_in_flight_per_key,
                 }
             })
             .collect()
@@ -298,6 +374,53 @@ mod tests {
             pool.next_key_with_permit(),
             Err(KeyAcquireError::AllCoolingDown)
         ));
+    }
+
+    #[test]
+    fn test_rate_limit_shrinks_dynamic_window() {
+        let keys = vec![make_key_entry("key1", "a")];
+        let pool = KeyPool::with_max_in_flight(keys, 4);
+
+        assert_eq!(pool.status()[0].max_in_flight, 4);
+        pool.record_rate_limited(0);
+        assert_eq!(pool.status()[0].max_in_flight, 2);
+        pool.record_rate_limited(0);
+        assert_eq!(pool.status()[0].max_in_flight, 1);
+    }
+
+    #[test]
+    fn test_successes_reopen_dynamic_window_slowly() {
+        let keys = vec![make_key_entry("key1", "a")];
+        let pool = KeyPool::with_max_in_flight(keys, 3);
+        pool.record_rate_limited(0);
+        assert_eq!(pool.status()[0].max_in_flight, 1);
+
+        for _ in 0..AIMD_SUCCESS_THRESHOLD {
+            pool.record_success(0);
+        }
+        assert_eq!(pool.status()[0].max_in_flight, 2);
+
+        for _ in 0..AIMD_SUCCESS_THRESHOLD {
+            pool.record_success(0);
+        }
+        assert_eq!(pool.status()[0].max_in_flight, 3);
+    }
+
+    #[test]
+    fn test_available_permits_respects_dynamic_window() {
+        let keys = vec![make_key_entry("key1", "a")];
+        let pool = KeyPool::with_max_in_flight(keys, 3);
+        pool.record_rate_limited(0);
+        assert_eq!(pool.available_permits(), 1);
+
+        let lease = pool.next_key_with_permit().unwrap();
+        assert_eq!(pool.available_permits(), 0);
+        assert!(matches!(
+            pool.next_key_with_permit(),
+            Err(KeyAcquireError::AllBusy)
+        ));
+        drop(lease);
+        assert_eq!(pool.available_permits(), 1);
     }
 
     #[test]
