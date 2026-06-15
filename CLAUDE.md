@@ -134,7 +134,7 @@ label = "production"
 
 [routing]
 strategy = "latency_aware"
-spike_threshold_ms = 3000
+spike_threshold_ms = 12000
 models = [
   "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
@@ -158,9 +158,9 @@ models = [
   "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
 ]
-max_parallel = 3
+max_parallel = 2
 timeout_ms = 15000
-max_total_request_ms = 30000
+max_total_request_ms = 25000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
@@ -173,9 +173,9 @@ fast_models = [
   "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
-  "moonshotai/kimi-k2.6",
 ]
 fallback_models = [
+  "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
   "deepseek-ai/deepseek-v4-flash",
   "minimaxai/minimax-m2.7",

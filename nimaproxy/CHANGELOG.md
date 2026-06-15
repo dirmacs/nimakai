@@ -16,6 +16,8 @@ All notable changes to nimaproxy will be documented in this file.
 ### Changed
 
 - Version bump: 0.15.4 -> 0.15.5.
+- Production racing now uses `max_parallel=2`, a MiniMax M3 + GLM 5.1 + Step 3.7 fast pool, and `max_total_request_ms=25000`; the full eight-model pool remains available as fallback capacity.
+- Example and deployed routing config now use `spike_threshold_ms=12000` so stable 6-12s live winners are not mislabeled as degraded.
 
 ### Fixed
 

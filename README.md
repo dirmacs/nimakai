@@ -320,7 +320,7 @@ cp nimaproxy.toml.example nimaproxy.toml
 ```toml
 [routing]
 strategy = "latency_aware"
-spike_threshold_ms = 3000
+spike_threshold_ms = 12000
 models = [
   "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
@@ -333,7 +333,7 @@ models = [
 ]
 ```
 
-When a request arrives with `"model": "auto"`, the proxy picks the best model from this list. Untried models (< 3 samples) get priority. Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skipped.
+When a request arrives with `"model": "auto"`, the proxy picks the best model from this list. Untried models (< 3 samples) get priority. Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skipped. The production example uses a 12s latency threshold because current live NIM winners often respond in the 6-12s range while still maintaining availability.
 
 **Model Racing (Speculative Execution):**
 
@@ -350,9 +350,9 @@ models = [
   "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
 ]
-max_parallel = 3
+max_parallel = 2
 timeout_ms = 15000
-max_total_request_ms = 30000
+max_total_request_ms = 25000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
@@ -365,9 +365,9 @@ fast_models = [
   "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
-  "moonshotai/kimi-k2.6",
 ]
 fallback_models = [
+  "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
   "deepseek-ai/deepseek-v4-flash",
   "minimaxai/minimax-m2.7",
@@ -411,7 +411,8 @@ fidelity, but the proxy streams only when the caller explicitly sends
 
 Fires N parallel requests to N models, returns first response. Trades token
 budget for min(P50 latency). The production-oriented default keeps the healthy
-ceiling at `max_parallel=3`, drops to two racers under pressure, and falls back
+ceiling at `max_parallel=2` with MiniMax M3, GLM 5.1, and Step 3.7 as the
+stress-tested fast tier, and falls back
 to one model for large prompts or when fewer than two viable racers/key slots
 exist. Keys and upstream slots are pre-allocated per race task, so saturated
 gateways wait briefly via `admission_wait_ms` and then return a local 503/429
@@ -433,7 +434,8 @@ When racing collapses to one model, or when every launched racer fails with a
 transient timeout/5xx, nimaproxy can continue through unused fallback candidates
 sequentially before returning an error. `max_total_request_ms` caps the whole
 race/fallback chain so multiple slow models cannot stretch one client request
-indefinitely. Clients may send either `"auto"` or the provider-prefixed
+indefinitely; the production example uses `25000` so 30s clients receive the
+proxy's bounded failure response instead of timing out locally. Clients may send either `"auto"` or the provider-prefixed
 `"nimaproxy/auto"` alias.
 Local latency degradation waits for three samples, while explicit
 NVIDIA-degraded responses are still removed from routing immediately.
