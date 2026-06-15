@@ -4,12 +4,18 @@ All notable changes to nimakai are documented in this file.
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-06-15
+
 ### Added
 
 - **Racing request deadline**: `[racing].max_total_request_ms` caps the full racing plus sequential fallback path, preventing multi-model timeout chains from stretching a single client request indefinitely.
 - **Timeout quarantine**: Models with repeated upstream timeouts are temporarily removed from normal racing/routing and reintroduced via a single half-open probe after cooldown.
 - **Degradation buckets**: Racing now treats slow successful models as latency-degraded fallback capacity ahead of models with fresh availability failures.
 - **Fallback telemetry**: `/stats.gateway`, `nimakai proxy status --json`, and parser tests expose solo fallback, sequential fallback, all-racers-failed, and racing deadline counters.
+
+### Changed
+
+- Version bump: nimakai/nimaproxy 0.15.4 -> 0.15.5.
 
 ## [0.15.4] - 2026-06-14
 
