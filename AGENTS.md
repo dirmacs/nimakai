@@ -222,6 +222,7 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 - Treats `stream=true` as caller-controlled response mode, not a forced model hyperparameter.
 - Direct chat requests honor configured dynamic upstream timeouts and return 504 on timeout.
 - Racing requests honor `max_total_request_ms` as a wall-clock deadline across racers and sequential fallback.
+- Repeated upstream timeouts quarantine a model from normal racing/routing; expired quarantines allow one half-open probe.
 - New or failure-only models keep the configured max timeout until enough latency history exists, then learned timeouts are clamped by `min_dynamic_timeout_ms`.
 - Adaptive racing uses fast/fallback tiers and backs off from `max_parallel=3` to pressure/degraded fanout when gateway pressure rises.
 - Dynamic per-key windows halve on 429 and reopen slowly after successful requests.

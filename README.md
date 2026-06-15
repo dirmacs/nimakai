@@ -420,6 +420,9 @@ Models are selected in round-robin order via `racing_cursor`, with fast models
 preferred and fallback models used when capacity or health requires it.
 Per-key concurrency windows shrink on 429s and reopen only after successful
 requests, which keeps the gateway useful longer during quota pressure.
+Models with repeated upstream timeouts are temporarily quarantined from normal
+racing/routing; after cooldown, nimaproxy allows one half-open probe so the
+model can recover without flooding live traffic with flaky candidates.
 When racing collapses to one model, or when every launched racer fails with a
 transient timeout/5xx, nimaproxy can continue through unused fallback candidates
 sequentially before returning an error. `max_total_request_ms` caps the whole
