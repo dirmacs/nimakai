@@ -4,6 +4,10 @@ All notable changes to nimakai are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Live key rotation tests**: Replaced the old direct single-key Qwen load loop with bounded gateway tests against a running nimaproxy instance, covering key rotation, burst behavior, and post-burst usability without excessive live API calls.
+
 ## [0.15.5] - 2026-06-15
 
 ### Added
