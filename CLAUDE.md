@@ -203,6 +203,8 @@ may send either `"auto"` or `"nimaproxy/auto"`.
 Repeated upstream timeouts temporarily quarantine a model from normal candidate
 pools; after cooldown, one half-open probe can recover it without flooding live
 traffic with flaky candidates.
+Candidate selection separates latency degradation from availability
+degradation, so slow successful models stay ahead of models with fresh failures.
 
 Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested

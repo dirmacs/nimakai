@@ -423,6 +423,9 @@ requests, which keeps the gateway useful longer during quota pressure.
 Models with repeated upstream timeouts are temporarily quarantined from normal
 racing/routing; after cooldown, nimaproxy allows one half-open probe so the
 model can recover without flooding live traffic with flaky candidates.
+Slow successful models remain fallback capacity ahead of models with fresh
+availability failures, which protects token throughput when the fastest model
+starts erroring.
 When racing collapses to one model, or when every launched racer fails with a
 transient timeout/5xx, nimaproxy can continue through unused fallback candidates
 sequentially before returning an error. `max_total_request_ms` caps the whole

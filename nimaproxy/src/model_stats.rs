@@ -212,6 +212,26 @@ impl ModelEntry {
         false
     }
 
+    fn latency_degraded(&self, spike_threshold_ms: f64) -> bool {
+        if self.ring_len < LATENCY_DEGRADATION_SAMPLE_FLOOR {
+            return false;
+        }
+        self.avg_ms()
+            .map(|avg| avg > spike_threshold_ms)
+            .unwrap_or(false)
+    }
+
+    fn circuit_degraded(&self, cb_config: &CircuitBreakerConfig) -> bool {
+        (cb_config.max_output_tokens > 0 && self.output_token_count > cb_config.max_output_tokens)
+            || (cb_config.max_repetitions > 0 && self.repetition_count >= cb_config.max_repetitions)
+            || (cb_config.max_consecutive_assistant_turns > 0
+                && self.consecutive_assistant_turns >= cb_config.max_consecutive_assistant_turns)
+    }
+
+    fn availability_degraded(&self, cb_config: &CircuitBreakerConfig) -> bool {
+        self.consecutive_failures >= 3 || self.circuit_degraded(cb_config)
+    }
+
     /// Calculate dynamic timeout for this model based on historical P95.
     /// Returns timeout_ms with buffer: p95 + max(2000ms, p95 * 0.5), capped at max_timeout.
     pub fn dynamic_timeout_ms(&self, max_timeout_ms: u64) -> u64 {
@@ -251,12 +271,8 @@ impl ModelEntry {
         if self.consecutive_failures >= 3 {
             return true;
         }
-        if self.ring_len >= LATENCY_DEGRADATION_SAMPLE_FLOOR {
-            if let Some(avg) = self.avg_ms() {
-                if avg > spike_threshold_ms {
-                    return true;
-                }
-            }
+        if self.latency_degraded(spike_threshold_ms) {
+            return true;
         }
         if cb_config.max_output_tokens > 0 && self.output_token_count > cb_config.max_output_tokens
         {
@@ -459,7 +475,8 @@ impl ModelStatsStore {
         // Partition into (untried, tried_ok, tried_degraded)
         let mut untried: Vec<&String> = Vec::new();
         let mut ok: Vec<(&String, f64)> = Vec::new();
-        let mut degraded: Vec<(&String, f64)> = Vec::new();
+        let mut latency_degraded: Vec<(&String, f64)> = Vec::new();
+        let mut availability_degraded: Vec<(&String, f64)> = Vec::new();
         let now = Instant::now();
 
         for m in candidates {
@@ -474,15 +491,17 @@ impl ModelStatsStore {
                         continue;
                     }
                     if e.timeout_probe_ready(now) {
-                        degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
+                        availability_degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
                         continue;
                     }
                     // Models with < 3 total samples are "untried" — round-robin among them first
                     // Use total (includes failures) not ring_len (only successes) to properly detect untried state
                     if e.total == 0 || e.total < 3 {
                         untried.push(m);
-                    } else if e.is_degraded(m, threshold, &self.circuit_breaker) {
-                        degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
+                    } else if e.availability_degraded(&self.circuit_breaker) {
+                        availability_degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
+                    } else if e.latency_degraded(threshold) {
+                        latency_degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
                     } else {
                         ok.push((m, e.avg_ms().unwrap_or(f64::MAX)));
                     }
@@ -501,10 +520,18 @@ impl ModelStatsStore {
             return Some(ok[0].0.clone());
         }
 
-        // All degraded — pick least bad
-        if !degraded.is_empty() {
-            degraded.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            return Some(degraded[0].0.clone());
+        if !latency_degraded.is_empty() {
+            latency_degraded
+                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            return Some(latency_degraded[0].0.clone());
+        }
+
+        // If everything available is actively failing, still return the least bad
+        // candidate rather than making direct auto-routing unusable.
+        if !availability_degraded.is_empty() {
+            availability_degraded
+                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            return Some(availability_degraded[0].0.clone());
         }
 
         None
@@ -516,7 +543,8 @@ impl ModelStatsStore {
         let key_failures = self.key_failures.lock().unwrap();
         let now = Instant::now();
         let mut healthy: Vec<(String, Option<f64>)> = Vec::new();
-        let mut degraded: Vec<(String, Option<f64>)> = Vec::new();
+        let mut latency_degraded: Vec<(String, Option<f64>)> = Vec::new();
+        let mut availability_degraded: Vec<(String, Option<f64>)> = Vec::new();
         let mut probes: Vec<(String, Option<f64>)> = Vec::new();
 
         for m in candidates {
@@ -542,8 +570,10 @@ impl ModelStatsStore {
                     probes.push((m.clone(), e.avg_ms()));
                     continue;
                 }
-                if e.is_degraded(m, threshold, &self.circuit_breaker) {
-                    degraded.push((m.clone(), e.avg_ms()));
+                if e.availability_degraded(&self.circuit_breaker) {
+                    availability_degraded.push((m.clone(), e.avg_ms()));
+                } else if e.latency_degraded(threshold) {
+                    latency_degraded.push((m.clone(), e.avg_ms()));
                 } else {
                     healthy.push((m.clone(), e.avg_ms()));
                 }
@@ -560,10 +590,17 @@ impl ModelStatsStore {
         };
 
         healthy.sort_by(by_latency);
-        degraded.sort_by(by_latency);
+        latency_degraded.sort_by(by_latency);
+        availability_degraded.sort_by(by_latency);
         probes.sort_by(by_latency);
 
-        let out = select_candidates_with_probe(healthy, degraded, probes.clone(), max);
+        let out = select_candidates_with_probe(
+            healthy,
+            latency_degraded,
+            availability_degraded,
+            probes.clone(),
+            max,
+        );
         for model in &out {
             if probes.iter().any(|(probe, _)| probe == model) {
                 if let Some(entry) = map.get_mut(model) {
@@ -587,7 +624,8 @@ impl ModelStatsStore {
 
         let collect = |candidates: &[String], map: &HashMap<String, ModelEntry>| {
             let mut healthy: Vec<(String, Option<f64>)> = Vec::new();
-            let mut degraded: Vec<(String, Option<f64>)> = Vec::new();
+            let mut latency_degraded: Vec<(String, Option<f64>)> = Vec::new();
+            let mut availability_degraded: Vec<(String, Option<f64>)> = Vec::new();
             let mut probes: Vec<(String, Option<f64>)> = Vec::new();
             let mut seen = HashSet::new();
 
@@ -614,8 +652,10 @@ impl ModelStatsStore {
                         probes.push((m.clone(), e.avg_ms()));
                         continue;
                     }
-                    if e.is_degraded(m, threshold, &self.circuit_breaker) {
-                        degraded.push((m.clone(), e.avg_ms()));
+                    if e.availability_degraded(&self.circuit_breaker) {
+                        availability_degraded.push((m.clone(), e.avg_ms()));
+                    } else if e.latency_degraded(threshold) {
+                        latency_degraded.push((m.clone(), e.avg_ms()));
                     } else {
                         healthy.push((m.clone(), e.avg_ms()));
                     }
@@ -633,17 +673,24 @@ impl ModelStatsStore {
             };
 
             healthy.sort_by(by_latency);
-            degraded.sort_by(by_latency);
+            latency_degraded.sort_by(by_latency);
+            availability_degraded.sort_by(by_latency);
             probes.sort_by(by_latency);
-            (healthy, degraded, probes)
+            (healthy, latency_degraded, availability_degraded, probes)
         };
 
-        let (fast_healthy, fast_degraded, fast_probes) = collect(fast_candidates, &map);
-        let (fallback_healthy, fallback_degraded, fallback_probes) =
-            collect(fallback_candidates, &map);
+        let (fast_healthy, fast_latency_degraded, fast_availability_degraded, fast_probes) =
+            collect(fast_candidates, &map);
+        let (
+            fallback_healthy,
+            fallback_latency_degraded,
+            fallback_availability_degraded,
+            fallback_probes,
+        ) = collect(fallback_candidates, &map);
 
         let mut healthy = Vec::new();
-        let mut degraded = Vec::new();
+        let mut latency_degraded = Vec::new();
+        let mut availability_degraded = Vec::new();
         let mut probes = Vec::new();
         let mut seen = HashSet::new();
         for bucket in [fast_healthy, fallback_healthy] {
@@ -654,11 +701,19 @@ impl ModelStatsStore {
                 }
             }
         }
-        for bucket in [fast_degraded, fallback_degraded] {
+        for bucket in [fast_latency_degraded, fallback_latency_degraded] {
             for (model, _) in bucket {
                 if seen.insert(model.clone()) {
                     let avg = map.get(&model).and_then(|e| e.avg_ms());
-                    degraded.push((model, avg));
+                    latency_degraded.push((model, avg));
+                }
+            }
+        }
+        for bucket in [fast_availability_degraded, fallback_availability_degraded] {
+            for (model, _) in bucket {
+                if seen.insert(model.clone()) {
+                    let avg = map.get(&model).and_then(|e| e.avg_ms());
+                    availability_degraded.push((model, avg));
                 }
             }
         }
@@ -671,7 +726,13 @@ impl ModelStatsStore {
             }
         }
 
-        let out = select_candidates_with_probe(healthy, degraded, probes.clone(), max);
+        let out = select_candidates_with_probe(
+            healthy,
+            latency_degraded,
+            availability_degraded,
+            probes.clone(),
+            max,
+        );
         for model in &out {
             if probes.iter().any(|(probe, _)| probe == model) {
                 if let Some(entry) = map.get_mut(model) {
@@ -763,7 +824,8 @@ impl ModelStatsStore {
 
 fn select_candidates_with_probe(
     healthy: Vec<(String, Option<f64>)>,
-    degraded: Vec<(String, Option<f64>)>,
+    latency_degraded: Vec<(String, Option<f64>)>,
+    availability_degraded: Vec<(String, Option<f64>)>,
     probes: Vec<(String, Option<f64>)>,
     max: usize,
 ) -> Vec<String> {
@@ -772,6 +834,17 @@ fn select_candidates_with_probe(
     }
 
     let mut out: Vec<String> = healthy.into_iter().take(max).map(|(m, _)| m).collect();
+    let healthy_out_count = out.len();
+    for (model, _) in latency_degraded {
+        if out.len() >= max {
+            break;
+        }
+        if !out.iter().any(|m| m == &model) {
+            out.push(model);
+        }
+    }
+    let latency_added = out.len() > healthy_out_count;
+
     if let Some((probe, _)) = probes.into_iter().next() {
         if out.is_empty() {
             out.push(probe);
@@ -779,13 +852,13 @@ fn select_candidates_with_probe(
             if !out.iter().any(|m| m == &probe) {
                 out.push(probe);
             }
-        } else if max >= 2 && !out.iter().any(|m| m == &probe) {
+        } else if max >= 2 && !latency_added && !out.iter().any(|m| m == &probe) {
             out.pop();
             out.push(probe);
         }
     }
 
-    for (model, _) in degraded {
+    for (model, _) in availability_degraded {
         if out.len() >= max {
             break;
         }
@@ -1314,6 +1387,53 @@ mod tests {
 
         store.record("flaky", 400.0, true);
         assert_eq!(store.timeout_quarantined_for_test("flaky"), Some(false));
+    }
+
+    #[test]
+    fn test_racing_candidates_prioritize_slow_success_over_failing_model() {
+        let store = ModelStatsStore::new(3000.0);
+
+        for _ in 0..3 {
+            store.record("healthy", 500.0, true);
+            store.record("slow-success", 5000.0, true);
+            store.record("previously-fast-failing", 100.0, true);
+        }
+        for _ in 0..3 {
+            store.record("previously-fast-failing", 100.0, false);
+        }
+
+        let candidates = vec![
+            "previously-fast-failing".to_string(),
+            "slow-success".to_string(),
+            "healthy".to_string(),
+        ];
+        let racing = store.racing_candidates(&candidates, 2);
+
+        assert_eq!(
+            racing,
+            vec!["healthy".to_string(), "slow-success".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_best_model_prefers_latency_degraded_over_availability_degraded() {
+        let store = ModelStatsStore::new(3000.0);
+
+        for _ in 0..3 {
+            store.record("slow-success", 5000.0, true);
+            store.record("previously-fast-failing", 100.0, true);
+        }
+        for _ in 0..3 {
+            store.record("previously-fast-failing", 100.0, false);
+        }
+
+        let candidates = vec![
+            "previously-fast-failing".to_string(),
+            "slow-success".to_string(),
+        ];
+        let best = store.best_model(&candidates).unwrap();
+
+        assert_eq!(best, "slow-success");
     }
 }
 
