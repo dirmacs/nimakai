@@ -1,6 +1,6 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.5. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.6. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
@@ -65,7 +65,7 @@ nimaproxy/
     coverage_gaps.rs       — 14 coverage gap tests
     proxy_error_paths.rs   — 32 proxy error path tests
     live_chat.rs           — 5 live chat tests
-    live_key_rotation.rs   — 2 key rotation tests
+    live_key_rotation.rs   — 2 bounded gateway key rotation tests
     live_routing.rs        — 2 routing tests
     live_conversation.rs   — 2 conversation tests
     live_streaming.rs      — 2 streaming tests
