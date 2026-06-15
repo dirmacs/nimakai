@@ -17,6 +17,10 @@ All notable changes to nimaproxy will be documented in this file.
 
 - Version bump: 0.15.4 -> 0.15.5.
 
+### Fixed
+
+- Live racing e2e tests now treat bounded 504/deadline responses as upstream unavailability, matching the new total request deadline behavior.
+
 ## [0.15.4] - 2026-06-14
 
 ### Added
