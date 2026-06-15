@@ -17,6 +17,10 @@ All notable changes to nimakai are documented in this file.
 
 - Version bump: nimakai/nimaproxy 0.15.4 -> 0.15.5.
 
+### Fixed
+
+- **Live e2e tests**: Racing live tests now treat bounded 504/deadline responses as upstream unavailability, matching the new total request deadline behavior.
+
 ## [0.15.4] - 2026-06-14
 
 ### Added
