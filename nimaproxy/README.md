@@ -222,7 +222,7 @@ cargo test --test live_tool_calls   # Live tool calls (7)
 NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 ```
 
-## Recent Changes (v0.15.4)
+## Recent Changes (v0.15.5)
 
 ### Added
 

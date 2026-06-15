@@ -20,7 +20,7 @@ suite "proxy FFI JSON parsing":
     check health.routingEnabled
     check not health.racingEnabled
 
-  test "health parser accepts v0.15.4 gateway and racing fields":
+  test "health parser accepts v0.15.5 gateway and racing fields":
     let parsed = parseProxyHealthJson("""
       {
         "status": "UP",

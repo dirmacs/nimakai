@@ -1,8 +1,8 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.4. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.5. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.4 includes the uptime-oriented NVIDIA pool, dynamic per-key AIMD windows, bounded admission wait, solo racing fallback, large-prompt fanout caps, config-driven turn logging, adaptive racing/gateway limits, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.5 includes the uptime-oriented NVIDIA pool, request-level racing deadlines, timeout quarantine with half-open recovery probes, split latency/availability degradation buckets, fallback telemetry, dynamic per-key AIMD windows, bounded admission wait, solo racing fallback, large-prompt fanout caps, config-driven turn logging, adaptive racing/gateway limits, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
 
 ## FFI Integration (v0.15+)
 
@@ -72,7 +72,7 @@ nimaproxy/
 ## Racing (Speculative Execution)
 
 V3 feature: fires N parallel requests to N models, returns first response.
-Trades extra token budget for min(P50 latency). v0.15.4 keeps the production
+Trades extra token budget for min(P50 latency). v0.15.5 keeps the production
 healthy ceiling at 3 racers, backs off to 2 under pressure, and falls back to a
 single best model when fewer than two viable racers/key slots exist.
 
@@ -214,7 +214,7 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 # → {"primary": "minimaxai/minimax-m3", "fallback": "stepfun-ai/step-3.7-flash"}
 ```
 
-## nimaproxy v0.15.4 Critical Fixes (cumulative)
+## nimaproxy v0.15.5 Critical Fixes (cumulative)
 
 ### Racing, Timeout, and Model Defaults
 
