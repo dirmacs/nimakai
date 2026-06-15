@@ -108,6 +108,10 @@ suite "proxy FFI JSON parsing":
           "fanout_total": 80,
           "fanout_samples": 10,
           "fanout_avg": 8.0,
+          "solo_fallbacks": 4,
+          "sequential_fallbacks": 3,
+          "racing_all_failed": 2,
+          "racing_deadline_exceeded": 1,
           "racing_wins": {
             "stepfun-ai/step-3.7-flash": 6
           }
@@ -143,6 +147,10 @@ suite "proxy FFI JSON parsing":
     check stats.gateway.keyAvailablePermits == 3
     check stats.gateway.admissionWaitMs == 5000
     check stats.gateway.fanoutAvg == 8.0
+    check stats.gateway.soloFallbacks == 4
+    check stats.gateway.sequentialFallbacks == 3
+    check stats.gateway.racingAllFailed == 2
+    check stats.gateway.racingDeadlineExceeded == 1
     check stats.gateway.racingWins.len == 1
     check stats.gateway.racingWins[0].wins == 6
     check stats.racingEnabled

@@ -108,6 +108,10 @@ proc parseGatewayStats(node: JsonNode): ProxyGatewayStats =
     fanoutTotal: jsonInt(gateway, "fanout_total"),
     fanoutSamples: jsonInt(gateway, "fanout_samples"),
     fanoutAvg: jsonFloat(gateway, "fanout_avg"),
+    soloFallbacks: jsonInt(gateway, "solo_fallbacks"),
+    sequentialFallbacks: jsonInt(gateway, "sequential_fallbacks"),
+    racingAllFailed: jsonInt(gateway, "racing_all_failed"),
+    racingDeadlineExceeded: jsonInt(gateway, "racing_deadline_exceeded"),
     racingWins: parseRacingWins(gateway),
   )
 

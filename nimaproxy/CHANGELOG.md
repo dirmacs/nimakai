@@ -9,6 +9,7 @@ All notable changes to nimaproxy will be documented in this file.
 - `[racing].max_total_request_ms` caps the full racing plus sequential fallback path so one client request cannot wait through an unbounded chain of slow models.
 - Timeout quarantine removes repeated timeout offenders from normal candidate pools and reintroduces them with a single half-open probe after cooldown.
 - Racing candidate selection separates latency degradation from availability degradation, so slow successful models are preferred over models with fresh failures.
+- `/stats.gateway` exposes solo fallback, sequential fallback, all-racers-failed, and racing deadline counters for production triage.
 
 ## [0.15.4] - 2026-06-14
 

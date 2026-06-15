@@ -135,6 +135,10 @@ pub struct GatewayMetrics {
     rate_limit_count: AtomicU64,
     fanout_total: AtomicU64,
     fanout_samples: AtomicU64,
+    solo_fallbacks: AtomicU64,
+    sequential_fallbacks: AtomicU64,
+    racing_all_failed: AtomicU64,
+    racing_deadline_exceeded: AtomicU64,
     racing_wins: Mutex<HashMap<String, u64>>,
 }
 
@@ -152,6 +156,10 @@ pub struct GatewayMetricsSnapshot {
     pub fanout_total: u64,
     pub fanout_samples: u64,
     pub fanout_avg: f64,
+    pub solo_fallbacks: u64,
+    pub sequential_fallbacks: u64,
+    pub racing_all_failed: u64,
+    pub racing_deadline_exceeded: u64,
     pub racing_wins: HashMap<String, u64>,
 }
 
@@ -169,6 +177,10 @@ impl GatewayMetrics {
             rate_limit_count: AtomicU64::new(0),
             fanout_total: AtomicU64::new(0),
             fanout_samples: AtomicU64::new(0),
+            solo_fallbacks: AtomicU64::new(0),
+            sequential_fallbacks: AtomicU64::new(0),
+            racing_all_failed: AtomicU64::new(0),
+            racing_deadline_exceeded: AtomicU64::new(0),
             racing_wins: Mutex::new(HashMap::new()),
         }
     }
@@ -213,6 +225,23 @@ impl GatewayMetrics {
         self.fanout_samples.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_solo_fallback(&self) {
+        self.solo_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_sequential_fallback(&self) {
+        self.sequential_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_all_racers_failed(&self) {
+        self.racing_all_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_deadline_exceeded(&self) {
+        self.racing_deadline_exceeded
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_racing_win(&self, model_id: &str) {
         let mut wins = self.racing_wins.lock().unwrap();
         *wins.entry(model_id.to_string()).or_insert(0) += 1;
@@ -242,6 +271,10 @@ impl GatewayMetrics {
             } else {
                 fanout_total as f64 / fanout_samples as f64
             },
+            solo_fallbacks: self.solo_fallbacks.load(Ordering::Relaxed),
+            sequential_fallbacks: self.sequential_fallbacks.load(Ordering::Relaxed),
+            racing_all_failed: self.racing_all_failed.load(Ordering::Relaxed),
+            racing_deadline_exceeded: self.racing_deadline_exceeded.load(Ordering::Relaxed),
             racing_wins: self.racing_wins.lock().unwrap().clone(),
         }
     }

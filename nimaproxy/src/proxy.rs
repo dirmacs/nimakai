@@ -234,6 +234,7 @@ fn timeout_before_deadline(deadline: Option<Instant>, per_attempt_ms: u64) -> Op
 
 fn racing_deadline_response(state: &AppState) -> Response {
     state.gateway_metrics.record_timeout();
+    state.gateway_metrics.record_deadline_exceeded();
     (
         StatusCode::GATEWAY_TIMEOUT,
         format!(
@@ -477,6 +478,10 @@ async fn solo_model_fallback(
     model_ids: Vec<String>,
     deadline: Option<Instant>,
 ) -> Response {
+    state.gateway_metrics.record_solo_fallback();
+    if model_ids.len() > 1 {
+        state.gateway_metrics.record_sequential_fallback();
+    }
     let mut last_error: Option<(StatusCode, String)> = None;
 
     for model_id in model_ids {
@@ -1675,6 +1680,10 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "fanout_total": metrics.fanout_total,
             "fanout_samples": metrics.fanout_samples,
             "fanout_avg": metrics.fanout_avg,
+            "solo_fallbacks": metrics.solo_fallbacks,
+            "sequential_fallbacks": metrics.sequential_fallbacks,
+            "racing_all_failed": metrics.racing_all_failed,
+            "racing_deadline_exceeded": metrics.racing_deadline_exceeded,
             "racing_wins": metrics.racing_wins,
         },
         "racing_models": racing_models,
@@ -2186,6 +2195,10 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
 
     for (key_idx, retry_after_secs) in pending_rate_limited_keys {
         state.pool.mark_rate_limited(key_idx, retry_after_secs);
+    }
+
+    if saw_non_rate_limit_failure {
+        state.gateway_metrics.record_all_racers_failed();
     }
 
     if state.racing_solo_fallback && saw_transient_failure {

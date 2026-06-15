@@ -522,8 +522,11 @@ async fn test_solo_fallback_retries_next_model_on_503() {
     first.assert();
     second.assert();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
-    let wins = state.gateway_metrics.snapshot().racing_wins;
+    let metrics = state.gateway_metrics.snapshot();
+    let wins = metrics.racing_wins;
     assert_eq!(wins.get("model-b"), Some(&1));
+    assert_eq!(metrics.solo_fallbacks, 1);
+    assert_eq!(metrics.sequential_fallbacks, 1);
 }
 
 /// Test an all-failed race can recover by trying unused fallback models sequentially.
@@ -582,8 +585,11 @@ async fn test_all_failed_race_tries_unused_sequential_fallback() {
     race_b.assert();
     fallback_c.assert();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
-    let wins = state.gateway_metrics.snapshot().racing_wins;
+    let metrics = state.gateway_metrics.snapshot();
+    let wins = metrics.racing_wins;
     assert_eq!(wins.get("model-c"), Some(&1));
+    assert_eq!(metrics.racing_all_failed, 1);
+    assert_eq!(metrics.solo_fallbacks, 1);
 }
 
 /// Test racing with all models failing
@@ -1046,6 +1052,10 @@ async fn test_stats_exposes_gateway_metrics_and_limits() {
     state.gateway_metrics.record_request(true);
     state.gateway_metrics.record_fanout(2);
     state.gateway_metrics.record_overload();
+    state.gateway_metrics.record_solo_fallback();
+    state.gateway_metrics.record_sequential_fallback();
+    state.gateway_metrics.record_all_racers_failed();
+    state.gateway_metrics.record_deadline_exceeded();
 
     let resp = nimaproxy::proxy::stats(axum::extract::State(state))
         .await
@@ -1056,6 +1066,10 @@ async fn test_stats_exposes_gateway_metrics_and_limits() {
     assert_eq!(json["gateway"]["request_total"], 1);
     assert_eq!(json["gateway"]["racing_requests"], 1);
     assert_eq!(json["gateway"]["fanout_total"], 2);
+    assert_eq!(json["gateway"]["solo_fallbacks"], 1);
+    assert_eq!(json["gateway"]["sequential_fallbacks"], 1);
+    assert_eq!(json["gateway"]["racing_all_failed"], 1);
+    assert_eq!(json["gateway"]["racing_deadline_exceeded"], 1);
     assert_eq!(json["gateway"]["overload_rejects"], 1);
     assert_eq!(json["gateway"]["max_upstream_in_flight"], 48);
     assert_eq!(json["gateway"]["max_in_flight_per_key"], 3);
