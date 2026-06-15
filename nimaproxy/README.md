@@ -233,6 +233,7 @@ NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 - `max_total_request_ms` caps the full racing plus sequential fallback path.
 - Repeated upstream timeouts temporarily quarantine a model from normal candidate pools; expired quarantines allow a single half-open probe.
 - Slow successful models remain fallback capacity ahead of models with fresh availability failures.
+- `/stats.gateway` reports solo fallback, sequential fallback, all-racers-failed, and racing deadline counters.
 - `nimaproxy/auto` is accepted as an alias for `auto`.
 - `/health` and `/stats` expose dynamic key window capacity, available key permits, configured per-key ceilings, admission wait, and solo/large-prompt racing controls.
 - Config-driven turn logging with a safe `OnceLock` logger.

@@ -205,6 +205,8 @@ pools; after cooldown, one half-open probe can recover it without flooding live
 traffic with flaky candidates.
 Candidate selection separates latency degradation from availability
 degradation, so slow successful models stay ahead of models with fresh failures.
+`/stats.gateway` reports solo fallback, sequential fallback, all-racers-failed,
+and racing deadline counters for production triage.
 
 Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested

@@ -132,6 +132,10 @@ type
     fanoutTotal*: int
     fanoutSamples*: int
     fanoutAvg*: float
+    soloFallbacks*: int
+    sequentialFallbacks*: int
+    racingAllFailed*: int
+    racingDeadlineExceeded*: int
     racingWins*: seq[ProxyRacingWin]
 
   ProxyStats* = object

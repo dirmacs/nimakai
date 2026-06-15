@@ -676,6 +676,10 @@ proc runProxy(cfg: Config) =
             "fanout_total": s.gateway.fanoutTotal,
             "fanout_samples": s.gateway.fanoutSamples,
             "fanout_avg": s.gateway.fanoutAvg,
+            "solo_fallbacks": s.gateway.soloFallbacks,
+            "sequential_fallbacks": s.gateway.sequentialFallbacks,
+            "racing_all_failed": s.gateway.racingAllFailed,
+            "racing_deadline_exceeded": s.gateway.racingDeadlineExceeded,
             "racing_wins": s.gateway.racingWins.mapIt(%*{
               "model": it.model,
               "wins": it.wins,
@@ -728,6 +732,7 @@ proc runProxy(cfg: Config) =
           if s.gateway.keyWindowCapacity > 0:
             echo &"    key_slots={s.gateway.keyAvailablePermits}/{s.gateway.keyWindowCapacity} per_key_limit={s.gateway.maxInFlightPerKey} admission_wait={s.gateway.admissionWaitMs}ms"
           echo &"    rejects overload={s.gateway.overloadRejects} no_key={s.gateway.noKeyRejects} timeouts={s.gateway.timeoutCount} rate_limits={s.gateway.rateLimitCount} fanout_avg={s.gateway.fanoutAvg:.2f}"
+          echo &"    fallbacks solo={s.gateway.soloFallbacks} sequential={s.gateway.sequentialFallbacks} all_failed={s.gateway.racingAllFailed} deadline={s.gateway.racingDeadlineExceeded}"
           if s.gateway.racingWins.len > 0:
             let wins = s.gateway.racingWins.mapIt(&"{it.model}={it.wins}").join(", ")
             echo &"    racing wins: {wins}"

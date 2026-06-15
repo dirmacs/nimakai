@@ -224,6 +224,7 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 - Racing requests honor `max_total_request_ms` as a wall-clock deadline across racers and sequential fallback.
 - Repeated upstream timeouts quarantine a model from normal racing/routing; expired quarantines allow one half-open probe.
 - Candidate selection separates latency degradation from availability degradation; slow successful models stay ahead of models with fresh failures.
+- `/stats.gateway` exposes solo fallback, sequential fallback, all-racers-failed, and racing deadline counters.
 - New or failure-only models keep the configured max timeout until enough latency history exists, then learned timeouts are clamped by `min_dynamic_timeout_ms`.
 - Adaptive racing uses fast/fallback tiers and backs off from `max_parallel=3` to pressure/degraded fanout when gateway pressure rises.
 - Dynamic per-key windows halve on 429 and reopen slowly after successful requests.
