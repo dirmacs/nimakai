@@ -2,6 +2,12 @@
 
 All notable changes to nimakai are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Racing request deadline**: `[racing].max_total_request_ms` caps the full racing plus sequential fallback path, preventing multi-model timeout chains from stretching a single client request indefinitely.
+
 ## [0.15.4] - 2026-06-14
 
 ### Added

@@ -89,6 +89,7 @@ models = [
 ]
 max_parallel = 3
 timeout_ms = 15000
+max_total_request_ms = 30000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
@@ -229,6 +230,7 @@ NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 - Bounded admission wait before returning local overload/no-key responses.
 - Solo fallback when racing has fewer than two viable models/key slots, plus large-prompt fanout caps.
 - Sequential fallback through the ordered model pool after transient 5xx/timeouts in solo mode or exhausted races.
+- `max_total_request_ms` caps the full racing plus sequential fallback path.
 - `nimaproxy/auto` is accepted as an alias for `auto`.
 - `/health` and `/stats` expose dynamic key window capacity, available key permits, configured per-key ceilings, admission wait, and solo/large-prompt racing controls.
 - Config-driven turn logging with a safe `OnceLock` logger.

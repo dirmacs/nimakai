@@ -152,6 +152,7 @@ async fn main() {
         racing_large_prompt_char_threshold: cfg.racing_large_prompt_char_threshold(),
         racing_large_prompt_parallel: cfg.racing_large_prompt_parallel(),
         racing_solo_fallback: cfg.racing_solo_fallback(),
+        racing_max_total_request_ms: cfg.racing_max_total_request_ms(),
         max_upstream_in_flight: cfg.max_upstream_in_flight(),
         max_in_flight_per_key: cfg.max_in_flight_per_key(),
         admission_wait_ms: cfg.admission_wait_ms(),
@@ -228,10 +229,11 @@ async fn main() {
 
     if !state.racing_models.is_empty() {
         println!(
-            "  racing : {} models, max_parallel={}, timeout={}ms, strategy={}, adaptive={}",
+            "  racing : {} models, max_parallel={}, timeout={}ms, total_deadline={}ms, strategy={}, adaptive={}",
             state.racing_models.len(),
             state.racing_max_parallel,
             state.racing_timeout_ms,
+            state.racing_max_total_request_ms,
             state.racing_strategy,
             state.racing_adaptive
         );

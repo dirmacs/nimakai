@@ -212,6 +212,38 @@ fn timeout_for_model(state: &AppState, model_id: &str) -> u64 {
     )
 }
 
+fn racing_deadline(state: &AppState) -> Option<Instant> {
+    if state.racing_max_total_request_ms == 0 {
+        return None;
+    }
+    Instant::now().checked_add(Duration::from_millis(state.racing_max_total_request_ms))
+}
+
+fn timeout_before_deadline(deadline: Option<Instant>, per_attempt_ms: u64) -> Option<u64> {
+    let Some(deadline) = deadline else {
+        return Some(per_attempt_ms);
+    };
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    let remaining_ms = remaining.as_millis().try_into().unwrap_or(u64::MAX);
+    if remaining_ms == 0 {
+        None
+    } else {
+        Some(per_attempt_ms.min(remaining_ms))
+    }
+}
+
+fn racing_deadline_response(state: &AppState) -> Response {
+    state.gateway_metrics.record_timeout();
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        format!(
+            "racing deadline exceeded after {}ms",
+            state.racing_max_total_request_ms
+        ),
+    )
+        .into_response()
+}
+
 enum GatewayAcquireError {
     Overloaded,
     NoKeys,
@@ -426,10 +458,14 @@ async fn solo_model_fallback(
     state: Arc<AppState>,
     body: Bytes,
     model_ids: Vec<String>,
+    deadline: Option<Instant>,
 ) -> Response {
     let mut last_error: Option<(StatusCode, String)> = None;
 
     for model_id in model_ids {
+        if timeout_before_deadline(deadline, state.racing_timeout_ms).is_none() {
+            return racing_deadline_response(&state);
+        }
         let Some(req_body) = prepare_model_body(&state, &body, &model_id) else {
             return (StatusCode::BAD_REQUEST, "invalid JSON body").into_response();
         };
@@ -447,10 +483,14 @@ async fn solo_model_fallback(
             let key_idx = key_lease.idx;
             let key_label = key_lease.label.clone();
             let request_timeout_ms = timeout_for_model(&state, &model_id);
+            let Some(send_timeout_ms) = timeout_before_deadline(deadline, request_timeout_ms)
+            else {
+                return racing_deadline_response(&state);
+            };
             let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&req_body);
             let t0 = Instant::now();
             let result = timeout(
-                Duration::from_millis(request_timeout_ms),
+                Duration::from_millis(send_timeout_ms),
                 state
                     .client
                     .post(format!("{}/v1/chat/completions", state.target))
@@ -496,23 +536,30 @@ async fn solo_model_fallback(
                 }
                 Err(_) => {
                     state.gateway_metrics.record_timeout();
-                    let msg = format!("upstream timeout after {}ms", request_timeout_ms);
+                    let msg = if send_timeout_ms < request_timeout_ms {
+                        format!(
+                            "racing deadline exceeded after {}ms",
+                            state.racing_max_total_request_ms
+                        )
+                    } else {
+                        format!("upstream timeout after {}ms", request_timeout_ms)
+                    };
                     if let Some(label) = key_label.as_ref() {
                         state.model_stats.record_with_key(
                             &model_id,
                             label,
-                            request_timeout_ms as f64,
+                            send_timeout_ms as f64,
                             false,
                         );
                     } else {
                         state
                             .model_stats
-                            .record(&model_id, request_timeout_ms as f64, false);
+                            .record(&model_id, send_timeout_ms as f64, false);
                     }
                     log_turn_request(
                         "auto",
                         &model_id,
-                        request_timeout_ms as u128,
+                        send_timeout_ms as u128,
                         false,
                         StatusCode::GATEWAY_TIMEOUT.as_u16(),
                         message_count,
@@ -554,8 +601,12 @@ async fn solo_model_fallback(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("application/json")
                 .to_string();
+            let Some(body_timeout_ms) = timeout_before_deadline(deadline, request_timeout_ms)
+            else {
+                return racing_deadline_response(&state);
+            };
             let body_bytes =
-                match timeout(Duration::from_millis(request_timeout_ms), resp.bytes()).await {
+                match timeout(Duration::from_millis(body_timeout_ms), resp.bytes()).await {
                     Ok(Ok(bytes)) => bytes,
                     Ok(Err(e)) => {
                         let msg = e.to_string();
@@ -577,23 +628,30 @@ async fn solo_model_fallback(
                     }
                     Err(_) => {
                         state.gateway_metrics.record_timeout();
-                        let msg = format!("upstream body timeout after {}ms", request_timeout_ms);
+                        let msg = if body_timeout_ms < request_timeout_ms {
+                            format!(
+                                "racing deadline exceeded after {}ms",
+                                state.racing_max_total_request_ms
+                            )
+                        } else {
+                            format!("upstream body timeout after {}ms", request_timeout_ms)
+                        };
                         if let Some(label) = key_label.as_ref() {
                             state.model_stats.record_with_key(
                                 &model_id,
                                 label,
-                                request_timeout_ms as f64,
+                                body_timeout_ms as f64,
                                 false,
                             );
                         } else {
                             state
                                 .model_stats
-                                .record(&model_id, request_timeout_ms as f64, false);
+                                .record(&model_id, body_timeout_ms as f64, false);
                         }
                         log_turn_request(
                             "auto",
                             &model_id,
-                            request_timeout_ms as u128,
+                            body_timeout_ms as u128,
                             false,
                             StatusCode::GATEWAY_TIMEOUT.as_u16(),
                             message_count,
@@ -1556,6 +1614,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "racing_models": racing_models,
         "racing_max_parallel": state.racing_max_parallel,
         "racing_timeout_ms": state.racing_timeout_ms,
+        "racing_max_total_request_ms": state.racing_max_total_request_ms,
         "racing_adaptive": state.racing_adaptive,
         "racing_min_parallel": state.racing_min_parallel,
         "racing_pressure_parallel": state.racing_pressure_parallel,
@@ -1643,6 +1702,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "racing_enabled": state.racing_enabled(),
         "racing_max_parallel": state.racing_max_parallel,
         "racing_timeout_ms": state.racing_timeout_ms,
+        "racing_max_total_request_ms": state.racing_max_total_request_ms,
         "racing_adaptive": state.racing_adaptive,
         "racing_min_parallel": state.racing_min_parallel,
         "racing_pressure_parallel": state.racing_pressure_parallel,
@@ -1662,6 +1722,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Response {
+    let deadline = racing_deadline(&state);
     let mut max_parallel = adaptive_racing_parallel(&state, models.len());
     if let Some(prompt_cap) = prompt_parallel_cap(&state, &body) {
         max_parallel = max_parallel.min(prompt_cap);
@@ -1672,7 +1733,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
             let solo_models = solo_candidate_models(&state, models);
             if !solo_models.is_empty() {
                 state.gateway_metrics.record_fanout(1);
-                return solo_model_fallback(state, body, solo_models).await;
+                return solo_model_fallback(state, body, solo_models, deadline).await;
             }
         }
         if state.pool.active_count() == 0 {
@@ -1704,7 +1765,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
             }
             if !solo_models.is_empty() {
                 state.gateway_metrics.record_fanout(1);
-                return solo_model_fallback(state, body, solo_models).await;
+                return solo_model_fallback(state, body, solo_models, deadline).await;
             }
         }
         eprintln!("[racing] not enough viable models after filtering (need ≥2)");
@@ -1722,7 +1783,10 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
     let mut skipped_overloaded = 0usize;
 
     for model_id in &models_to_race {
-        let timeout_val = timeout_for_model(&state, model_id);
+        let per_model_timeout_ms = timeout_for_model(&state, model_id);
+        let Some(send_timeout_ms) = timeout_before_deadline(deadline, per_model_timeout_ms) else {
+            return racing_deadline_response(&state);
+        };
 
         let mut json: Value = match serde_json::from_slice(&body) {
             Ok(v) => v,
@@ -1764,7 +1828,8 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
         let state_clone = state.clone();
         let model_id_clone = model_id.clone();
         let model_id_for_task = model_id.clone();
-        let timeout_ms_for_model = timeout_val;
+        let timeout_ms_for_model = per_model_timeout_ms;
+        let send_timeout_ms_for_model = send_timeout_ms;
 
         let upstream_permit = match state.try_acquire_upstream() {
             Some(permit) => permit,
@@ -1799,7 +1864,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
             let _key_lease = key_lease;
             let t0 = Instant::now();
             let result = timeout(
-                std::time::Duration::from_millis(timeout_ms_for_model),
+                std::time::Duration::from_millis(send_timeout_ms_for_model),
                 client
                     .post(format!("{}/v1/chat/completions", target))
                     .header("Authorization", format!("Bearer {}", key))
@@ -1881,9 +1946,48 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("application/json")
                         .to_string();
+                    let body_timeout_ms =
+                        match timeout_before_deadline(deadline, timeout_ms_for_model) {
+                            Some(ms) => ms,
+                            None => {
+                                let msg = format!(
+                                    "racing deadline exceeded after {}ms",
+                                    state_clone.racing_max_total_request_ms
+                                );
+                                state_clone.gateway_metrics.record_timeout();
+                                if let Some(ref label) = key_label {
+                                    state_clone.model_stats.record_with_key(
+                                        &model_id_clone,
+                                        label,
+                                        timeout_ms_for_model as f64,
+                                        false,
+                                    );
+                                } else {
+                                    state_clone.model_stats.record(
+                                        &model_id_clone,
+                                        timeout_ms_for_model as f64,
+                                        false,
+                                    );
+                                }
+                                log_turn_request(
+                                    "auto",
+                                    &model_id_clone,
+                                    t0.elapsed().as_millis(),
+                                    false,
+                                    StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                                    message_count,
+                                    has_tool_calls,
+                                    tool_call_count,
+                                    key_label.as_deref(),
+                                    true,
+                                    Some(msg.clone()),
+                                );
+                                return (model_id_for_task, Err(msg));
+                            }
+                        };
 
                     let body_bytes = match timeout(
-                        std::time::Duration::from_millis(timeout_ms_for_model),
+                        std::time::Duration::from_millis(body_timeout_ms),
                         resp.bytes(),
                     )
                     .await
@@ -1907,24 +2011,32 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                         }
                         Err(_) => {
                             state_clone.gateway_metrics.record_timeout();
+                            let timeout_error = if body_timeout_ms < timeout_ms_for_model {
+                                format!(
+                                    "racing deadline exceeded after {}ms",
+                                    state_clone.racing_max_total_request_ms
+                                )
+                            } else {
+                                format!("body timeout after {}ms", timeout_ms_for_model)
+                            };
                             if let Some(ref label) = key_label {
                                 state_clone.model_stats.record_with_key(
                                     &model_id_clone,
                                     label,
-                                    timeout_ms_for_model as f64,
+                                    body_timeout_ms as f64,
                                     false,
                                 );
                             } else {
                                 state_clone.model_stats.record(
                                     &model_id_clone,
-                                    timeout_ms_for_model as f64,
+                                    body_timeout_ms as f64,
                                     false,
                                 );
                             }
                             log_turn_request(
                                 "auto",
                                 &model_id_clone,
-                                timeout_ms_for_model as u128,
+                                body_timeout_ms as u128,
                                 false,
                                 StatusCode::GATEWAY_TIMEOUT.as_u16(),
                                 message_count,
@@ -1932,12 +2044,9 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                                 tool_call_count,
                                 key_label.as_deref(),
                                 true,
-                                Some(format!("body timeout after {}ms", timeout_ms_for_model)),
+                                Some(timeout_error.clone()),
                             );
-                            return (
-                                model_id_for_task,
-                                Err(format!("body timeout after {}ms", timeout_ms_for_model)),
-                            );
+                            return (model_id_for_task, Err(timeout_error));
                         }
                     };
                     let body = Body::from(body_bytes);
@@ -2013,17 +2122,25 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                 }
                 Err(_) => {
                     state_clone.gateway_metrics.record_timeout();
+                    let timeout_error = if send_timeout_ms_for_model < timeout_ms_for_model {
+                        format!(
+                            "racing deadline exceeded after {}ms",
+                            state_clone.racing_max_total_request_ms
+                        )
+                    } else {
+                        format!("timeout after {}ms", timeout_ms_for_model)
+                    };
                     if let Some(ref label) = key_label {
                         state_clone.model_stats.record_with_key(
                             &model_id_clone,
                             label,
-                            timeout_ms_for_model as f64,
+                            send_timeout_ms_for_model as f64,
                             false,
                         );
                     } else {
                         state_clone.model_stats.record(
                             &model_id_clone,
-                            timeout_ms_for_model as f64,
+                            send_timeout_ms_for_model as f64,
                             false,
                         );
                     }
@@ -2038,9 +2155,9 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                         tool_call_count,
                         key_label.as_deref(),
                         true,
-                        Some(format!("timeout after {}ms", timeout_ms_for_model)),
+                        Some(timeout_error.clone()),
                     );
-                    Err(format!("timeout after {}ms", timeout_ms_for_model))
+                    Err(timeout_error)
                 }
             };
             (model_id_for_task, task_result)
@@ -2055,7 +2172,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
             let solo_models = solo_candidate_models(&state, models);
             if !solo_models.is_empty() {
                 state.gateway_metrics.record_fanout(1);
-                return solo_model_fallback(state, body, solo_models).await;
+                return solo_model_fallback(state, body, solo_models, deadline).await;
             }
         }
         if skipped_no_key > 0 {
@@ -2126,7 +2243,7 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
         }
         if !solo_models.is_empty() {
             state.gateway_metrics.record_fanout(1);
-            return solo_model_fallback(state, body, solo_models).await;
+            return solo_model_fallback(state, body, solo_models, deadline).await;
         }
     }
 
@@ -2215,6 +2332,7 @@ mod tests {
                 racing_large_prompt_char_threshold: 0,
                 racing_large_prompt_parallel: 1,
                 racing_solo_fallback: true,
+                racing_max_total_request_ms: 30000,
                 max_upstream_in_flight: 6,
                 max_in_flight_per_key: 2,
                 admission_wait_ms: 0,

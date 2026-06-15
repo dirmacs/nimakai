@@ -91,6 +91,7 @@ models = [
 ]
 max_parallel = 3
 timeout_ms = 15000
+max_total_request_ms = 30000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
@@ -220,6 +221,7 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 - Applies build.nvidia.com per-model defaults for the current catalog-default pool.
 - Treats `stream=true` as caller-controlled response mode, not a forced model hyperparameter.
 - Direct chat requests honor configured dynamic upstream timeouts and return 504 on timeout.
+- Racing requests honor `max_total_request_ms` as a wall-clock deadline across racers and sequential fallback.
 - New or failure-only models keep the configured max timeout until enough latency history exists, then learned timeouts are clamped by `min_dynamic_timeout_ms`.
 - Adaptive racing uses fast/fallback tiers and backs off from `max_parallel=3` to pressure/degraded fanout when gateway pressure rises.
 - Dynamic per-key windows halve on 429 and reopen slowly after successful requests.
