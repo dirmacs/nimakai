@@ -210,7 +210,7 @@ cargo tarpaulin --out Html
 
 # Live API tests (racing suites)
 cargo test --test live_chat         # Live chat (5)
-cargo test --test live_key_rotation # Live key rotation (2)
+cargo test --test live_key_rotation # Live gateway key rotation (2)
 cargo test --test live_conversation # Live conversation (2)
 cargo test --test live_routing      # Live routing (2)
 cargo test --test live_streaming    # Live streaming (2)
@@ -222,7 +222,7 @@ cargo test --test live_tool_calls   # Live tool calls (7)
 NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 ```
 
-## Recent Changes (v0.15.5)
+## Recent Changes (v0.15.6)
 
 ### Added
 
@@ -245,6 +245,7 @@ NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 
 ### Fixed
 
+- Live key rotation tests now target a running nimaproxy gateway with bounded sequential and burst workloads plus post-burst recovery probes.
 - Assistant messages with no usable `tool_calls` are normalized to `content=""`; assistant messages with real tool calls keep `content=null`.
 - Deterministic 400 assistant/schema errors are recorded as hard model degradation instead of being treated like ordinary latency noise.
 - Sequential solo/fallback wins are included in `gateway.racing_wins` telemetry.

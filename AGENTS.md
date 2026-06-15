@@ -1,8 +1,8 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.5. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.6. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
-**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.5 includes the uptime-oriented NVIDIA pool, request-level racing deadlines, timeout quarantine with half-open recovery probes, split latency/availability degradation buckets, fallback telemetry, dynamic per-key AIMD windows, bounded admission wait, solo racing fallback, large-prompt fanout caps, config-driven turn logging, adaptive racing/gateway limits, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
+**Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.6 includes bounded live key-rotation gateway tests, the uptime-oriented NVIDIA pool, request-level racing deadlines, timeout quarantine with half-open recovery probes, split latency/availability degradation buckets, fallback telemetry, dynamic per-key AIMD windows, bounded admission wait, solo racing fallback, large-prompt fanout caps, config-driven turn logging, adaptive racing/gateway limits, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
 
 ## FFI Integration (v0.15+)
 
@@ -62,17 +62,18 @@ nimaproxy/
     coverage_gaps.rs       14 coverage gap tests
     proxy_error_paths.rs   32 proxy error path tests
     live_chat.rs           5 live chat tests
-    live_key_rotation.rs   2 key rotation tests
+    live_key_rotation.rs   2 bounded gateway key rotation tests
     live_routing.rs        2 routing tests
     live_conversation.rs   2 conversation tests
     live_streaming.rs      2 streaming tests
     live_circuit_breaker.rs 2 circuit breaker tests
     live_tool_calls.rs     7 tool call tests
+```
 
 ## Racing (Speculative Execution)
 
 V3 feature: fires N parallel requests to N models, returns first response.
-Trades extra token budget for min(P50 latency). v0.15.5 keeps the production
+Trades extra token budget for min(P50 latency). v0.15.6 keeps the production
 healthy ceiling at 2 racers with MiniMax M3, GLM 5.1, and Step 3.7 as the
 stress-tested fast tier, and falls back to a
 single best model when fewer than two viable racers/key slots exist.
@@ -215,11 +216,12 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 # → {"primary": "minimaxai/minimax-m3", "fallback": "stepfun-ai/step-3.7-flash"}
 ```
 
-## nimaproxy v0.15.5 Critical Fixes (cumulative)
+## nimaproxy v0.15.6 Critical Fixes (cumulative)
 
 ### Racing, Timeout, and Model Defaults
 
 - Applies build.nvidia.com per-model defaults for the current catalog-default pool.
+- Live key rotation tests exercise a running nimaproxy gateway with bounded sequential and burst loads plus post-burst recovery probes.
 - Treats `stream=true` as caller-controlled response mode, not a forced model hyperparameter.
 - Direct chat requests honor configured dynamic upstream timeouts and return 504 on timeout.
 - Racing requests honor `max_total_request_ms` as a wall-clock deadline across racers and sequential fallback.

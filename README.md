@@ -245,6 +245,7 @@ src/
 tests/
     17 isolated suites run by `nimble test`
     test_proxy.nim         Manual FFI/service tests; starts/stops nimaproxy
+```
 
 ### nimaproxy (Rust)
 
@@ -270,7 +271,7 @@ nimaproxy/
     coverage_gaps.rs       14 coverage gap tests
     proxy_error_paths.rs   32 proxy error path tests
     live_chat.rs          5 live chat tests
-    live_key_rotation.rs  2 key rotation tests
+    live_key_rotation.rs  2 bounded gateway key rotation tests
     live_routing.rs       2 routing tests
     live_conversation.rs  2 conversation tests
     live_streaming.rs     2 streaming tests
