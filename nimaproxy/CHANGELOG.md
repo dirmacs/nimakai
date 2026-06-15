@@ -4,6 +4,10 @@ All notable changes to nimaproxy will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Live key rotation tests now target a running nimaproxy gateway with bounded request counts, covering key rotation, burst behavior, and post-burst usability without excessive live API calls.
+
 ## [0.15.5] - 2026-06-15
 
 ### Added
