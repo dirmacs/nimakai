@@ -257,6 +257,7 @@ async fn test_e2e_racing_uses_preallocated_keys() {
             || status_code == 500
             || status_code == 502
             || status_code == 503
+            || status_code == 504
     );
 }
 
@@ -347,11 +348,11 @@ async fn test_e2e_racing_latency_comparison() {
         results.len()
     );
 
-    // Only assert if we have API connectivity - skip assertion if all keys are exhausted
-    // This allows the test to pass in CI environments without valid keys
+    // Only assert if we have API connectivity. Live upstream timeouts are
+    // expected during NVIDIA outages and bounded racing deadline tests.
     if results
         .iter()
-        .any(|(_, _, sc)| *sc != 401 && *sc != 429 && *sc != 502)
+        .any(|(_, _, sc)| !matches!(*sc, 401 | 429 | 502 | 503 | 504))
     {
         assert!(
             !successes.is_empty(),
@@ -360,7 +361,7 @@ async fn test_e2e_racing_latency_comparison() {
         );
     } else {
         eprintln!(
-            "[racing-latency] skipping assertion - all requests returned 429/502 (API unavailable)"
+            "[racing-latency] skipping assertion - all requests returned unavailable statuses"
         );
     }
 
