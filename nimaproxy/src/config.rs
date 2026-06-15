@@ -141,6 +141,8 @@ pub struct RacingConfig {
     pub max_parallel: Option<usize>,
     /// Timeout per request in ms (default: 8000ms)
     pub timeout_ms: Option<u64>,
+    /// End-to-end wall-clock budget for racing plus sequential fallback. 0 disables.
+    pub max_total_request_ms: Option<u64>,
     /// Strategy: "first_token" (return on first SSE token) or "complete" (default)
     pub strategy: Option<String>,
     /// Enable adaptive runtime fan-out under key/upstream pressure.
@@ -221,6 +223,13 @@ impl Config {
             .as_ref()
             .and_then(|r| r.timeout_ms)
             .unwrap_or(8000)
+    }
+
+    pub fn racing_max_total_request_ms(&self) -> u64 {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.max_total_request_ms)
+            .unwrap_or(30000)
     }
 
     pub fn racing_strategy(&self) -> String {
@@ -868,10 +877,39 @@ key = "test"
 
 [racing]
 timeout_ms = 12000
+max_total_request_ms = 30000
 "#,
         );
         let config = load(file.path().to_str().unwrap()).unwrap();
         assert_eq!(config.racing_timeout_ms(), 12000);
+        assert_eq!(config.racing_max_total_request_ms(), 30000);
+    }
+
+    #[test]
+    fn test_racing_max_total_request_ms_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_max_total_request_ms(), 30000);
+    }
+
+    #[test]
+    fn test_racing_max_total_request_ms_can_be_disabled() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+max_total_request_ms = 0
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_max_total_request_ms(), 0);
     }
 
     #[test]
@@ -918,6 +956,7 @@ fallback_models = ["slow-a"]
 large_prompt_char_threshold = 12000
 large_prompt_parallel = 1
 solo_fallback = true
+max_total_request_ms = 45000
 
 [limits]
 max_upstream_in_flight = 48
@@ -943,6 +982,7 @@ dynamic_sample_floor = 10
         assert_eq!(config.racing_large_prompt_char_threshold(), 12000);
         assert_eq!(config.racing_large_prompt_parallel(), 1);
         assert!(config.racing_solo_fallback());
+        assert_eq!(config.racing_max_total_request_ms(), 45000);
         assert_eq!(config.max_upstream_in_flight(), 48);
         assert_eq!(config.max_in_flight_per_key(), 3);
         assert_eq!(config.admission_wait_ms(), 5000);
@@ -968,6 +1008,7 @@ key = "test"
         assert_eq!(config.racing_large_prompt_char_threshold(), 0);
         assert_eq!(config.racing_large_prompt_parallel(), 1);
         assert!(config.racing_solo_fallback());
+        assert_eq!(config.racing_max_total_request_ms(), 30000);
         assert_eq!(config.max_upstream_in_flight(), 48);
         assert_eq!(config.max_in_flight_per_key(), 3);
         assert_eq!(config.admission_wait_ms(), 1500);

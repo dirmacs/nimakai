@@ -81,6 +81,7 @@ type
     racingEnabled*: bool
     racingMaxParallel*: int
     racingTimeoutMs*: int
+    racingMaxTotalRequestMs*: int
     racingAdaptive*: bool
     racingMinParallel*: int
     racingPressureParallel*: int
@@ -141,6 +142,7 @@ type
     racingEnabled*: bool
     racingMaxParallel*: int
     racingTimeoutMs*: int
+    racingMaxTotalRequestMs*: int
     racingAdaptive*: bool
     racingMinParallel*: int
     racingPressureParallel*: int

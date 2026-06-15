@@ -2,6 +2,12 @@
 
 All notable changes to nimaproxy will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `[racing].max_total_request_ms` caps the full racing plus sequential fallback path so one client request cannot wait through an unbounded chain of slow models.
+
 ## [0.15.4] - 2026-06-14
 
 ### Added

@@ -352,6 +352,7 @@ models = [
 ]
 max_parallel = 3
 timeout_ms = 15000
+max_total_request_ms = 30000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
@@ -421,8 +422,10 @@ Per-key concurrency windows shrink on 429s and reopen only after successful
 requests, which keeps the gateway useful longer during quota pressure.
 When racing collapses to one model, or when every launched racer fails with a
 transient timeout/5xx, nimaproxy can continue through unused fallback candidates
-sequentially before returning an error. Clients may send either `"auto"` or the
-provider-prefixed `"nimaproxy/auto"` alias.
+sequentially before returning an error. `max_total_request_ms` caps the whole
+race/fallback chain so multiple slow models cannot stretch one client request
+indefinitely. Clients may send either `"auto"` or the provider-prefixed
+`"nimaproxy/auto"` alias.
 Local latency degradation waits for three samples, while explicit
 NVIDIA-degraded responses are still removed from routing immediately.
 

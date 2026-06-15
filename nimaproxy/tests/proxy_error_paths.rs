@@ -86,6 +86,43 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
             racing_large_prompt_char_threshold: 1,
             racing_large_prompt_parallel: 1,
             racing_solo_fallback: true,
+            racing_max_total_request_ms: 30000,
+            max_upstream_in_flight: 1,
+            max_in_flight_per_key: 1,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 1000,
+            dynamic_sample_floor: 10,
+        },
+    )
+}
+
+fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
+    let key_entries = vec![KeyEntry {
+        key: "test-key-a".to_string(),
+        label: Some("key-a".to_string()),
+    }];
+    AppState::new_with_controls(
+        key_entries,
+        api_url,
+        None,
+        ModelStatsStore::new(3000.0),
+        vec!["model-a".to_string(), "model-b".to_string()],
+        2,
+        5000,
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            racing_adaptive: true,
+            racing_min_parallel: 2,
+            racing_pressure_parallel: 2,
+            racing_degraded_parallel: 2,
+            racing_fast_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_fallback_models: vec![],
+            racing_large_prompt_char_threshold: 1,
+            racing_large_prompt_parallel: 1,
+            racing_solo_fallback: true,
+            racing_max_total_request_ms: 150,
             max_upstream_in_flight: 1,
             max_in_flight_per_key: 1,
             admission_wait_ms: 0,
@@ -136,6 +173,7 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
             racing_large_prompt_char_threshold: 0,
             racing_large_prompt_parallel: 1,
             racing_solo_fallback: true,
+            racing_max_total_request_ms: 30000,
             max_upstream_in_flight: 2,
             max_in_flight_per_key: 1,
             admission_wait_ms: 0,
@@ -143,6 +181,58 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
             dynamic_sample_floor: 10,
         },
     )
+}
+
+#[tokio::test]
+async fn test_solo_fallback_respects_total_request_deadline() {
+    use mockito::{Matcher, Server};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let mut server = Server::new_async().await;
+    let slow = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "model-a"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_chunked_body(|w| {
+            thread::sleep(Duration::from_millis(500));
+            std::io::Write::write_all(
+                w,
+                br#"{"id":"test","choices":[{"message":{"content":"late"}}]}"#,
+            )
+        })
+        .expect(1)
+        .create();
+
+    let state = make_short_deadline_solo_state(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "large prompt body"}]
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    let elapsed = started.elapsed();
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let body = String::from_utf8_lossy(&body);
+
+    slow.assert();
+    assert_eq!(status, axum::http::StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        elapsed < Duration::from_millis(1000),
+        "deadline should cap fallback quickly, elapsed={elapsed:?}"
+    );
+    assert!(body.contains("racing deadline exceeded"));
 }
 
 async fn response_json(response: axum::response::Response) -> serde_json::Value {

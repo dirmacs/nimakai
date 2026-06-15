@@ -628,6 +628,7 @@ proc runProxy(cfg: Config) =
           "racing_enabled": h.racingEnabled,
           "racing_max_parallel": h.racingMaxParallel,
           "racing_timeout_ms": h.racingTimeoutMs,
+          "racing_max_total_request_ms": h.racingMaxTotalRequestMs,
           "racing_adaptive": h.racingAdaptive,
           "racing_min_parallel": h.racingMinParallel,
           "racing_pressure_parallel": h.racingPressureParallel,
@@ -684,6 +685,7 @@ proc runProxy(cfg: Config) =
           "racing_enabled": s.racingEnabled,
           "racing_max_parallel": s.racingMaxParallel,
           "racing_timeout_ms": s.racingTimeoutMs,
+          "racing_max_total_request_ms": s.racingMaxTotalRequestMs,
           "racing_adaptive": s.racingAdaptive,
           "racing_min_parallel": s.racingMinParallel,
           "racing_pressure_parallel": s.racingPressureParallel,
@@ -714,7 +716,7 @@ proc runProxy(cfg: Config) =
       if h.admissionWaitMs > 0:
         echo &"  admission wait   : {h.admissionWaitMs}ms"
       if h.racingEnabled:
-        echo &"  racing fanout    : max={h.racingMaxParallel} adaptive={h.racingAdaptive} min={h.racingMinParallel} pressure={h.racingPressureParallel} degraded={h.racingDegradedParallel}"
+        echo &"  racing fanout    : max={h.racingMaxParallel} adaptive={h.racingAdaptive} min={h.racingMinParallel} pressure={h.racingPressureParallel} degraded={h.racingDegradedParallel} deadline={h.racingMaxTotalRequestMs}ms"
         if h.racingLargePromptCharThreshold > 0 or h.racingSoloFallback:
           echo &"  racing uptime    : solo={h.racingSoloFallback} large_prompt={h.racingLargePromptParallel}@{h.racingLargePromptCharThreshold} chars"
       if statsOpt.isSome:

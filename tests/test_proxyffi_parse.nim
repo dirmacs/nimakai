@@ -35,6 +35,7 @@ suite "proxy FFI JSON parsing":
         "racing_enabled": true,
         "racing_max_parallel": 3,
         "racing_timeout_ms": 15000,
+        "racing_max_total_request_ms": 30000,
         "racing_adaptive": true,
         "racing_min_parallel": 2,
         "racing_pressure_parallel": 2,
@@ -56,6 +57,7 @@ suite "proxy FFI JSON parsing":
     check health.admissionWaitMs == 5000
     check health.racingAdaptive
     check health.racingMaxParallel == 3
+    check health.racingMaxTotalRequestMs == 30000
     check health.racingPressureParallel == 2
     check health.racingLargePromptCharThreshold == 12000
     check health.racingLargePromptParallel == 1
@@ -114,6 +116,7 @@ suite "proxy FFI JSON parsing":
         "racing_enabled": true,
         "racing_max_parallel": 3,
         "racing_timeout_ms": 15000,
+        "racing_max_total_request_ms": 30000,
         "racing_adaptive": true,
         "racing_min_parallel": 2,
         "racing_pressure_parallel": 2,
@@ -143,6 +146,7 @@ suite "proxy FFI JSON parsing":
     check stats.gateway.racingWins.len == 1
     check stats.gateway.racingWins[0].wins == 6
     check stats.racingEnabled
+    check stats.racingMaxTotalRequestMs == 30000
     check stats.racingAdaptive
     check stats.racingLargePromptCharThreshold == 12000
     check stats.racingLargePromptParallel == 1
