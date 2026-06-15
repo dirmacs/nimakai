@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 const RING_SIZE: usize = 100;
 const LATENCY_DEGRADATION_SAMPLE_FLOOR: usize = 3;
+const TIMEOUT_QUARANTINE_FAILURES: u32 = 2;
+const TIMEOUT_QUARANTINE_MS: u64 = 60_000;
 
 /// Distinguishes between locally-declared "dead" status and server-side (API-declared) degradation.
 ///
@@ -71,6 +74,9 @@ struct ModelEntry {
     /// Track if this model has been marked as degraded by the server (NVIDIA)
     /// This is separate from local degradation (consecutive failures, high latency, etc.)
     pub server_degraded: bool,
+    pub consecutive_timeouts: u32,
+    pub timeout_quarantine_until: Option<Instant>,
+    pub timeout_probe_in_flight: bool,
 }
 
 struct KeyFailureTracker {
@@ -111,6 +117,9 @@ impl ModelEntry {
             repetition_count: 0,
             consecutive_assistant_turns: 0,
             server_degraded: false,
+            consecutive_timeouts: 0,
+            timeout_quarantine_until: None,
+            timeout_probe_in_flight: false,
         }
     }
 
@@ -150,6 +159,59 @@ impl ModelEntry {
         (self.success as f64 / self.total as f64) * 100.0
     }
 
+    fn clear_timeout_state(&mut self) {
+        self.consecutive_timeouts = 0;
+        self.timeout_quarantine_until = None;
+        self.timeout_probe_in_flight = false;
+    }
+
+    fn record_success(&mut self, ms: f64) {
+        self.success += 1;
+        self.consecutive_failures = 0;
+        self.push(ms);
+        self.clear_timeout_state();
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures += 1;
+        self.consecutive_timeouts = 0;
+        self.timeout_quarantine_until = None;
+        self.timeout_probe_in_flight = false;
+    }
+
+    fn record_timeout(&mut self) {
+        self.consecutive_failures += 1;
+        self.consecutive_timeouts += 1;
+        self.timeout_probe_in_flight = false;
+        if self.consecutive_timeouts >= TIMEOUT_QUARANTINE_FAILURES {
+            self.timeout_quarantine_until =
+                Instant::now().checked_add(Duration::from_millis(TIMEOUT_QUARANTINE_MS));
+        }
+    }
+
+    fn timeout_quarantine_active(&self, now: Instant) -> bool {
+        self.timeout_quarantine_until
+            .map(|until| until > now)
+            .unwrap_or(false)
+    }
+
+    fn timeout_probe_ready(&self, now: Instant) -> bool {
+        self.consecutive_timeouts >= TIMEOUT_QUARANTINE_FAILURES
+            && !self.timeout_probe_in_flight
+            && self
+                .timeout_quarantine_until
+                .map(|until| until <= now)
+                .unwrap_or(false)
+    }
+
+    fn mark_timeout_probe_launched(&mut self, now: Instant) -> bool {
+        if self.timeout_probe_ready(now) {
+            self.timeout_probe_in_flight = true;
+            return true;
+        }
+        false
+    }
+
     /// Calculate dynamic timeout for this model based on historical P95.
     /// Returns timeout_ms with buffer: p95 + max(2000ms, p95 * 0.5), capped at max_timeout.
     pub fn dynamic_timeout_ms(&self, max_timeout_ms: u64) -> u64 {
@@ -181,6 +243,9 @@ impl ModelEntry {
     ) -> bool {
         // Server-side degradation (NVIDIA-declared) takes precedence
         if self.server_degraded {
+            return true;
+        }
+        if self.timeout_quarantine_active(Instant::now()) {
             return true;
         }
         if self.consecutive_failures >= 3 {
@@ -273,11 +338,9 @@ impl ModelStatsStore {
         entry.total += 1;
         entry.last_ms = ms;
         if ok {
-            entry.success += 1;
-            entry.consecutive_failures = 0;
-            entry.push(ms);
+            entry.record_success(ms);
         } else {
-            entry.consecutive_failures += 1;
+            entry.record_failure();
         }
     }
 
@@ -298,9 +361,7 @@ impl ModelStatsStore {
         entry.last_ms = ms;
 
         if ok {
-            entry.success += 1;
-            entry.consecutive_failures = 0;
-            entry.push(ms);
+            entry.record_success(ms);
             entry.output_token_count = output_tokens;
             entry.repetition_count = repetition_count;
             if had_tool_call {
@@ -309,7 +370,7 @@ impl ModelStatsStore {
                 entry.consecutive_assistant_turns += 1;
             }
         } else {
-            entry.consecutive_failures += 1;
+            entry.record_failure();
         }
     }
 
@@ -324,6 +385,25 @@ impl ModelStatsStore {
         } else {
             tracker.record_failure(key_label);
         }
+    }
+
+    pub fn record_timeout(&self, model_id: &str, ms: f64) {
+        let mut map = self.inner.lock().unwrap();
+        let entry = map
+            .entry(model_id.to_string())
+            .or_insert_with(ModelEntry::new);
+        entry.total += 1;
+        entry.last_ms = ms;
+        entry.record_timeout();
+    }
+
+    pub fn record_timeout_with_key(&self, model_id: &str, key_label: &str, ms: f64) {
+        self.record_timeout(model_id, ms);
+        let mut key_map = self.key_failures.lock().unwrap();
+        let tracker = key_map
+            .entry(model_id.to_string())
+            .or_insert_with(KeyFailureTracker::new);
+        tracker.record_failure(key_label);
     }
 
     /// Record that a model has been marked as degraded by the server (NVIDIA API).
@@ -380,6 +460,7 @@ impl ModelStatsStore {
         let mut untried: Vec<&String> = Vec::new();
         let mut ok: Vec<(&String, f64)> = Vec::new();
         let mut degraded: Vec<(&String, f64)> = Vec::new();
+        let now = Instant::now();
 
         for m in candidates {
             match map.get(m) {
@@ -388,6 +469,13 @@ impl ModelStatsStore {
                     // Server-degraded models are always excluded
                     if e.server_degraded {
                         continue; // Skip this model entirely
+                    }
+                    if e.timeout_quarantine_active(now) {
+                        continue;
+                    }
+                    if e.timeout_probe_ready(now) {
+                        degraded.push((m, e.avg_ms().unwrap_or(f64::MAX)));
+                        continue;
                     }
                     // Models with < 3 total samples are "untried" — round-robin among them first
                     // Use total (includes failures) not ring_len (only successes) to properly detect untried state
@@ -423,11 +511,13 @@ impl ModelStatsStore {
     }
 
     pub fn racing_candidates(&self, candidates: &[String], max: usize) -> Vec<String> {
-        let map = self.inner.lock().unwrap();
+        let mut map = self.inner.lock().unwrap();
         let threshold = self.spike_threshold_ms;
         let key_failures = self.key_failures.lock().unwrap();
-        let mut healthy: Vec<(&String, Option<f64>)> = Vec::new();
-        let mut degraded: Vec<(&String, Option<f64>)> = Vec::new();
+        let now = Instant::now();
+        let mut healthy: Vec<(String, Option<f64>)> = Vec::new();
+        let mut degraded: Vec<(String, Option<f64>)> = Vec::new();
+        let mut probes: Vec<(String, Option<f64>)> = Vec::new();
 
         for m in candidates {
             let all_keys_failed = key_failures
@@ -445,17 +535,24 @@ impl ModelStatsStore {
                     continue;
                 }
 
+                if e.timeout_quarantine_active(now) {
+                    continue;
+                }
+                if e.timeout_probe_ready(now) {
+                    probes.push((m.clone(), e.avg_ms()));
+                    continue;
+                }
                 if e.is_degraded(m, threshold, &self.circuit_breaker) {
-                    degraded.push((m, e.avg_ms()));
+                    degraded.push((m.clone(), e.avg_ms()));
                 } else {
-                    healthy.push((m, e.avg_ms()));
+                    healthy.push((m.clone(), e.avg_ms()));
                 }
             } else {
-                healthy.push((m, None));
+                healthy.push((m.clone(), None));
             }
         }
 
-        let by_latency = |a: &(&String, Option<f64>), b: &(&String, Option<f64>)| match (a.1, b.1) {
+        let by_latency = |a: &(String, Option<f64>), b: &(String, Option<f64>)| match (a.1, b.1) {
             (Some(av), Some(bv)) => av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -464,13 +561,17 @@ impl ModelStatsStore {
 
         healthy.sort_by(by_latency);
         degraded.sort_by(by_latency);
+        probes.sort_by(by_latency);
 
-        healthy
-            .into_iter()
-            .chain(degraded)
-            .take(max)
-            .map(|(m, _)| m.clone())
-            .collect()
+        let out = select_candidates_with_probe(healthy, degraded, probes.clone(), max);
+        for model in &out {
+            if probes.iter().any(|(probe, _)| probe == model) {
+                if let Some(entry) = map.get_mut(model) {
+                    entry.mark_timeout_probe_launched(now);
+                }
+            }
+        }
+        out
     }
 
     pub fn racing_candidates_tiered(
@@ -479,13 +580,15 @@ impl ModelStatsStore {
         fallback_candidates: &[String],
         max: usize,
     ) -> Vec<String> {
-        let map = self.inner.lock().unwrap();
+        let mut map = self.inner.lock().unwrap();
         let threshold = self.spike_threshold_ms;
         let key_failures = self.key_failures.lock().unwrap();
+        let now = Instant::now();
 
-        let collect = |candidates: &[String]| {
+        let collect = |candidates: &[String], map: &HashMap<String, ModelEntry>| {
             let mut healthy: Vec<(String, Option<f64>)> = Vec::new();
             let mut degraded: Vec<(String, Option<f64>)> = Vec::new();
+            let mut probes: Vec<(String, Option<f64>)> = Vec::new();
             let mut seen = HashSet::new();
 
             for m in candidates {
@@ -502,6 +605,13 @@ impl ModelStatsStore {
 
                 if let Some(e) = map.get(m) {
                     if e.server_degraded {
+                        continue;
+                    }
+                    if e.timeout_quarantine_active(now) {
+                        continue;
+                    }
+                    if e.timeout_probe_ready(now) {
+                        probes.push((m.clone(), e.avg_ms()));
                         continue;
                     }
                     if e.is_degraded(m, threshold, &self.circuit_breaker) {
@@ -524,26 +634,48 @@ impl ModelStatsStore {
 
             healthy.sort_by(by_latency);
             degraded.sort_by(by_latency);
-            (healthy, degraded)
+            probes.sort_by(by_latency);
+            (healthy, degraded, probes)
         };
 
-        let (fast_healthy, fast_degraded) = collect(fast_candidates);
-        let (fallback_healthy, fallback_degraded) = collect(fallback_candidates);
+        let (fast_healthy, fast_degraded, fast_probes) = collect(fast_candidates, &map);
+        let (fallback_healthy, fallback_degraded, fallback_probes) =
+            collect(fallback_candidates, &map);
 
-        let mut out = Vec::new();
+        let mut healthy = Vec::new();
+        let mut degraded = Vec::new();
+        let mut probes = Vec::new();
         let mut seen = HashSet::new();
-        for bucket in [
-            fast_healthy,
-            fallback_healthy,
-            fast_degraded,
-            fallback_degraded,
-        ] {
+        for bucket in [fast_healthy, fallback_healthy] {
             for (model, _) in bucket {
-                if out.len() >= max {
-                    return out;
-                }
                 if seen.insert(model.clone()) {
-                    out.push(model);
+                    let avg = map.get(&model).and_then(|e| e.avg_ms());
+                    healthy.push((model, avg));
+                }
+            }
+        }
+        for bucket in [fast_degraded, fallback_degraded] {
+            for (model, _) in bucket {
+                if seen.insert(model.clone()) {
+                    let avg = map.get(&model).and_then(|e| e.avg_ms());
+                    degraded.push((model, avg));
+                }
+            }
+        }
+        for bucket in [fast_probes, fallback_probes] {
+            for (model, _) in bucket {
+                if seen.insert(model.clone()) {
+                    let avg = map.get(&model).and_then(|e| e.avg_ms());
+                    probes.push((model, avg));
+                }
+            }
+        }
+
+        let out = select_candidates_with_probe(healthy, degraded, probes.clone(), max);
+        for model in &out {
+            if probes.iter().any(|(probe, _)| probe == model) {
+                if let Some(entry) = map.get_mut(model) {
+                    entry.mark_timeout_probe_launched(now);
                 }
             }
         }
@@ -611,6 +743,57 @@ impl ModelStatsStore {
             None => max_timeout_ms,
         }
     }
+
+    #[cfg(test)]
+    pub fn force_timeout_probe_ready_for_test(&self, model_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(entry) = map.get_mut(model_id) {
+            entry.timeout_quarantine_until = Instant::now().checked_sub(Duration::from_millis(1));
+            entry.timeout_probe_in_flight = false;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn timeout_quarantined_for_test(&self, model_id: &str) -> Option<bool> {
+        let map = self.inner.lock().unwrap();
+        map.get(model_id)
+            .map(|entry| entry.timeout_quarantine_active(Instant::now()))
+    }
+}
+
+fn select_candidates_with_probe(
+    healthy: Vec<(String, Option<f64>)>,
+    degraded: Vec<(String, Option<f64>)>,
+    probes: Vec<(String, Option<f64>)>,
+    max: usize,
+) -> Vec<String> {
+    if max == 0 {
+        return Vec::new();
+    }
+
+    let mut out: Vec<String> = healthy.into_iter().take(max).map(|(m, _)| m).collect();
+    if let Some((probe, _)) = probes.into_iter().next() {
+        if out.is_empty() {
+            out.push(probe);
+        } else if out.len() < max {
+            if !out.iter().any(|m| m == &probe) {
+                out.push(probe);
+            }
+        } else if max >= 2 && !out.iter().any(|m| m == &probe) {
+            out.pop();
+            out.push(probe);
+        }
+    }
+
+    for (model, _) in degraded {
+        if out.len() >= max {
+            break;
+        }
+        if !out.iter().any(|m| m == &model) {
+            out.push(model);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1057,6 +1240,80 @@ mod tests {
 
         assert!(viable.contains(&"model-b".to_string()));
         assert!(!viable.contains(&"model-a".to_string()));
+    }
+
+    #[test]
+    fn test_timeout_quarantine_excludes_model_before_probe_window() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record_timeout("flaky", 15000.0);
+        store.record_timeout("flaky", 15000.0);
+        for _ in 0..3 {
+            store.record("healthy", 500.0, true);
+        }
+
+        let candidates = vec!["flaky".to_string(), "healthy".to_string()];
+        let racing = store.racing_candidates(&candidates, 2);
+        let best = store.best_model(&candidates).unwrap();
+        let snapshot = store.snapshot();
+        let flaky = snapshot.iter().find(|s| s.id == "flaky").unwrap();
+
+        assert_eq!(racing, vec!["healthy".to_string()]);
+        assert_eq!(best, "healthy");
+        assert!(flaky.degraded);
+    }
+
+    #[test]
+    fn test_timeout_quarantine_allows_single_half_open_probe() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record_timeout("flaky-a", 15000.0);
+        store.record_timeout("flaky-a", 15000.0);
+        store.record_timeout("flaky-b", 15000.0);
+        store.record_timeout("flaky-b", 15000.0);
+        store.force_timeout_probe_ready_for_test("flaky-a");
+        store.force_timeout_probe_ready_for_test("flaky-b");
+
+        for _ in 0..3 {
+            store.record("healthy-a", 500.0, true);
+            store.record("healthy-b", 700.0, true);
+            store.record("healthy-c", 900.0, true);
+        }
+
+        let candidates = vec![
+            "healthy-a".to_string(),
+            "healthy-b".to_string(),
+            "healthy-c".to_string(),
+            "flaky-a".to_string(),
+            "flaky-b".to_string(),
+        ];
+        let first = store.racing_candidates(&candidates, 3);
+        let probe_count = first.iter().filter(|m| m.starts_with("flaky-")).count();
+        let second = store.racing_candidates(&candidates, 3);
+        let second_probe_count = second.iter().filter(|m| m.starts_with("flaky-")).count();
+
+        assert_eq!(first.len(), 3);
+        assert_eq!(probe_count, 1);
+        assert_eq!(second_probe_count, 1);
+        assert_ne!(
+            first.iter().find(|m| m.starts_with("flaky-")),
+            second.iter().find(|m| m.starts_with("flaky-"))
+        );
+    }
+
+    #[test]
+    fn test_success_clears_timeout_quarantine() {
+        let store = ModelStatsStore::new(3000.0);
+
+        store.record_timeout("flaky", 15000.0);
+        store.record_timeout("flaky", 15000.0);
+        store.force_timeout_probe_ready_for_test("flaky");
+        assert!(store
+            .racing_candidates(&["flaky".to_string()], 1)
+            .contains(&"flaky".to_string()));
+
+        store.record("flaky", 400.0, true);
+        assert_eq!(store.timeout_quarantined_for_test("flaky"), Some(false));
     }
 }
 

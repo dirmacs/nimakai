@@ -200,6 +200,9 @@ Local latency degradation requires three samples; NVIDIA server-degraded
 responses are still honored immediately. Solo mode and exhausted races can walk
 unused fallback candidates sequentially after transient 5xx/timeouts. Clients
 may send either `"auto"` or `"nimaproxy/auto"`.
+Repeated upstream timeouts temporarily quarantine a model from normal candidate
+pools; after cooldown, one half-open probe can recover it without flooding live
+traffic with flaky candidates.
 
 Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
 use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested

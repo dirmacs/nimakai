@@ -244,6 +244,23 @@ fn racing_deadline_response(state: &AppState) -> Response {
         .into_response()
 }
 
+fn record_model_timeout(
+    state: &AppState,
+    model_id: &str,
+    key_label: Option<&str>,
+    elapsed_ms: u64,
+) {
+    if let Some(label) = key_label {
+        state
+            .model_stats
+            .record_timeout_with_key(model_id, label, elapsed_ms as f64);
+    } else {
+        state
+            .model_stats
+            .record_timeout(model_id, elapsed_ms as f64);
+    }
+}
+
 enum GatewayAcquireError {
     Overloaded,
     NoKeys,
@@ -544,18 +561,7 @@ async fn solo_model_fallback(
                     } else {
                         format!("upstream timeout after {}ms", request_timeout_ms)
                     };
-                    if let Some(label) = key_label.as_ref() {
-                        state.model_stats.record_with_key(
-                            &model_id,
-                            label,
-                            send_timeout_ms as f64,
-                            false,
-                        );
-                    } else {
-                        state
-                            .model_stats
-                            .record(&model_id, send_timeout_ms as f64, false);
-                    }
+                    record_model_timeout(&state, &model_id, key_label.as_deref(), send_timeout_ms);
                     log_turn_request(
                         "auto",
                         &model_id,
@@ -605,66 +611,56 @@ async fn solo_model_fallback(
             else {
                 return racing_deadline_response(&state);
             };
-            let body_bytes =
-                match timeout(Duration::from_millis(body_timeout_ms), resp.bytes()).await {
-                    Ok(Ok(bytes)) => bytes,
-                    Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        log_turn_request(
-                            "auto",
-                            &model_id,
-                            t0.elapsed().as_millis(),
-                            false,
-                            StatusCode::BAD_GATEWAY.as_u16(),
-                            message_count,
-                            has_tool_calls,
-                            tool_call_count,
-                            key_label.as_deref(),
-                            true,
-                            Some(msg.clone()),
-                        );
-                        last_error = Some((StatusCode::BAD_GATEWAY, msg));
-                        break;
-                    }
-                    Err(_) => {
-                        state.gateway_metrics.record_timeout();
-                        let msg = if body_timeout_ms < request_timeout_ms {
-                            format!(
-                                "racing deadline exceeded after {}ms",
-                                state.racing_max_total_request_ms
-                            )
-                        } else {
-                            format!("upstream body timeout after {}ms", request_timeout_ms)
-                        };
-                        if let Some(label) = key_label.as_ref() {
-                            state.model_stats.record_with_key(
-                                &model_id,
-                                label,
-                                body_timeout_ms as f64,
-                                false,
-                            );
-                        } else {
-                            state
-                                .model_stats
-                                .record(&model_id, body_timeout_ms as f64, false);
-                        }
-                        log_turn_request(
-                            "auto",
-                            &model_id,
-                            body_timeout_ms as u128,
-                            false,
-                            StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                            message_count,
-                            has_tool_calls,
-                            tool_call_count,
-                            key_label.as_deref(),
-                            true,
-                            Some(msg.clone()),
-                        );
-                        last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
-                        break;
-                    }
-                };
+            let body_bytes = match timeout(Duration::from_millis(body_timeout_ms), resp.bytes())
+                .await
+            {
+                Ok(Ok(bytes)) => bytes,
+                Ok(Err(e)) => {
+                    let msg = e.to_string();
+                    log_turn_request(
+                        "auto",
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        StatusCode::BAD_GATEWAY.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        true,
+                        Some(msg.clone()),
+                    );
+                    last_error = Some((StatusCode::BAD_GATEWAY, msg));
+                    break;
+                }
+                Err(_) => {
+                    state.gateway_metrics.record_timeout();
+                    let msg = if body_timeout_ms < request_timeout_ms {
+                        format!(
+                            "racing deadline exceeded after {}ms",
+                            state.racing_max_total_request_ms
+                        )
+                    } else {
+                        format!("upstream body timeout after {}ms", request_timeout_ms)
+                    };
+                    record_model_timeout(&state, &model_id, key_label.as_deref(), body_timeout_ms);
+                    log_turn_request(
+                        "auto",
+                        &model_id,
+                        body_timeout_ms as u128,
+                        false,
+                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        true,
+                        Some(msg.clone()),
+                    );
+                    last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
+                    break;
+                }
+            };
             let body_str = std::str::from_utf8(&body_bytes).unwrap_or("");
             let error_excerpt = body_str.chars().take(400).collect::<String>();
             let hard_model_error = status == StatusCode::BAD_REQUEST
@@ -827,18 +823,7 @@ pub async fn chat_completions(
         match result {
             Err(_) => {
                 state.gateway_metrics.record_timeout();
-                if let Some(label) = key_label.as_ref() {
-                    state.model_stats.record_with_key(
-                        &model_id,
-                        label,
-                        request_timeout_ms as f64,
-                        false,
-                    );
-                } else {
-                    state
-                        .model_stats
-                        .record(&model_id, request_timeout_ms as f64, false);
-                }
+                record_model_timeout(&state, &model_id, key_label.as_deref(), request_timeout_ms);
                 log_turn_request(
                     &original_model,
                     &model_id,
@@ -936,18 +921,12 @@ pub async fn chat_completions(
                     }
                     Err(_) => {
                         state.gateway_metrics.record_timeout();
-                        if let Some(label) = key_label.as_ref() {
-                            state.model_stats.record_with_key(
-                                &model_id,
-                                label,
-                                request_timeout_ms as f64,
-                                false,
-                            );
-                        } else {
-                            state
-                                .model_stats
-                                .record(&model_id, request_timeout_ms as f64, false);
-                        }
+                        record_model_timeout(
+                            &state,
+                            &model_id,
+                            key_label.as_deref(),
+                            request_timeout_ms,
+                        );
                         log_turn_request(
                             &original_model,
                             &model_id,
@@ -1955,20 +1934,12 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                                     state_clone.racing_max_total_request_ms
                                 );
                                 state_clone.gateway_metrics.record_timeout();
-                                if let Some(ref label) = key_label {
-                                    state_clone.model_stats.record_with_key(
-                                        &model_id_clone,
-                                        label,
-                                        timeout_ms_for_model as f64,
-                                        false,
-                                    );
-                                } else {
-                                    state_clone.model_stats.record(
-                                        &model_id_clone,
-                                        timeout_ms_for_model as f64,
-                                        false,
-                                    );
-                                }
+                                record_model_timeout(
+                                    &state_clone,
+                                    &model_id_clone,
+                                    key_label.as_deref(),
+                                    timeout_ms_for_model,
+                                );
                                 log_turn_request(
                                     "auto",
                                     &model_id_clone,
@@ -2019,20 +1990,12 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                             } else {
                                 format!("body timeout after {}ms", timeout_ms_for_model)
                             };
-                            if let Some(ref label) = key_label {
-                                state_clone.model_stats.record_with_key(
-                                    &model_id_clone,
-                                    label,
-                                    body_timeout_ms as f64,
-                                    false,
-                                );
-                            } else {
-                                state_clone.model_stats.record(
-                                    &model_id_clone,
-                                    body_timeout_ms as f64,
-                                    false,
-                                );
-                            }
+                            record_model_timeout(
+                                &state_clone,
+                                &model_id_clone,
+                                key_label.as_deref(),
+                                body_timeout_ms,
+                            );
                             log_turn_request(
                                 "auto",
                                 &model_id_clone,
@@ -2130,20 +2093,12 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                     } else {
                         format!("timeout after {}ms", timeout_ms_for_model)
                     };
-                    if let Some(ref label) = key_label {
-                        state_clone.model_stats.record_with_key(
-                            &model_id_clone,
-                            label,
-                            send_timeout_ms_for_model as f64,
-                            false,
-                        );
-                    } else {
-                        state_clone.model_stats.record(
-                            &model_id_clone,
-                            send_timeout_ms_for_model as f64,
-                            false,
-                        );
-                    }
+                    record_model_timeout(
+                        &state_clone,
+                        &model_id_clone,
+                        key_label.as_deref(),
+                        send_timeout_ms_for_model,
+                    );
                     log_turn_request(
                         "auto",
                         &model_id_clone,
