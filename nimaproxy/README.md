@@ -63,7 +63,7 @@ label = "primary"
 
 [routing]
 strategy = "latency_aware"
-spike_threshold_ms = 3000
+spike_threshold_ms = 12000
 models = [
   "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
@@ -87,9 +87,9 @@ models = [
   "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
 ]
-max_parallel = 3
+max_parallel = 2
 timeout_ms = 15000
-max_total_request_ms = 30000
+max_total_request_ms = 25000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
@@ -102,9 +102,9 @@ fast_models = [
   "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
-  "moonshotai/kimi-k2.6",
 ]
 fallback_models = [
+  "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
   "deepseek-ai/deepseek-v4-flash",
   "minimaxai/minimax-m2.7",
@@ -241,7 +241,7 @@ NIMAPROXY_STRESS_TURNS=2 cargo test --test stress_test -- --nocapture
 ### Changed
 
 - Active routing/racing examples now use the eight-model uptime pool and keep Mistral Medium 3.5 / DeepSeek Pro out of the active race after observed hard/schema failures.
-- Production-oriented defaults now use `max_parallel=3`, pressure/degraded fanout of `2`, `max_upstream_in_flight=8`, `max_in_flight_per_key=2`, `admission_wait_ms=5000`, and a 15s dynamic timeout floor.
+- Production-oriented defaults now use `max_parallel=2`, a MiniMax M3 + GLM 5.1 + Step 3.7 fast pool, `max_total_request_ms=25000`, `max_upstream_in_flight=8`, `max_in_flight_per_key=2`, `admission_wait_ms=5000`, and a 15s dynamic timeout floor.
 
 ### Fixed
 

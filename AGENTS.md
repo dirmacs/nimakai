@@ -73,7 +73,8 @@ nimaproxy/
 
 V3 feature: fires N parallel requests to N models, returns first response.
 Trades extra token budget for min(P50 latency). v0.15.5 keeps the production
-healthy ceiling at 3 racers, backs off to 2 under pressure, and falls back to a
+healthy ceiling at 2 racers with MiniMax M3, GLM 5.1, and Step 3.7 as the
+stress-tested fast tier, and falls back to a
 single best model when fewer than two viable racers/key slots exist.
 
 ```toml
@@ -89,9 +90,9 @@ models = [
   "nvidia/nemotron-3-ultra-550b-a55b",
   "deepseek-ai/deepseek-v4-flash",
 ]
-max_parallel = 3
+max_parallel = 2
 timeout_ms = 15000
-max_total_request_ms = 30000
+max_total_request_ms = 25000
 strategy = "complete"
 adaptive = true
 min_parallel = 2
@@ -104,9 +105,9 @@ fast_models = [
   "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
   "stepfun-ai/step-3.7-flash",
-  "moonshotai/kimi-k2.6",
 ]
 fallback_models = [
+  "moonshotai/kimi-k2.6",
   "qwen/qwen3.5-397b-a17b",
   "deepseek-ai/deepseek-v4-flash",
   "minimaxai/minimax-m2.7",
@@ -130,12 +131,12 @@ When `model=auto` is sent, nimaproxy picks the best model from the configured li
 - **`round_robin`**: cycles through models in order, ignores latency data
 - **`latency_aware`** (default): prefers fastest non-degraded model by avg TTFC
 
-Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skipped until they recover. Untried models (< 3 samples) get priority.
+Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skipped until they recover. Untried models (< 3 samples) get priority. The production example uses a 12s latency threshold because current live NIM winners often respond in the 6-12s range while still maintaining availability.
 
 ```toml
 [routing]
 strategy = "latency_aware"
-spike_threshold_ms = 3000
+spike_threshold_ms = 12000
 models = [
   "minimaxai/minimax-m3",
   "z-ai/glm-5.1",
@@ -226,7 +227,7 @@ Nimkai's `recommend` subcommand outputs JSON consumed by aegis-opencode for rout
 - Candidate selection separates latency degradation from availability degradation; slow successful models stay ahead of models with fresh failures.
 - `/stats.gateway` exposes solo fallback, sequential fallback, all-racers-failed, and racing deadline counters.
 - New or failure-only models keep the configured max timeout until enough latency history exists, then learned timeouts are clamped by `min_dynamic_timeout_ms`.
-- Adaptive racing uses fast/fallback tiers and backs off from `max_parallel=3` to pressure/degraded fanout when gateway pressure rises.
+- Adaptive racing uses fast/fallback tiers with `max_parallel=2` for the current stress-tested fast pool.
 - Dynamic per-key windows halve on 429 and reopen slowly after successful requests.
 - Bounded admission wait gives key slots a short chance to free up before local 503/429 responses.
 - Solo fallback keeps `auto` useful when racing cannot safely launch at least two upstream requests.
