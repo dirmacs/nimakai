@@ -12,6 +12,7 @@ use futures::TryStreamExt;
 use serde_json::Value;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
+use tracing::warn;
 
 use crate::{AppState, KeyAcquireError, KeyLease, UpstreamPermit};
 
@@ -668,6 +669,27 @@ async fn solo_model_fallback(
             };
             let body_str = std::str::from_utf8(&body_bytes).unwrap_or("");
             let error_excerpt = body_str.chars().take(400).collect::<String>();
+
+            // Auth failure: this key itself is bad, not the model. Quarantine the key and
+            // retry with the next available key for the same model — do NOT touch
+            // model_stats/hard-error tracking for `model_id`.
+            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                state.pool.mark_auth_failed(
+                    key_idx,
+                    Duration::from_secs(state.auth_failure_cooldown_secs),
+                );
+                warn!(
+                    key_idx = key_idx,
+                    key_label = key_label.as_deref().unwrap_or("unknown"),
+                    model = %model_id,
+                    status = status.as_u16(),
+                    cooldown_secs = state.auth_failure_cooldown_secs,
+                    "auth failure (401/403) on leased key; quarantining and retrying with next key"
+                );
+                last_error = Some((resp_status, error_excerpt));
+                continue;
+            }
+
             let hard_model_error = status == StatusCode::BAD_REQUEST
                 && is_hard_model_error(&format!("HTTP 400 {body_str}"));
             if hard_model_error {
@@ -800,6 +822,7 @@ pub async fn chat_completions(
 
     let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&body);
     let n = state.pool.len().min(MAX_RETRIES).max(1);
+    let mut last_auth_failure_response: Option<Response> = None;
 
     for _ in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
@@ -889,6 +912,42 @@ pub async fn chat_completions(
                         .unwrap_or(60);
                     state.pool.mark_rate_limited(idx, retry_after);
                     eprintln!("[nimaproxy] key {} rate-limited {}s", idx, retry_after);
+                    continue;
+                }
+
+                // Auth failure: this key itself is bad (revoked/invalid), not the request.
+                // Quarantine the key and retry with the next available key. Checked BEFORE
+                // the body is converted to a stream so a streaming response never starts
+                // sending bytes to the client on a key we're about to discard.
+                if status == 401 || status == 403 {
+                    state.pool.mark_auth_failed(
+                        idx,
+                        Duration::from_secs(state.auth_failure_cooldown_secs),
+                    );
+                    warn!(
+                        key_idx = idx,
+                        key_label = key_label.as_deref().unwrap_or("unknown"),
+                        status = status.as_u16(),
+                        cooldown_secs = state.auth_failure_cooldown_secs,
+                        "auth failure (401/403) on leased key; quarantining and retrying with next key"
+                    );
+                    let auth_resp_status =
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::FORBIDDEN);
+                    let auth_content_type = resp
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("application/json")
+                        .to_string();
+                    let auth_failure_body = resp.bytes().await.unwrap_or_default();
+                    let mut auth_response = Response::new(Body::from(auth_failure_body));
+                    *auth_response.status_mut() = auth_resp_status;
+                    auth_response.headers_mut().insert(
+                        "content-type",
+                        HeaderValue::from_str(&auth_content_type)
+                            .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                    );
+                    last_auth_failure_response = Some(auth_response);
                     continue;
                 }
 
@@ -1076,6 +1135,10 @@ pub async fn chat_completions(
         }
     }
 
+    if let Some(response) = last_auth_failure_response {
+        return response;
+    }
+
     (
         StatusCode::TOO_MANY_REQUESTS,
         "all keys exhausted after retries",
@@ -1223,6 +1286,8 @@ fn is_transient_race_error(error: &str) -> bool {
     error.contains("timeout")
         || error.contains("request error")
         || error.contains("body error")
+        || error.contains("HTTP 401")
+        || error.contains("HTTP 403")
         || error.contains("HTTP 500")
         || error.contains("HTTP 502")
         || error.contains("HTTP 503")
@@ -1648,6 +1713,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "in_flight": s.in_flight,
                 "max_in_flight": s.max_in_flight,
                 "configured_max_in_flight": s.configured_max_in_flight,
+                "auth_failures": s.auth_failures,
             })
         })
         .collect();
@@ -1701,6 +1767,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "racing_fast_models": state.racing_fast_models.clone(),
         "racing_fallback_models": state.racing_fallback_models.clone(),
         "pruned_models": state.pruned_models.lock().map(|g| g.clone()).unwrap_or_default(),
+        "auth_failure_cooldown_secs": state.auth_failure_cooldown_secs,
     });
 
     (
@@ -1891,6 +1958,37 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                     if status.as_u16() != 429 && status.as_u16() >= 400 {
                         let body_bytes = resp.bytes().await.unwrap_or_default();
                         let body_str = String::from_utf8_lossy(&body_bytes);
+
+                        // Auth failure (401/403): this racing leg's KEY is bad, not the
+                        // model. Quarantine the key only — do NOT call `record_outcome`
+                        // (model_stats degradation) or the hard-error quarantine hook for
+                        // `model_id_clone`. The error string still carries "HTTP 401/403" so
+                        // the join loop's `is_transient_race_error` check lets a healthy
+                        // solo-fallback retry (with a different key) take over.
+                        if status.as_u16() == 401 || status.as_u16() == 403 {
+                            state_clone.pool.mark_auth_failed(
+                                key_idx_for_spawn,
+                                Duration::from_secs(state_clone.auth_failure_cooldown_secs),
+                            );
+                            warn!(
+                                key_idx = key_idx_for_spawn,
+                                key_label = key_label.as_deref().unwrap_or("unknown"),
+                                model = %model_id_clone,
+                                status = status.as_u16(),
+                                cooldown_secs = state_clone.auth_failure_cooldown_secs,
+                                "racing leg: auth failure (401/403) on leased key; quarantining key, not the model"
+                            );
+                            return (
+                                model_id_for_task,
+                                Err(format!(
+                                    "HTTP {} from {}: {}",
+                                    status.as_u16(),
+                                    model_id_clone,
+                                    &body_str[..body_str.len().min(400)]
+                                )),
+                            );
+                        }
+
                         record_outcome(false);
                         if status.as_u16() == 400 {
                             let err = format!("HTTP 400 from {}: {}", model_id_clone, body_str);
@@ -2307,6 +2405,7 @@ mod tests {
                 admission_wait_ms: 0,
                 min_dynamic_timeout_ms: 8000,
                 dynamic_sample_floor: 10,
+                auth_failure_cooldown_secs: 900,
             },
         )
     }
@@ -3346,6 +3445,7 @@ pub async fn completions(
     };
     let n = state.pool.len().min(MAX_RETRIES).max(1);
     eprintln!("[nimaproxy] POST /v1/completions - got n={}", n);
+    let mut last_auth_failure_response: Option<Response> = None;
     for _ in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
             Ok(permits) => permits,
@@ -3385,6 +3485,37 @@ pub async fn completions(
                 if status == StatusCode::TOO_MANY_REQUESTS {
                     state.gateway_metrics.record_rate_limit();
                     state.pool.mark_rate_limited(key_lease.idx, 60);
+                    continue;
+                }
+                if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                    state.pool.mark_auth_failed(
+                        key_lease.idx,
+                        Duration::from_secs(state.auth_failure_cooldown_secs),
+                    );
+                    warn!(
+                        key_idx = key_lease.idx,
+                        key_label = key_label.as_deref().unwrap_or("unknown"),
+                        status = status.as_u16(),
+                        cooldown_secs = state.auth_failure_cooldown_secs,
+                        "auth failure (401/403) on leased key; quarantining and retrying with next key"
+                    );
+                    let auth_resp_status =
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::FORBIDDEN);
+                    let auth_content_type = resp
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("application/json")
+                        .to_string();
+                    let auth_failure_body = resp.bytes().await.unwrap_or_default();
+                    let mut auth_response = Response::new(Body::from(auth_failure_body));
+                    *auth_response.status_mut() = auth_resp_status;
+                    auth_response.headers_mut().insert(
+                        "content-type",
+                        HeaderValue::from_str(&auth_content_type)
+                            .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                    );
+                    last_auth_failure_response = Some(auth_response);
                     continue;
                 }
                 if ok {
@@ -3448,6 +3579,10 @@ pub async fn completions(
             }
         }
     }
+    if let Some(response) = last_auth_failure_response {
+        return response;
+    }
+
     (
         StatusCode::TOO_MANY_REQUESTS,
         "all keys exhausted after retries",
@@ -3472,6 +3607,7 @@ pub async fn embeddings(
         String::new()
     };
     let n = state.pool.len().min(MAX_RETRIES).max(1);
+    let mut last_auth_failure_response: Option<Response> = None;
     for _ in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
             Ok(permits) => permits,
@@ -3510,6 +3646,37 @@ pub async fn embeddings(
                 if status == StatusCode::TOO_MANY_REQUESTS {
                     state.gateway_metrics.record_rate_limit();
                     state.pool.mark_rate_limited(key_lease.idx, 60);
+                    continue;
+                }
+                if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                    state.pool.mark_auth_failed(
+                        key_lease.idx,
+                        Duration::from_secs(state.auth_failure_cooldown_secs),
+                    );
+                    warn!(
+                        key_idx = key_lease.idx,
+                        key_label = key_label.as_deref().unwrap_or("unknown"),
+                        status = status.as_u16(),
+                        cooldown_secs = state.auth_failure_cooldown_secs,
+                        "auth failure (401/403) on leased key; quarantining and retrying with next key"
+                    );
+                    let auth_resp_status =
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::FORBIDDEN);
+                    let auth_content_type = resp
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("application/json")
+                        .to_string();
+                    let auth_failure_body = resp.bytes().await.unwrap_or_default();
+                    let mut auth_response = Response::new(Body::from(auth_failure_body));
+                    *auth_response.status_mut() = auth_resp_status;
+                    auth_response.headers_mut().insert(
+                        "content-type",
+                        HeaderValue::from_str(&auth_content_type)
+                            .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                    );
+                    last_auth_failure_response = Some(auth_response);
                     continue;
                 }
                 if ok {
@@ -3560,6 +3727,10 @@ pub async fn embeddings(
             }
         }
     }
+    if let Some(response) = last_auth_failure_response {
+        return response;
+    }
+
     (
         StatusCode::TOO_MANY_REQUESTS,
         "all keys exhausted after retries",

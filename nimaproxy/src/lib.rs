@@ -83,6 +83,9 @@ pub struct AppState {
     pub admission_wait_ms: u64,
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
+    /// Cooldown (seconds) applied to a key after an upstream 401/403 (auth failure) on any
+    /// inference path. `0` disables auth-failure quarantine. See `config::auth_failure_cooldown_secs`.
+    pub auth_failure_cooldown_secs: u64,
     upstream_permits: Arc<Semaphore>,
     pub gateway_metrics: Arc<GatewayMetrics>,
 }
@@ -104,6 +107,7 @@ pub struct RuntimeControls {
     pub admission_wait_ms: u64,
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
+    pub auth_failure_cooldown_secs: u64,
 }
 
 impl Default for RuntimeControls {
@@ -124,6 +128,7 @@ impl Default for RuntimeControls {
             admission_wait_ms: 1500,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
         }
     }
 }
@@ -381,6 +386,7 @@ impl AppState {
             admission_wait_ms: controls.admission_wait_ms,
             min_dynamic_timeout_ms: controls.min_dynamic_timeout_ms.max(1000),
             dynamic_sample_floor: controls.dynamic_sample_floor.max(2),
+            auth_failure_cooldown_secs: controls.auth_failure_cooldown_secs,
             upstream_permits: Arc::new(Semaphore::new(controls.max_upstream_in_flight.max(1))),
             gateway_metrics: Arc::new(GatewayMetrics::new()),
         })

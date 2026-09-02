@@ -13,6 +13,17 @@ All notable changes to nimaproxy will be documented in this file.
   pruned id; `/stats` exposes `pruned_models`.
 - `[racing].model_check_interval_secs` (default 3600, `0` disables): periodic recheck marks
   configured models that vanished upstream as server-degraded.
+- Added: auth-failure key quarantine — an upstream `401`/`403` on any inference path (direct
+  chat, streaming, `completions`, `embeddings`, and each racing leg) is now treated as a bad
+  KEY, not a bad request or model: `KeyPool::mark_auth_failed` puts the leased key on
+  `[limits].auth_failure_cooldown_secs` (default `900`, `0` disables quarantine) and bumps a
+  new cumulative per-key `auth_failures` counter, a `warn!` is logged once, and the request is
+  retried with the next available key (bounded to the pool size, mirroring the existing
+  `completions`/`embeddings` retry loop). Racing legs quarantine the key only and never call
+  the model degradation/timeout-quarantine hooks, so one bad key cannot make a healthy model
+  look degraded. If every key is exhausted, the upstream 401/403 status and body are returned
+  to the client unchanged. `/stats` now reports `auth_failures` per key and a top-level
+  `auth_failure_cooldown_secs`.
 
 ### Changed
 

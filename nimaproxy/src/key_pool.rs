@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -16,6 +16,8 @@ pub struct KeyPool {
     permits: Vec<Arc<Semaphore>>,
     windows: Vec<Mutex<KeyWindow>>,
     max_in_flight_per_key: usize,
+    /// Cumulative count of upstream 401/403 (auth failure) responses observed per key.
+    auth_failures: Vec<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +35,8 @@ pub struct KeyStatus {
     pub in_flight: usize,
     pub max_in_flight: usize,
     pub configured_max_in_flight: usize,
+    /// Cumulative count of upstream 401/403 (auth failure) responses observed for this key.
+    pub auth_failures: u64,
 }
 
 pub struct KeyLease {
@@ -73,6 +77,7 @@ impl KeyPool {
                 })
                 .collect(),
             max_in_flight_per_key,
+            auth_failures: (0..n).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 
@@ -156,6 +161,36 @@ impl KeyPool {
             let mut cd = self.cooldowns[idx].lock().unwrap();
             *cd = Some(Instant::now() + Duration::from_secs(secs));
         }
+    }
+
+    /// Mark a key as having failed upstream auth (401/403 response). This is a distinct
+    /// failure mode from rate-limiting: it means the key itself is bad (revoked/invalid),
+    /// not that the account is temporarily throttled. Reuses the same cooldown mechanism as
+    /// `mark_rate_limited` (no second skip path) so `next_key`/`next_key_with_permit` skip
+    /// the key for the cooldown duration, and bumps the key's cumulative `auth_failures`
+    /// counter (exposed via `status()` / `/stats`).
+    ///
+    /// `cooldown == Duration::ZERO` still records the failure but leaves the key's cooldown
+    /// untouched — this is how `[limits].auth_failure_cooldown_secs = 0` disables auth-failure
+    /// quarantine while still counting the failure.
+    pub fn mark_auth_failed(&self, idx: usize, cooldown: Duration) {
+        if idx >= self.cooldowns.len() {
+            return;
+        }
+        if let Some(counter) = self.auth_failures.get(idx) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        if !cooldown.is_zero() {
+            let mut cd = self.cooldowns[idx].lock().unwrap();
+            *cd = Some(Instant::now() + cooldown);
+        }
+    }
+
+    fn auth_failures_for(&self, idx: usize) -> u64 {
+        self.auth_failures
+            .get(idx)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     pub fn record_rate_limited(&self, idx: usize) {
@@ -263,6 +298,7 @@ impl KeyPool {
                     in_flight: self.in_flight_for_key(i),
                     max_in_flight: self.current_window(i),
                     configured_max_in_flight: self.max_in_flight_per_key,
+                    auth_failures: self.auth_failures_for(i),
                 }
             })
             .collect()
@@ -344,6 +380,62 @@ mod tests {
         let (k, idx) = pool.next_key().unwrap();
         assert_eq!(k, "key2");
         assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn test_mark_auth_failed_sets_cooldown_and_counts() {
+        let keys = vec![make_key_entry("key1", "a"), make_key_entry("key2", "b")];
+        let pool = KeyPool::new(keys);
+
+        pool.mark_auth_failed(0, Duration::from_secs(900));
+
+        // key1 should now be skipped (in cooldown), same mechanism as mark_rate_limited
+        let (k, idx) = pool.next_key().unwrap();
+        assert_eq!(k, "key2");
+        assert_eq!(idx, 1);
+
+        let statuses = pool.status();
+        assert!(!statuses[0].active);
+        assert!(statuses[0].cooldown_secs_remaining > 0);
+        assert!(statuses[0].cooldown_secs_remaining <= 900);
+        assert_eq!(statuses[0].auth_failures, 1);
+        assert_eq!(statuses[1].auth_failures, 0);
+    }
+
+    #[test]
+    fn test_mark_auth_failed_zero_cooldown_disables_quarantine() {
+        let keys = vec![make_key_entry("key1", "a")];
+        let pool = KeyPool::new(keys);
+
+        pool.mark_auth_failed(0, Duration::from_secs(0));
+
+        // Cooldown must NOT be set when the configured cooldown is zero — the key stays
+        // active and immediately reusable — but the failure is still counted.
+        let statuses = pool.status();
+        assert!(statuses[0].active);
+        assert_eq!(statuses[0].cooldown_secs_remaining, 0);
+        assert_eq!(statuses[0].auth_failures, 1);
+        assert!(pool.next_key().is_some());
+    }
+
+    #[test]
+    fn test_mark_auth_failed_is_cumulative() {
+        let keys = vec![make_key_entry("key1", "a")];
+        let pool = KeyPool::new(keys);
+
+        pool.mark_auth_failed(0, Duration::from_secs(0));
+        pool.mark_auth_failed(0, Duration::from_secs(0));
+        pool.mark_auth_failed(0, Duration::from_secs(0));
+
+        assert_eq!(pool.status()[0].auth_failures, 3);
+    }
+
+    #[test]
+    fn test_status_default_auth_failures_zero() {
+        let keys = vec![make_key_entry("key1", "a")];
+        let pool = KeyPool::new(keys);
+
+        assert_eq!(pool.status()[0].auth_failures, 0);
     }
 
     #[test]

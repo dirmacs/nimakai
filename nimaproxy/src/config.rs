@@ -173,6 +173,9 @@ pub struct LimitsConfig {
     pub max_upstream_in_flight: Option<usize>,
     pub max_in_flight_per_key: Option<usize>,
     pub admission_wait_ms: Option<u64>,
+    /// Cooldown (seconds) applied to a key after an upstream 401/403 (auth failure).
+    /// Default 900 (15 min). `0` disables auth-failure quarantine.
+    pub auth_failure_cooldown_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -339,6 +342,16 @@ impl Config {
             .as_ref()
             .and_then(|l| l.admission_wait_ms)
             .unwrap_or(1500)
+    }
+
+    /// Cooldown (seconds) applied to a key after an upstream 401/403 (auth failure) on any
+    /// inference path. Default 900 (15 min). `0` disables auth-failure quarantine — the
+    /// failure is still counted, but the key is not cooled down.
+    pub fn auth_failure_cooldown_secs(&self) -> u64 {
+        self.limits
+            .as_ref()
+            .and_then(|l| l.auth_failure_cooldown_secs)
+            .unwrap_or(900)
     }
 
     pub fn min_dynamic_timeout_ms(&self) -> u64 {
@@ -1070,6 +1083,48 @@ key = "test"
         assert_eq!(config.logging_path(), "/var/log/nimaproxy/turns.jsonl");
         assert_eq!(config.min_dynamic_timeout_ms(), 8000);
         assert_eq!(config.dynamic_sample_floor(), 10);
+    }
+
+    #[test]
+    fn test_auth_failure_cooldown_secs_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.auth_failure_cooldown_secs(), 900);
+    }
+
+    #[test]
+    fn test_auth_failure_cooldown_secs_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[limits]
+auth_failure_cooldown_secs = 120
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.auth_failure_cooldown_secs(), 120);
+    }
+
+    #[test]
+    fn test_auth_failure_cooldown_secs_zero_disables() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[limits]
+auth_failure_cooldown_secs = 0
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.auth_failure_cooldown_secs(), 0);
     }
 
     #[test]

@@ -21,6 +21,17 @@ All notable changes to nimakai are documented in this file.
   existing `ModelStatsStore::record_server_degraded` mechanism.
 - **`/stats` `pruned_models`**: Exposes the model ids pruned from the configured lists at
   startup.
+- Added: auth-failure key quarantine (nimaproxy) — an upstream `401`/`403` on any inference
+  path (direct chat, streaming, `completions`, `embeddings`, and each racing leg) is now
+  treated as a bad KEY, not a bad request or model: `KeyPool::mark_auth_failed` puts the
+  leased key on `[limits].auth_failure_cooldown_secs` (default `900`, `0` disables
+  quarantine) and bumps a new cumulative per-key `auth_failures` counter, logs one `warn!`,
+  and retries with the next available key (bounded to the pool size, mirroring the existing
+  `completions`/`embeddings` retry loop). Racing legs quarantine the key only and never call
+  the model degradation/timeout-quarantine hooks, so one bad key cannot make a healthy model
+  look degraded. If every key is exhausted, the upstream 401/403 status and body are returned
+  to the client unchanged. `/stats` now reports `auth_failures` per key and a top-level
+  `auth_failure_cooldown_secs`.
 - **Production pool refresh (2026-09-02)**: Re-verified the NVIDIA-hosted `nimaproxy.toml`
   racing/routing pool against the authenticated `/v1/models` catalog and live chat-completion
   probes (non-streaming `max_tokens=8` + streaming, per candidate). `z-ai/glm-5.1`,
