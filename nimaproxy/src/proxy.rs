@@ -670,6 +670,42 @@ async fn solo_model_fallback(
             let body_str = std::str::from_utf8(&body_bytes).unwrap_or("");
             let error_excerpt = body_str.chars().take(400).collect::<String>();
 
+            // Same in-stream error detection as the racing leg: an HTTP 2xx with an
+            // embedded upstream error body (e.g. NVIDIA NIM's overloaded-model SSE frame)
+            // must not be treated as a real success. Move on to the next key/model instead
+            // of returning the fake-success response to the client.
+            if status.is_success() {
+                if let Some((embedded_code, embedded_msg)) =
+                    sse_body_error(&body_bytes, Some(&content_type))
+                {
+                    if let Some(label) = key_label.as_ref() {
+                        state
+                            .model_stats
+                            .record_with_key(&model_id, label, ttfc_ms, false);
+                    } else {
+                        state.model_stats.record(&model_id, ttfc_ms, false);
+                    }
+                    log_turn_request(
+                        "auto",
+                        &model_id,
+                        ttfc_ms as u128,
+                        false,
+                        embedded_code,
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        true,
+                        Some(embedded_msg.clone()),
+                    );
+                    last_error = Some((
+                        StatusCode::from_u16(embedded_code).unwrap_or(StatusCode::BAD_GATEWAY),
+                        embedded_msg,
+                    ));
+                    break;
+                }
+            }
+
             // Auth failure: this key itself is bad, not the model. Quarantine the key and
             // retry with the next available key for the same model — do NOT touch
             // model_stats/hard-error tracking for `model_id`.
@@ -1283,7 +1319,7 @@ fn is_hard_model_error(error: &str) -> bool {
 }
 
 fn is_transient_race_error(error: &str) -> bool {
-    error.contains("timeout")
+    if error.contains("timeout")
         || error.contains("request error")
         || error.contains("body error")
         || error.contains("HTTP 401")
@@ -1292,6 +1328,106 @@ fn is_transient_race_error(error: &str) -> bool {
         || error.contains("HTTP 502")
         || error.contains("HTTP 503")
         || error.contains("HTTP 504")
+    {
+        return true;
+    }
+    // In-stream errors (an HTTP 2xx whose body carries an embedded upstream error, e.g.
+    // NVIDIA NIM's `"code":5033` overloaded-model SSE frame) use a provider-defined code
+    // rather than a real HTTP status. Treat any embedded 5xx-family in-stream code as
+    // transient so solo fallback can recover, mirroring the real-HTTP-5xx legs above.
+    if error.contains("(in-stream)") {
+        if let Some(code_str) = error
+            .strip_prefix("HTTP ")
+            .and_then(|rest| rest.split_whitespace().next())
+        {
+            return !code_str.is_empty()
+                && code_str.starts_with('5')
+                && code_str.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
+
+/// Detect an upstream error embedded in the body of an ostensibly-successful (2xx)
+/// response. Some providers (e.g. NVIDIA NIM) return HTTP 200 and then emit an error
+/// payload inside the body instead of a real error status: a `text/event-stream` `data:`
+/// frame carrying `{"message": "...", "code": 5033, ...}` instead of content deltas, or
+/// (for non-streaming legs) an `application/json` body shaped like `{"error": {...}}` /
+/// `{"error": "..."}`, or a flat `{"code"|"status": <n>, "message"|"detail": "..."}` body.
+/// `race_models` scores a leg by HTTP status alone, so without this check that leg "wins"
+/// the race and forwards a fake success to the client.
+///
+/// Returns `Some((code, message))` when the body carries an embedded error — `code` is the
+/// provider-embedded numeric code when present, else `500`. Returns `None` for a genuine
+/// successful body, an unrecognized content type, or malformed/empty input. Tolerant of
+/// `[DONE]`, blank lines, CRLF line endings, and partial/invalid UTF-8 — never panics.
+fn sse_body_error(body: &[u8], content_type: Option<&str>) -> Option<(u16, String)> {
+    let content_type = content_type.unwrap_or("").to_ascii_lowercase();
+    if content_type.contains("event-stream") {
+        let text = String::from_utf8_lossy(body);
+        for line in text.split('\n') {
+            let line = line.trim_end_matches('\r').trim();
+            let payload = match line.strip_prefix("data:") {
+                Some(p) => p.trim(),
+                None => continue,
+            };
+            if payload.is_empty() || payload == "[DONE]" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(payload) else {
+                continue;
+            };
+            if let Some(found) = json_embedded_error(&value) {
+                return Some(found);
+            }
+        }
+        None
+    } else if content_type.contains("json") {
+        let value = serde_json::from_slice::<Value>(body).ok()?;
+        json_embedded_error(&value)
+    } else {
+        None
+    }
+}
+
+/// Extract `(code, message)` from a JSON value shaped like an upstream error: either an
+/// `{"error": {...}}` / `{"error": "..."}` wrapper, or a flat
+/// `{"code"|"status": <n >= 400>, "message"|"detail": "..."}` body. Returns `None` for a
+/// normal content/choices payload.
+fn json_embedded_error(value: &Value) -> Option<(u16, String)> {
+    let obj = value.as_object()?;
+
+    match obj.get("error") {
+        Some(Value::String(s)) if !s.is_empty() => return Some((500, s.clone())),
+        Some(Value::Object(err_obj)) => {
+            let message = err_obj
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| err_obj.get("detail").and_then(Value::as_str))
+                .unwrap_or("upstream error")
+                .to_string();
+            let code = err_obj
+                .get("code")
+                .and_then(Value::as_u64)
+                .and_then(|n| u16::try_from(n).ok())
+                .unwrap_or(500);
+            return Some((code, message));
+        }
+        _ => {}
+    }
+
+    let code = obj
+        .get("code")
+        .and_then(Value::as_u64)
+        .or_else(|| obj.get("status").and_then(Value::as_u64))?;
+    if code < 400 {
+        return None;
+    }
+    let message = obj
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| obj.get("detail").and_then(Value::as_str))?;
+    Some((u16::try_from(code).unwrap_or(500), message.to_string()))
 }
 
 /// Validate tool call IDs for Mistral models.
@@ -2120,6 +2256,37 @@ async fn race_models(state: Arc<AppState>, body: Bytes, models: &[String]) -> Re
                             return (model_id_for_task, Err(timeout_error));
                         }
                     };
+
+                    // NVIDIA NIM (and similar providers) can return HTTP 200 and then emit
+                    // an error payload inside the body instead of a real error status. Racing
+                    // scores a leg by HTTP status alone, so without this check that leg
+                    // "wins" the race and forwards a fake success to the client.
+                    if status.is_success() {
+                        if let Some((embedded_code, embedded_msg)) =
+                            sse_body_error(&body_bytes, Some(&content_type))
+                        {
+                            log_turn_request(
+                                "auto",
+                                &model_id_clone,
+                                t0.elapsed().as_millis(),
+                                false,
+                                embedded_code,
+                                message_count,
+                                has_tool_calls,
+                                tool_call_count,
+                                key_label.as_deref(),
+                                true,
+                                Some(embedded_msg.clone()),
+                            );
+                            return (
+                                model_id_for_task,
+                                Err(format!(
+                                    "HTTP {} (in-stream) from {}: {}",
+                                    embedded_code, model_id_clone, embedded_msg
+                                )),
+                            );
+                        }
+                    }
                     let body = Body::from(body_bytes);
 
                     let mut response = Response::new(body);
@@ -3181,6 +3348,104 @@ mod tests {
         assert!(
             response.status() >= StatusCode::BAD_REQUEST || response.status() == StatusCode::OK
         );
+    }
+
+    // ============ sse_body_error tests ============
+
+    #[test]
+    fn test_sse_body_error_detects_nim_overload_frame() {
+        let body = b"data: {\"message\":\"Service temporarily overloaded\",\"type\":\"service_unavailable\",\"code\":5033}\n\ndata: [DONE]\n\n";
+        let (code, msg) =
+            sse_body_error(body, Some("text/event-stream")).expect("expected an embedded error");
+        assert_eq!(code, 5033);
+        assert_eq!(msg, "Service temporarily overloaded");
+    }
+
+    #[test]
+    fn test_sse_body_error_none_for_normal_content_stream() {
+        let body =
+            b"data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        assert_eq!(sse_body_error(body, Some("text/event-stream")), None);
+    }
+
+    #[test]
+    fn test_sse_body_error_none_for_done_only_stream() {
+        let body = b"data: [DONE]\n\n";
+        assert_eq!(sse_body_error(body, Some("text/event-stream")), None);
+    }
+
+    #[test]
+    fn test_sse_body_error_json_body_error_object() {
+        let body = br#"{"error":{"message":"Forbidden: key revoked","code":"invalid_api_key"}}"#;
+        let (code, msg) =
+            sse_body_error(body, Some("application/json")).expect("expected an embedded error");
+        assert_eq!(code, 500);
+        assert_eq!(msg, "Forbidden: key revoked");
+    }
+
+    #[test]
+    fn test_sse_body_error_json_body_top_level_status_detail() {
+        let body = br#"{"status":400,"detail":"DEGRADED function cannot be invoked"}"#;
+        let (code, msg) =
+            sse_body_error(body, Some("application/json")).expect("expected an embedded error");
+        assert_eq!(code, 400);
+        assert_eq!(msg, "DEGRADED function cannot be invoked");
+    }
+
+    #[test]
+    fn test_sse_body_error_none_for_normal_json_body() {
+        let body = br#"{"id":"x","choices":[{"message":{"content":"hi"}}]}"#;
+        assert_eq!(sse_body_error(body, Some("application/json")), None);
+    }
+
+    #[test]
+    fn test_sse_body_error_tolerates_crlf_and_blank_lines() {
+        let body =
+            b"\r\ndata: {\"message\":\"overloaded\",\"code\":503}\r\n\r\ndata: [DONE]\r\n\r\n";
+        let (code, msg) =
+            sse_body_error(body, Some("text/event-stream")).expect("expected an embedded error");
+        assert_eq!(code, 503);
+        assert_eq!(msg, "overloaded");
+    }
+
+    #[test]
+    fn test_sse_body_error_tolerates_partial_utf8() {
+        let mut body =
+            b"data: {\"message\":\"overloaded\",\"code\":503}\n\ndata: [DONE]\n\n".to_vec();
+        body.push(0xE2); // trailing incomplete multi-byte UTF-8 sequence
+        let (code, msg) = sse_body_error(&body, Some("text/event-stream"))
+            .expect("expected an embedded error despite trailing partial UTF-8");
+        assert_eq!(code, 503);
+        assert_eq!(msg, "overloaded");
+    }
+
+    #[test]
+    fn test_sse_body_error_none_for_unrecognized_content_type() {
+        let body = br#"{"error":{"message":"should be ignored"}}"#;
+        assert_eq!(sse_body_error(body, Some("text/plain")), None);
+    }
+
+    #[test]
+    fn test_sse_body_error_none_for_malformed_json_body() {
+        let body = b"not json at all";
+        assert_eq!(sse_body_error(body, Some("application/json")), None);
+    }
+
+    #[test]
+    fn test_is_transient_race_error_treats_in_stream_5xx_as_transient() {
+        assert!(is_transient_race_error(
+            "HTTP 5033 (in-stream) from model-a: Service temporarily overloaded"
+        ));
+        assert!(is_transient_race_error(
+            "HTTP 503 (in-stream) from model-a: overloaded"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_race_error_in_stream_4xx_is_not_transient() {
+        assert!(!is_transient_race_error(
+            "HTTP 400 (in-stream) from model-a: bad request"
+        ));
     }
 }
 

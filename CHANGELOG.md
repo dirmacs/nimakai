@@ -6,6 +6,20 @@ All notable changes to nimakai are documented in this file.
 
 ## [0.15.7] - 2026-09-02
 
+### Fixed
+
+- **Racing forwarded in-stream upstream errors as successes**: NVIDIA NIM answers HTTP 200
+  and then emits `data: {"message":"Service temporarily overloaded","code":503}` when a
+  model is overloaded. Under `strategy = "complete"` that tiny body finished first and won the
+  race, so clients received the error frame with a 200 and the turn log recorded success.
+  Racing legs and the solo fallback now detect embedded error bodies (`sse_body_error`),
+  treat the leg as failed (5xx-family counts as transient so another leg/solo retry can
+  win), and log the real status.
+- **Auth-failure key quarantine**: an upstream 401/403 marks the leased key auth-failed
+  (`[limits].auth_failure_cooldown_secs`, default 900, `0` disables) and retries on the next
+  key; racing legs treat it as a key failure, never model degradation; `/stats` exposes
+  per-key `auth_failures`.
+
 ### Added
 
 - **nimaproxy startup model refresh**: Before `AppState` is constructed, nimaproxy now fetches

@@ -25,6 +25,24 @@ All notable changes to nimaproxy will be documented in this file.
   to the client unchanged. `/stats` now reports `auth_failures` per key and a top-level
   `auth_failure_cooldown_secs`.
 
+### Fixed
+
+- Racing (and solo fallback) no longer forwards an in-stream upstream error as a fake
+  success. Some providers (e.g. NVIDIA NIM) return HTTP 200 and then emit an error payload
+  inside the body instead of a real error status — a `text/event-stream` `data:` frame
+  carrying `{"message": "...", "code": 5033, ...}`, or a non-streaming `application/json`
+  body shaped like `{"error": {...}}` / `{"code"|"status": <n>, "message"|"detail": "..."}`.
+  Racing previously scored a leg by HTTP status alone, so the "fastest" leg to complete
+  could win the race even though its body was an error, and the turn log recorded
+  `success=true`. A new pure helper, `sse_body_error(body, content_type)`, scans the
+  buffered response body for this shape once it is fully read; a match now fails that leg
+  with the embedded status code and message (`"HTTP {code} (in-stream) from {model}: {msg}"`),
+  logs the turn with `success=false` and the embedded code, and — for embedded 5xx-family
+  codes — is recognized as transient by `is_transient_race_error` so solo fallback can still
+  recover. `solo_model_fallback`'s buffered response handling applies the same check before
+  treating a 2xx as a win. The real SSE streaming passthrough (non-racing, non-solo-fallback
+  direct chat) is untouched — it forwards bytes as they arrive and cannot be retried.
+
 ### Changed
 
 - Version bump: 0.15.6 -> 0.15.7.
