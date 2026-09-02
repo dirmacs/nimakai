@@ -4,6 +4,20 @@ All notable changes to nimaproxy will be documented in this file.
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-09-02
+
+### Added
+
+- Startup upstream catalog check: configured routing/racing/fast/fallback model lists are
+  pruned of ids missing from `GET /v1/models` (fail-open on fetch error), with a `warn!` per
+  pruned id; `/stats` exposes `pruned_models`.
+- `[racing].model_check_interval_secs` (default 3600, `0` disables): periodic recheck marks
+  configured models that vanished upstream as server-degraded.
+
+### Changed
+
+- Version bump: 0.15.6 -> 0.15.7.
+
 ## [0.15.6] - 2026-06-15
 
 ### Changed

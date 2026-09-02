@@ -4,6 +4,43 @@ All notable changes to nimakai are documented in this file.
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-09-02
+
+### Added
+
+- **nimaproxy startup model refresh**: Before `AppState` is constructed, nimaproxy now fetches
+  the upstream `GET /v1/models` catalog with a pool key (5s timeout) and prunes every configured
+  model list (`[routing].models`, `[racing].models`, `fast_models`, `fallback_models`) of ids
+  not present upstream, logging a `warn!` per pruned id and an `info!` summary. Fetch failures
+  are fail-open: the configured lists are left unchanged and startup proceeds. Pruning that
+  empties the routing or racing pool falls back to passthrough/solo mode the same way an empty
+  config does today, with a loud `warn!`.
+- **nimaproxy periodic model recheck**: New `[racing].model_check_interval_secs` config key
+  (default `3600`, `0` disables) drives a background `tokio::spawn` task that re-fetches the
+  upstream catalog and marks configured models that have disappeared as server-degraded via the
+  existing `ModelStatsStore::record_server_degraded` mechanism.
+- **`/stats` `pruned_models`**: Exposes the model ids pruned from the configured lists at
+  startup.
+- **Production pool refresh (2026-09-02)**: Re-verified the NVIDIA-hosted `nimaproxy.toml`
+  racing/routing pool against the authenticated `/v1/models` catalog and live chat-completion
+  probes (non-streaming `max_tokens=8` + streaming, per candidate). `z-ai/glm-5.1`,
+  `stepfun-ai/step-3.7-flash`, `qwen/qwen3.5-397b-a17b`, `minimaxai/minimax-m2.7`, and
+  `deepseek-ai/deepseek-v4-flash` are no longer in the authenticated catalog and were replaced
+  with `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, and `nvidia/nemotron-3-super-120b-a12b`
+  (all proven live, 0.8s-3.5s). Candidate successors `deepseek-ai/deepseek-v4-flash-0731`,
+  `deepseek-ai/deepseek-v4-pro-0813`, and `moonshotai/kimi-k3` were probed but consistently
+  timed out (60-90s across 3 keys) and were not adopted. `moonshotai/kimi-k2.6` is kept per
+  policy despite live probes returning 404 ("Function not found for account") on every
+  non-broken pool key — flagged for owner follow-up, not auto-removed.
+
+### Changed
+
+- Version bump: nimakai/nimaproxy 0.15.6 -> 0.15.7.
+- **Racing/routing pool** (6 models, was 8): `nvidia/nemotron-3-super-120b-a12b`,
+  `openai/gpt-oss-20b`, `openai/gpt-oss-120b` (`fast_models`, lowest probe latency); kept
+  `minimaxai/minimax-m3`, `nvidia/nemotron-3-ultra-550b-a55b`, `moonshotai/kimi-k2.6`
+  (`fallback_models` — all measured unusually slow or unavailable in this probe session).
+
 ## [0.15.6] - 2026-06-15
 
 ### Changed

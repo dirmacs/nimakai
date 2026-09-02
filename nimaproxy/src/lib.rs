@@ -2,6 +2,7 @@ pub mod config;
 pub mod key_pool;
 #[cfg(test)]
 pub mod mock_http;
+pub mod model_refresh;
 pub mod model_router;
 pub mod model_stats;
 pub mod proxy;
@@ -71,6 +72,10 @@ pub struct AppState {
     pub racing_max_total_request_ms: u64,
     pub racing_cursor: Mutex<usize>,
     pub available_models: Mutex<Vec<String>>,
+    /// Model ids pruned from the configured lists at startup (and, in the future, by the
+    /// periodic recheck task) because they were absent from the upstream `/v1/models` catalog.
+    /// Populated by `main.rs` after construction; exposed via `/stats`.
+    pub pruned_models: Mutex<Vec<String>>,
     pub model_params: HashMap<String, ModelParams>,
     pub model_compat: config::ModelCompat,
     pub max_upstream_in_flight: usize,
@@ -368,6 +373,7 @@ impl AppState {
             racing_max_total_request_ms: controls.racing_max_total_request_ms,
             racing_cursor: Mutex::new(0),
             available_models: Mutex::new(available_models),
+            pruned_models: Mutex::new(Vec::new()),
             model_params,
             model_compat,
             max_upstream_in_flight: controls.max_upstream_in_flight.max(1),

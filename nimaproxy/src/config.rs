@@ -163,6 +163,9 @@ pub struct RacingConfig {
     pub large_prompt_parallel: Option<usize>,
     /// Allow racing to degrade to a single model when fewer than two racers are viable.
     pub solo_fallback: Option<bool>,
+    /// Interval in seconds between background upstream `/v1/models` rechecks that mark
+    /// configured-but-vanished models degraded. Default 3600. `0` disables the recheck task.
+    pub model_check_interval_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -304,6 +307,15 @@ impl Config {
             .as_ref()
             .and_then(|r| r.solo_fallback)
             .unwrap_or(true)
+    }
+
+    /// Interval in seconds between periodic upstream model rechecks. Default 3600 (1h).
+    /// `0` disables the periodic recheck task.
+    pub fn racing_model_check_interval_secs(&self) -> u64 {
+        self.racing
+            .as_ref()
+            .and_then(|r| r.model_check_interval_secs)
+            .unwrap_or(3600)
     }
 
     pub fn max_upstream_in_flight(&self) -> usize {
@@ -937,6 +949,48 @@ strategy = "first_token"
         );
         let config = load(file.path().to_str().unwrap()).unwrap();
         assert_eq!(config.racing_strategy(), "first_token");
+    }
+
+    #[test]
+    fn test_racing_model_check_interval_secs_default() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_model_check_interval_secs(), 3600);
+    }
+
+    #[test]
+    fn test_racing_model_check_interval_secs_configured() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+model_check_interval_secs = 900
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_model_check_interval_secs(), 900);
+    }
+
+    #[test]
+    fn test_racing_model_check_interval_secs_can_be_disabled() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "test"
+
+[racing]
+model_check_interval_secs = 0
+"#,
+        );
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(config.racing_model_check_interval_secs(), 0);
     }
 
     #[test]

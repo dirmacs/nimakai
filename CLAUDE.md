@@ -1,6 +1,6 @@
 # Nimakai
 
-NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.6. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
+NVIDIA NIM model latency benchmarker. Single-binary, written in Nim. v0.15.7. 90-model catalog with SWE-bench scores, stability scoring, and oh-my-opencode routing recommendations.
 
 ## Build & Test
 
