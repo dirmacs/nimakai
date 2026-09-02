@@ -1938,3 +1938,135 @@ async fn test_racing_403_does_not_degrade_model_stats() {
     assert_eq!(statuses[0].auth_failures, 1);
     assert_eq!(statuses[1].auth_failures, 1);
 }
+
+// ============================================================================
+// In-stream (HTTP 200 with an embedded upstream error) racing tests
+// ============================================================================
+
+/// (a) Racing, two models: leg A returns HTTP 200 `text/event-stream` with only an
+/// in-stream error frame + `[DONE]`, arriving fast (5ms); leg B returns a valid content
+/// stream, arriving slower (50ms). The in-stream error must lose the race even though it
+/// "completes" first — the client must receive leg B's real content, not a fake 200
+/// wrapping the upstream error.
+#[tokio::test]
+async fn test_racing_in_stream_error_loses_to_valid_content() {
+    use mockito::{Matcher, Server};
+    use std::thread;
+    use std::time::Duration;
+
+    let mut server = Server::new_async().await;
+
+    let error_leg = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({"model": "model-a"})))
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_chunked_body(|w| {
+            thread::sleep(Duration::from_millis(5));
+            std::io::Write::write_all(
+                w,
+                b"data: {\"message\":\"Service temporarily overloaded\",\"type\":\"service_unavailable\",\"code\":5033}\n\ndata: [DONE]\n\n",
+            )
+        })
+        .expect(1)
+        .create();
+
+    let content_leg = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({"model": "model-b"})))
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_chunked_body(|w| {
+            thread::sleep(Duration::from_millis(50));
+            std::io::Write::write_all(
+                w,
+                b"data: {\"id\":\"test\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n",
+            )
+        })
+        .expect(1)
+        .create();
+
+    let state = make_racing_state(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let body_str = String::from_utf8_lossy(&bytes);
+    assert!(
+        body_str.contains("hello") && body_str.contains("choices") && body_str.contains("[DONE]"),
+        "expected the winning leg's real content, got: {body_str}"
+    );
+    assert!(
+        !body_str.contains("Service temporarily overloaded"),
+        "the in-stream error leg must not win the race, got: {body_str}"
+    );
+
+    error_leg.assert();
+    content_leg.assert();
+}
+
+/// (b) Racing where every leg returns an in-stream 503 error frame: the client must get an
+/// error response (503 or 502) whose body includes the upstream message, never a 200.
+#[tokio::test]
+async fn test_racing_all_legs_in_stream_error_returns_error_not_200() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(
+            "data: {\"message\":\"Service temporarily overloaded\",\"type\":\"service_unavailable\",\"code\":503}\n\ndata: [DONE]\n\n",
+        )
+        .expect_at_least(1)
+        .create();
+
+    let state = make_racing_state(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let body_str = String::from_utf8_lossy(&bytes);
+
+    assert_ne!(
+        status,
+        axum::http::StatusCode::OK,
+        "an in-stream error on every leg must not look like a 200 success, body={body_str}"
+    );
+    assert!(
+        status == axum::http::StatusCode::SERVICE_UNAVAILABLE
+            || status == axum::http::StatusCode::BAD_GATEWAY,
+        "expected 503 or 502, got {status}, body={body_str}"
+    );
+    assert!(
+        body_str.contains("Service temporarily overloaded"),
+        "response body must include the upstream message, got: {body_str}"
+    );
+
+    mock.assert();
+}
