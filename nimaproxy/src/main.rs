@@ -1,6 +1,8 @@
 use axum::{http::StatusCode, response::IntoResponse, routing::get, routing::post, Router};
 use nimaproxy::turn_log;
-use nimaproxy::{config, AppState, ModelRouter, ModelStatsStore, RuntimeControls, Strategy};
+use nimaproxy::{
+    config, model_refresh, AppState, ModelRouter, ModelStatsStore, RuntimeControls, Strategy,
+};
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -122,6 +124,30 @@ async fn main() {
 
     let target = cfg.target_url();
 
+    // --- Startup model refresh (fail-open) ---
+    // Fetch the upstream /v1/models catalog with a pool key BEFORE AppState is constructed,
+    // and prune every configured model list (routing, racing, fast, fallback) of ids that are
+    // not present upstream. A fetch failure leaves the configured model lists unchanged and
+    // never blocks startup.
+    let pool_key = cfg.keys[0].key.clone();
+    let upstream_ids = match model_refresh::fetch_upstream_model_ids(&target, &pool_key).await {
+        Ok(ids) => {
+            info!(
+                count = ids.len(),
+                "startup model refresh: fetched upstream /v1/models catalog"
+            );
+            Some(ids)
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "startup model refresh failed; keeping configured model lists unchanged (fail-open)"
+            );
+            None
+        }
+    };
+    let mut pruned_models: Vec<String> = Vec::new();
+
     let (router, model_stats) = match &cfg.routing {
         Some(r) if !r.models.as_ref().map_or(true, |m| m.is_empty()) => {
             let threshold = r.spike_threshold_ms.unwrap_or(3000.0);
@@ -130,19 +156,35 @@ async fn main() {
                 .as_deref()
                 .map(Strategy::from_str)
                 .unwrap_or(Strategy::RoundRobin);
-            let models = r.models.clone().unwrap_or_default();
+            let mut models = r.models.clone().unwrap_or_default();
+            if let Some(ids) = &upstream_ids {
+                models =
+                    model_refresh::prune_and_log(models, ids, "routing.models", &mut pruned_models);
+            }
             let stats = ModelStatsStore::new(threshold);
+            let emptied_by_prune = models.is_empty();
             let router = ModelRouter::new(models, strategy);
+            if emptied_by_prune {
+                warn!("routing pool emptied by upstream model prune; falling back to passthrough routing (same as an empty config)");
+            }
             (Some(router), stats)
         }
         _ => (None, ModelStatsStore::new(3000.0)),
     };
 
-    let racing_models = cfg.racing_models();
+    let mut racing_models = cfg.racing_models();
+    if let Some(ids) = &upstream_ids {
+        let had_enough_racers = racing_models.len() >= 2;
+        racing_models =
+            model_refresh::prune_and_log(racing_models, ids, "racing.models", &mut pruned_models);
+        if had_enough_racers && racing_models.len() < 2 {
+            warn!("racing pool degraded below 2 usable models by upstream prune; falling back to solo/passthrough racing (same as an empty config)");
+        }
+    }
     let racing_max_parallel = cfg.racing_max_parallel();
     let racing_timeout_ms = cfg.racing_timeout_ms();
     let racing_strategy = cfg.racing_strategy();
-    let runtime_controls = RuntimeControls {
+    let mut runtime_controls = RuntimeControls {
         racing_adaptive: cfg.racing_adaptive(),
         racing_min_parallel: cfg.racing_min_parallel(),
         racing_pressure_parallel: cfg.racing_pressure_parallel(),
@@ -159,6 +201,34 @@ async fn main() {
         min_dynamic_timeout_ms: cfg.min_dynamic_timeout_ms(),
         dynamic_sample_floor: cfg.dynamic_sample_floor(),
     };
+    if let Some(ids) = &upstream_ids {
+        runtime_controls.racing_fast_models = model_refresh::prune_and_log(
+            runtime_controls.racing_fast_models,
+            ids,
+            "racing.fast_models",
+            &mut pruned_models,
+        );
+        runtime_controls.racing_fallback_models = model_refresh::prune_and_log(
+            runtime_controls.racing_fallback_models,
+            ids,
+            "racing.fallback_models",
+            &mut pruned_models,
+        );
+    }
+    let model_check_interval_secs = cfg.racing_model_check_interval_secs();
+
+    pruned_models.sort();
+    pruned_models.dedup();
+    if !pruned_models.is_empty() {
+        info!(
+            pruned_count = pruned_models.len(),
+            pruned = ?pruned_models,
+            "startup model refresh: pruned models not present upstream"
+        );
+    } else if upstream_ids.is_some() {
+        info!("startup model refresh: all configured models present upstream");
+    }
+
     let keys = cfg.keys;
     let model_params = cfg.model_params.unwrap_or_default();
     let model_compat = cfg.model_compat.unwrap_or_default();
@@ -179,6 +249,33 @@ async fn main() {
         model_compat,
         runtime_controls,
     );
+
+    if !pruned_models.is_empty() {
+        if let Ok(mut guard) = state.pruned_models.lock() {
+            *guard = pruned_models.clone();
+        }
+    }
+
+    if model_check_interval_secs > 0 {
+        let recheck_state = state.clone();
+        let recheck_target = target.clone();
+        let recheck_key = pool_key.clone();
+        tokio::spawn(async move {
+            model_refresh::run_periodic_recheck(
+                recheck_state,
+                recheck_target,
+                recheck_key,
+                model_check_interval_secs,
+            )
+            .await;
+        });
+        info!(
+            interval_secs = model_check_interval_secs,
+            "periodic model recheck task scheduled"
+        );
+    } else {
+        info!("periodic model recheck task disabled (model_check_interval_secs=0)");
+    }
 
     let app = Router::new()
         .route(

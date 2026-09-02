@@ -1700,6 +1700,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "racing_solo_fallback": state.racing_solo_fallback,
         "racing_fast_models": state.racing_fast_models.clone(),
         "racing_fallback_models": state.racing_fallback_models.clone(),
+        "pruned_models": state.pruned_models.lock().map(|g| g.clone()).unwrap_or_default(),
     });
 
     (

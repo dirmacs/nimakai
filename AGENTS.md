@@ -1,6 +1,6 @@
 # Nimakai — Agent Context
 
-nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.6. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
+nimakai (నిమ్మకాయి, "lemon" in Telugu) is a NIM latency benchmarker written in Nim. Single binary, v0.15.7. Provides real-time stability scoring and routing recommendations for the dirmacs oh-my-opencode setup.
 
 **Also includes:** nimaproxy — Rust key-rotation proxy for production use (in `nimaproxy/` subdirectory). v0.15.6 includes bounded live key-rotation gateway tests, the uptime-oriented NVIDIA pool, request-level racing deadlines, timeout quarantine with half-open recovery probes, split latency/availability degradation buckets, fallback telemetry, dynamic per-key AIMD windows, bounded admission wait, solo racing fallback, large-prompt fanout caps, config-driven turn logging, adaptive racing/gateway limits, racing fallback/429 fixes, direct timeout handling, and the NVIDIA NIM assistant message validation fixes used by OMP/Pawan.
 
