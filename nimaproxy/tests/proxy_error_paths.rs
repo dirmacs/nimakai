@@ -33,6 +33,32 @@ fn make_test_state(api_url: String) -> Arc<AppState> {
     )
 }
 
+/// Create test state with TWO API keys, no racing (for auth-failure retry-with-next-key tests).
+fn make_two_key_test_state(api_url: String) -> Arc<AppState> {
+    let key_entries = vec![
+        KeyEntry {
+            key: "test-key-0".to_string(),
+            label: Some("key-0".to_string()),
+        },
+        KeyEntry {
+            key: "test-key-1".to_string(),
+            label: Some("key-1".to_string()),
+        },
+    ];
+    AppState::new(
+        key_entries,
+        api_url,
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        3,
+        20000,
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+    )
+}
+
 /// Create test state with racing models
 fn make_racing_state(api_url: String) -> Arc<AppState> {
     let key_entries = vec![KeyEntry {
@@ -92,6 +118,7 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
         },
     )
 }
@@ -128,6 +155,7 @@ fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
         },
     )
 }
@@ -179,6 +207,7 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
         },
     )
 }
@@ -1667,4 +1696,245 @@ async fn test_racing_skips_4xx_and_returns_first_2xx() {
         "racing must return 200 when one racer succeeds; got {}",
         status
     );
+}
+
+// ============================================================================
+// Auth-failure (401/403) key quarantine tests
+// ============================================================================
+
+/// Create a racing state with TWO keys and a near-zero admission wait, so a test that
+/// exhausts both keys via auth failures does not have to wait out the default admission
+/// wait window before observing the final response.
+fn make_racing_state_two_keys_fast(api_url: String) -> Arc<AppState> {
+    let key_entries = vec![
+        KeyEntry {
+            key: "key-a".to_string(),
+            label: Some("key-a".to_string()),
+        },
+        KeyEntry {
+            key: "key-b".to_string(),
+            label: Some("key-b".to_string()),
+        },
+    ];
+    AppState::new_with_controls(
+        key_entries,
+        api_url,
+        None,
+        ModelStatsStore::new(100.0),
+        vec!["model-a".to_string(), "model-b".to_string()],
+        2,
+        8000,
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            racing_adaptive: false,
+            racing_min_parallel: 2,
+            racing_pressure_parallel: 6,
+            racing_degraded_parallel: 3,
+            racing_fast_models: vec![],
+            racing_fallback_models: vec![],
+            racing_large_prompt_char_threshold: 0,
+            racing_large_prompt_parallel: 1,
+            racing_solo_fallback: true,
+            racing_max_total_request_ms: 30000,
+            max_upstream_in_flight: 48,
+            max_in_flight_per_key: 3,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 8000,
+            dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
+        },
+    )
+}
+
+/// (a) First key gets 403, second key gets 200 on the non-streaming chat path: the client
+/// must see 200, key 0 must be in cooldown, and its `auth_failures` counter must be 1.
+#[tokio::test]
+async fn test_auth_failure_403_then_200_retries_with_next_key() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    // First call (key 0) -> 403, second call (key 1) -> 200 (mockito serves in creation order).
+    let _mock403 = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(403)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"Forbidden: key revoked","code":"invalid_api_key"}}"#)
+        .create();
+    let _mock200 = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#)
+        .create();
+
+    let state = make_two_key_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+    let statuses = state.pool.status();
+    assert!(
+        !statuses[0].active,
+        "key 0 should be quarantined after the 401/403 auth failure"
+    );
+    assert!(statuses[0].cooldown_secs_remaining > 0);
+    assert_eq!(statuses[0].auth_failures, 1);
+    assert!(statuses[1].active, "key 1 should still be usable");
+    assert_eq!(statuses[1].auth_failures, 0);
+}
+
+/// (b) Same as (a) but for a `"stream": true` request — the auth-failure status check runs
+/// before the body is converted to a stream, so the retry-with-next-key behavior is identical.
+#[tokio::test]
+async fn test_auth_failure_403_then_200_retries_with_next_key_streaming() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let _mock403 = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(403)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"Forbidden: key revoked","code":"invalid_api_key"}}"#)
+        .create();
+    let sse_data = "data: {\"id\":\"test\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+    let _mock200 = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse_data)
+        .create();
+
+    let state = make_two_key_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+    let statuses = state.pool.status();
+    assert!(
+        !statuses[0].active,
+        "key 0 should be quarantined after the 401/403 auth failure"
+    );
+    assert_eq!(statuses[0].auth_failures, 1);
+    assert!(statuses[1].active, "key 1 should still be usable");
+    assert_eq!(statuses[1].auth_failures, 0);
+}
+
+/// (c) Every key returns 403: the client must see 403 with the exact upstream error body,
+/// not the generic "all keys exhausted" 429 fallback used for rate-limit exhaustion.
+#[tokio::test]
+async fn test_auth_failure_403_all_keys_returns_upstream_body_unchanged() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let error_body = serde_json::json!({"error": {"message": "Forbidden: key revoked", "code": "invalid_api_key"}});
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(403)
+        .with_header("content-type", "application/json")
+        .with_body(error_body.to_string())
+        .expect(2)
+        .create();
+
+    let state = make_two_key_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    mock.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+
+    let resp_body = to_bytes(resp.into_body(), 65_536).await.unwrap();
+    let resp_json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    assert_eq!(
+        resp_json, error_body,
+        "client must receive the exact upstream 403 body unchanged"
+    );
+
+    let statuses = state.pool.status();
+    assert!(!statuses[0].active);
+    assert!(!statuses[1].active);
+    assert_eq!(statuses[0].auth_failures, 1);
+    assert_eq!(statuses[1].auth_failures, 1);
+}
+
+/// (d) A 403 on a racing leg must be treated as a key failure only: it must NOT be recorded
+/// against the model in `ModelStatsStore` (no degradation/timeout-quarantine footprint).
+#[tokio::test]
+async fn test_racing_403_does_not_degrade_model_stats() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(403)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"Forbidden: key revoked","code":"invalid_api_key"}}"#)
+        .expect(2)
+        .create();
+
+    let state = make_racing_state_two_keys_fast(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let _resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    mock.assert();
+
+    let snapshots = state.model_stats.snapshot();
+    assert!(
+        !snapshots
+            .iter()
+            .any(|s| s.id == "model-a" || s.id == "model-b"),
+        "a 401/403 racing leg must not record any model_stats entry for the model: {:?}",
+        snapshots.iter().map(|s| &s.id).collect::<Vec<_>>()
+    );
+
+    // Both keys took the 403 and must be quarantined/counted as key failures.
+    let statuses = state.pool.status();
+    assert_eq!(statuses[0].auth_failures, 1);
+    assert_eq!(statuses[1].auth_failures, 1);
 }
