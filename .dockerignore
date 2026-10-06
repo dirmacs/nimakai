@@ -1,0 +1,12 @@
+target/
+**/target/
+.git/
+.omp/
+*.swp
+.DS_Store
+.env
+.env.*
+nimaproxy.toml
+nimaproxy_racing.toml
+nimaproxy.toml.test
+node_modules/
