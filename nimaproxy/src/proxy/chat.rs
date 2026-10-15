@@ -126,53 +126,6 @@ pub(crate) fn apply_model_params(json: &mut Value, params: &crate::config::Model
         }
     }
 }
-/// Wrap a response body stream so that a gap longer than `window` between
-/// chunks fails the stream instead of hanging the connection.
-///
-/// The whole-body timeout this replaces would have waited for the LAST byte
-/// before failing, so a generation that streamed 262 chunks in 7.9 s was
-/// reported as a timeout simply because its total duration exceeded the
-/// window. Bounding the *inter-chunk* gap keeps the original protection — a
-/// stalled upstream still fails, and still within one window of the stall —
-/// while letting a long but healthy generation finish.
-///
-/// On timeout the stream yields an `io::Error`, which axum turns into an
-/// aborted response. That is the honest outcome: bytes have already been sent
-/// to the client, so there is no status code left to correct it, and faking a
-/// clean end would tell the caller the generation completed.
-fn stream_with_idle_timeout<S>(
-    stream: S,
-    window: Duration,
-) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>>
-where
-    S: futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
-{
-    async_stream::stream! {
-        futures::pin_mut!(stream);
-        loop {
-            match timeout(window, stream.next()).await {
-                // A chunk arrived within the window: forward it.
-                Ok(Some(Ok(chunk))) => yield Ok(chunk),
-                // The upstream itself errored: forward that, then stop.
-                Ok(Some(Err(e))) => {
-                    yield Err(e);
-                    break;
-                }
-                // The upstream closed cleanly after its last chunk.
-                Ok(None) => break,
-                // No chunk within the window: the upstream stalled mid-stream.
-                Err(_) => {
-                    yield Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "upstream stalled mid-stream",
-                    ));
-                    break;
-                }
-            }
-        }
-    }
-}
-
 /// POST /v1/chat/completions
 ///
 /// V1: injects key, retries on 429, streams SSE byte-for-byte.
@@ -638,7 +591,9 @@ pub async fn chat_completions(
                 let with_first = futures::stream::once(async move { Ok(first) }).chain(mapped);
 
                 let body = if is_stream {
-                    Body::from_stream(stream_with_idle_timeout(with_first, window))
+                    Body::from_stream(crate::proxy::streaming::with_idle_timeout(
+                        with_first, window,
+                    ))
                 } else {
                     // Assemble the body. A timeout here means the upstream went
                     // quiet mid-body, which is retryable because the caller has
