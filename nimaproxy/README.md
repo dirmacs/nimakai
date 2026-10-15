@@ -36,6 +36,21 @@
 - Graceful error handling and retry logic
 - Comprehensive metrics and health checks
 
+## Service Identity
+
+| Field | Value |
+| --- | --- |
+| Name | `nimaproxy` |
+| Version | `0.15.7` |
+| Type | Rust / axum HTTP reverse proxy (OpenAI-compatible) |
+| Default listen | `127.0.0.1:8080` (configurable via `--port <N>` or `listen = "…"` in config) |
+| State | Stateless; optional turn log at `[logging].path` (default `/var/log/nimaproxy/turns.jsonl`) |
+| PID file | `/tmp/nimaproxy.pid` (override: `--pid-file` / `NIMAPROXY_PID_FILE`) |
+| Health | `GET /health` (200 = live; key-pool status) |
+| Metrics | `GET /stats` |
+| Docker image | `dirmacs/nimaproxy:phase2` |
+| Docker entry | `nimaproxy --config /etc/nimaproxy.toml` |
+
 ## Quick Start
 
 ### Installation

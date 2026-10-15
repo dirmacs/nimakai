@@ -144,9 +144,6 @@ pub struct TurnLogger {
     /// which also swaps in a fresh file, so the two can never disagree.
     bytes_since_rotate: Mutex<u64>,
     rotate_at_bytes: u64,
-    /// Logged once, the first time a rotation succeeds, so an operator can
-    /// see that rotation is live rather than inferring it from filenames.
-    rotated_once: std::sync::atomic::AtomicBool,
 }
 
 impl TurnLogger {
@@ -172,7 +169,6 @@ impl TurnLogger {
             enabled,
             bytes_since_rotate: Mutex::new(0),
             rotate_at_bytes,
-            rotated_once: std::sync::atomic::AtomicBool::new(false),
         };
 
         if enabled {
