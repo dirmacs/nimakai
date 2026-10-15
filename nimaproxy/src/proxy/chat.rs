@@ -1,0 +1,591 @@
+use crate::proxy::admission::acquire_gateway_permits;
+use crate::proxy::http::log_turn_request;
+use crate::proxy::messages::{
+    extract_response_metrics, mistral_validation_error, normalize_requested_model, resolve_model,
+    validate_model_exists,
+};
+use crate::proxy::racing::race_models;
+use crate::proxy::retry::{RetryDecision, RetryPolicy};
+use crate::proxy::timeouts::{record_model_timeout, request_turn_summary, timeout_for_model};
+use crate::AppState;
+use axum::{
+    body::Body,
+    extract::State,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+};
+use bytes::Bytes;
+use futures::TryStreamExt;
+use serde_json::Value;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::time::timeout;
+use tracing::warn;
+pub(crate) const MAX_RETRIES: usize = 8;
+pub(crate) fn count_repetitions(text: &str) -> u32 {
+    let text_lower = text.to_lowercase();
+    let words: Vec<&str> = text_lower.split_whitespace().collect();
+    if words.len() < 4 {
+        return 0;
+    }
+    let mut repetitions = 0u32;
+    for window_size in 3..=6 {
+        if words.len() < window_size * 2 {
+            continue;
+        }
+        for i in 0..words.len() - window_size {
+            let slice = &words[i..i + window_size];
+            let pattern = slice.join(" ");
+            let mut count = 1;
+            for j in (i + window_size..)
+                .step_by(window_size)
+                .take_while(|&j| j + window_size <= words.len())
+            {
+                let next_slice = &words[j..j + window_size];
+                if next_slice.join(" ") == pattern {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            if count > 1 {
+                repetitions += count - 1;
+            }
+        }
+    }
+    repetitions.min(10)
+}
+pub(crate) fn accept_header_for_json(json: &Value) -> &'static str {
+    if json.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+        "text/event-stream"
+    } else {
+        "application/json"
+    }
+}
+pub(crate) fn accept_header_for_body(body: &Bytes) -> &'static str {
+    serde_json::from_slice::<Value>(body)
+        .map(|json| accept_header_for_json(&json))
+        .unwrap_or("application/json")
+}
+pub(crate) fn apply_model_params(json: &mut Value, params: &crate::config::ModelParams) {
+    if let Some(temp) = params.temperature {
+        json["temperature"] = Value::from(temp);
+    }
+    if let Some(tp) = params.top_p {
+        json["top_p"] = Value::from(tp);
+    }
+    if let Some(tk) = params.top_k {
+        json["top_k"] = Value::from(tk);
+    }
+    if let Some(fp) = params.frequency_penalty {
+        json["frequency_penalty"] = Value::from(fp);
+    }
+    if let Some(pp) = params.presence_penalty {
+        json["presence_penalty"] = Value::from(pp);
+    }
+    if let Some(rp) = params.repetition_penalty {
+        json["repetition_penalty"] = Value::from(rp);
+    }
+    if let Some(min_p) = params.min_p {
+        json["min_p"] = Value::from(min_p);
+    }
+    if let Some(max_tokens) = params.max_tokens {
+        json["max_tokens"] = Value::from(max_tokens);
+    }
+    if let Some(reasoning_budget) = params.reasoning_budget {
+        json["reasoning_budget"] = Value::from(reasoning_budget);
+    }
+    if let Some(reasoning_effort) = &params.reasoning_effort {
+        json["reasoning_effort"] = Value::String(reasoning_effort.clone());
+    }
+    if let Some(seed) = params.seed {
+        json["seed"] = Value::from(seed);
+    }
+    // Treat stream as a client response-mode choice, not as a model
+    // hyperparameter. Callers that explicitly request streaming or
+    // non-streaming keep control, and omitted stream must remain JSON-compatible.
+    if let Some(stream) = params.stream {
+        if json.get("stream").is_some_and(|v| !v.is_null()) {
+            // Preserve the caller's explicit response mode.
+        } else if !stream {
+            json["stream"] = Value::Bool(stream);
+        }
+    }
+    if let Some(ctk) = &params.chat_template_kwargs {
+        if let Some(obj) = json.as_object_mut() {
+            let entry = obj
+                .entry("chat_template_kwargs".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !entry.is_object() {
+                *entry = Value::Object(serde_json::Map::new());
+            }
+            if let Some(kwargs) = entry.as_object_mut() {
+                for (k, v) in ctk {
+                    kwargs.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+}
+/// POST /v1/chat/completions
+///
+/// V1: injects key, retries on 429, streams SSE byte-for-byte.
+/// V2: resolves `"model": "auto"` via router, records TTFC to model_stats.
+/// V3: racing — fires N parallel requests to N models, returns first response.
+pub async fn chat_completions(
+    State(state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let original_body = body.clone();
+    // Extract original model BEFORE resolve_model modifies it
+    let original_model = {
+        if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+            v.get("model")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        }
+    };
+    if let Err(msg) = validate_model_exists(&original_model, &state) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    let routing_model = normalize_requested_model(&original_model).to_string();
+    // Racing owns per-model body rewriting. Passing the original auto request
+    // avoids leaking router-picked model params into race candidates that do
+    // not define the same fields.
+    if routing_model == "auto" && !state.racing_models.is_empty() && state.racing_models.len() >= 2
+    {
+        state.gateway_metrics.record_request(true);
+        let racing_models = state.racing_models.clone();
+        return race_models(state, original_body, &racing_models).await;
+    }
+    state.gateway_metrics.record_request(false);
+    let (mut model_id, mut body) = resolve_model(body, &state);
+    // Validate tool call IDs for Mistral models
+    if let Some(response) = mistral_validation_error(&model_id, &body) {
+        return response;
+    }
+    let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&body);
+    let n = state.pool.len().min(MAX_RETRIES).max(1);
+    let mut last_auth_failure_response: Option<Response> = None;
+    // Total wall-clock budget for this request's upstream attempts.
+    //
+    // Sized to admit exactly one retry: one window for the first attempt, one
+    // for the retry, plus the admission wait that elapses before the first
+    // permit, plus scheduling slack.
+    //
+    // The admission allowance is load-bearing and was measured, not assumed:
+    // `elapsed` is measured from the start of the REQUEST, which includes
+    // waiting for a permit (up to `admission_wait_ms`, 5000 ms in production).
+    // Observed on the live host, a single attempt measured 16546 ms against a
+    // 15000 ms window, so a bare 2x budget (30500 ms) rejected the retry
+    // because 16546 + 15000 > 30500.
+    let retry_policy = RetryPolicy::new(
+        n,
+        timeout_for_model(&state, &model_id),
+        state.admission_wait_ms,
+    );
+    let started = Instant::now();
+    for attempt in 0..n {
+        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
+            Ok(permits) => permits,
+            Err(response) => return response,
+        };
+        let _upstream_permit = upstream_permit;
+        let idx = key_lease.idx;
+        let key_label = key_lease.label.clone();
+        let t0 = Instant::now();
+        let request_timeout_ms = timeout_for_model(&state, &model_id);
+        let result = timeout(
+            std::time::Duration::from_millis(request_timeout_ms),
+            state
+                .client
+                .post(format!("{}/v1/chat/completions", state.target))
+                .header("Authorization", format!("Bearer {}", key_lease.key))
+                .header("Content-Type", "application/json")
+                .header("Accept", accept_header_for_body(&body))
+                .body(body.clone())
+                .send(),
+        )
+        .await;
+        match result {
+            Err(_) => {
+                state.gateway_metrics.record_timeout();
+                record_model_timeout(&state, &model_id, key_label.as_deref(), request_timeout_ms);
+                // Retry once on a different key while budget and attempts
+                // remain. A timeout here is the request being slow on one
+                // key, not the request being wrong; measured on this host,
+                // 504s hit every key roughly evenly, so a different
+                // key is plausibly able to finish the same prompt. Before
+                // this retried, ~32% of admitted requests returned a 504
+                // that no later attempt could recover.
+                //
+                // Binding conditions before retrying:
+                //   - attempts remain, so the loop stays bounded
+                //   - one more attempt fits inside the total budget, so
+                //     the client is never asked to wait materially longer
+                //     than a single timeout window
+                //   - no response bytes were sent to the client yet; this
+                //     branch runs before the body becomes a stream, so a
+                //     retried request cannot double-send to the caller
+                // The final attempt (or an exhausted budget) falls through
+                // to the original 504, so failure paths are unchanged.
+                let window = Duration::from_millis(request_timeout_ms);
+                if retry_policy.decide(started, attempt) == RetryDecision::Retry {
+                    state.pool.note_upstream_stall(idx);
+                    log_turn_request(
+                        &original_model,
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        false,
+                        Some(format!(
+                            "upstream timeout after {}ms; retrying on another key",
+                            request_timeout_ms
+                        )),
+                    );
+                    continue;
+                }
+                log_turn_request(
+                    &original_model,
+                    &model_id,
+                    request_timeout_ms as u128,
+                    false,
+                    StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                    message_count,
+                    has_tool_calls,
+                    tool_call_count,
+                    key_label.as_deref(),
+                    false,
+                    Some(format!("upstream timeout after {}ms", request_timeout_ms)),
+                );
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!("upstream timeout after {}ms", request_timeout_ms),
+                )
+                    .into_response();
+            }
+            Ok(Err(e)) => {
+                if let Some(label) = key_label.as_ref() {
+                    state.model_stats.record_with_key(
+                        &model_id,
+                        label,
+                        t0.elapsed().as_millis() as f64,
+                        false,
+                    );
+                } else {
+                    state
+                        .model_stats
+                        .record(&model_id, t0.elapsed().as_millis() as f64, false);
+                }
+                log_turn_request(
+                    &original_model,
+                    &model_id,
+                    t0.elapsed().as_millis(),
+                    false,
+                    StatusCode::BAD_GATEWAY.as_u16(),
+                    message_count,
+                    has_tool_calls,
+                    tool_call_count,
+                    key_label.as_deref(),
+                    false,
+                    Some(e.to_string()),
+                );
+                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+            Ok(Ok(resp)) => {
+                let status = resp.status();
+                if status == 429 {
+                    state.gateway_metrics.record_rate_limit();
+                    let retry_after = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(60);
+                    state.pool.mark_rate_limited(idx, retry_after);
+                    eprintln!("[nimaproxy] key {} rate-limited {}s", idx, retry_after);
+                    continue;
+                }
+                // Auth failure: this key itself is bad (revoked/invalid), not the request.
+                // Quarantine the key and retry with the next available key. Checked BEFORE
+                // the body is converted to a stream so a streaming response never starts
+                // sending bytes to the client on a key we're about to discard.
+                if status == 401 || status == 403 {
+                    state.pool.mark_auth_failed(
+                        idx,
+                        Duration::from_secs(state.auth_failure_cooldown_secs),
+                    );
+                    warn!(
+                        key_idx = idx,
+                        key_label = key_label.as_deref().unwrap_or("unknown"),
+                        status = status.as_u16(),
+                        cooldown_secs = state.auth_failure_cooldown_secs,
+                        "auth failure (401/403) on leased key; quarantining and retrying with next key"
+                    );
+                    let auth_resp_status =
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::FORBIDDEN);
+                    let auth_content_type = resp
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("application/json")
+                        .to_string();
+                    let auth_failure_body = resp.bytes().await.unwrap_or_default();
+                    let mut auth_response = Response::new(Body::from(auth_failure_body));
+                    *auth_response.status_mut() = auth_resp_status;
+                    auth_response.headers_mut().insert(
+                        "content-type",
+                        HeaderValue::from_str(&auth_content_type)
+                            .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                    );
+                    last_auth_failure_response = Some(auth_response);
+                    // A quarantined key IS a turn outcome: without this record the
+                    // auth-failure path was the only failure mode with no line in
+                    // turns.jsonl, so "check the logs" could not see it at all.
+                    log_turn_request(
+                        &original_model,
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        status.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        false,
+                        Some(format!(
+                            "upstream auth failure ({}); key quarantined",
+                            status.as_u16()
+                        )),
+                    );
+                    continue;
+                }
+                // Record TTFC (response headers received = first bytes available)
+                let ttfc_ms = t0.elapsed().as_millis() as f64;
+                let ok = status.is_success();
+                if ok {
+                    state.pool.record_success(idx);
+                }
+                // Forward response — stream bytes directly (works for JSON + SSE)
+                let resp_status = axum::http::StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/json")
+                    .to_string();
+                let stream = resp
+                    .bytes_stream()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                let collected = match timeout(
+                    std::time::Duration::from_millis(request_timeout_ms),
+                    stream.try_collect::<Vec<Bytes>>(),
+                )
+                .await
+                {
+                    Ok(Ok(c)) => c,
+                    Ok(Err(e)) => {
+                        return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                    }
+                    Err(_) => {
+                        state.gateway_metrics.record_timeout();
+                        record_model_timeout(
+                            &state,
+                            &model_id,
+                            key_label.as_deref(),
+                            request_timeout_ms,
+                        );
+                        // Retry once on a different key, on the same bounded
+                        // budget as the send-timeout branch below. This is the
+                        // path that actually fires in production for
+                        // long-context requests: the connection is established
+                        // and headers arrive, but the body stalls, so
+                        // `send()` has already succeeded and the outer
+                        // Err(_) branch never runs. Measured on this host,
+                        // every 504 took this branch at exactly the timeout
+                        // floor, so ~32% of admitted requests returned 504 with
+                        // no second attempt.
+                        //
+                        // Binding: attempts remain, one more window fits in the
+                        // budget measured from the start of the request, and no
+                        // response bytes have been sent to the client yet
+                        // (`collected` is discarded and `<collected>` is
+                        // dropped before this point).
+                        let window = Duration::from_millis(request_timeout_ms);
+                        if retry_policy.decide(started, attempt) == RetryDecision::Retry {
+                            state.pool.note_upstream_stall(idx);
+                            log_turn_request(
+                                &original_model,
+                                &model_id,
+                                t0.elapsed().as_millis(),
+                                false,
+                                StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                                message_count,
+                                has_tool_calls,
+                                tool_call_count,
+                                key_label.as_deref(),
+                                false,
+                                Some(format!(
+                                    "upstream body timeout after {}ms; retrying on another key",
+                                    request_timeout_ms
+                                )),
+                            );
+                            continue;
+                        }
+                        log_turn_request(
+                            &original_model,
+                            &model_id,
+                            request_timeout_ms as u128,
+                            false,
+                            StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                            message_count,
+                            has_tool_calls,
+                            tool_call_count,
+                            key_label.as_deref(),
+                            false,
+                            Some(format!(
+                                "upstream body timeout after {}ms",
+                                request_timeout_ms
+                            )),
+                        );
+                        return (
+                            StatusCode::GATEWAY_TIMEOUT,
+                            format!("upstream body timeout after {}ms", request_timeout_ms),
+                        )
+                            .into_response();
+                    }
+                };
+                let full_body = collected.concat();
+                // Check for server-side degradation from NVIDIA API
+                // NVIDIA returns: {"status":400,"title":"Bad Request","detail":"Function id '...': DEGRADED function cannot be invoked"}
+                let body_str = std::str::from_utf8(&full_body).unwrap_or("");
+                let error_excerpt = body_str.chars().take(400).collect::<String>();
+                if status == 400 && (body_str.contains("DEGRADED") || body_str.contains("degraded"))
+                {
+                    eprintln!("[nimaproxy] SERVER-DEGRADED: model '{}' returned DEGRADED error from NVIDIA (server-side block)", model_id);
+                    // Record as server-side degraded - this immediately marks the model as unavailable
+                    state.model_stats.record_server_degraded(&model_id);
+                    if routing_model == "auto" {
+                        let (next_model_id, next_body) =
+                            resolve_model(original_body.clone(), &state);
+                        model_id = next_model_id;
+                        body = next_body;
+                        if let Some(response) = mistral_validation_error(&model_id, &body) {
+                            return response;
+                        }
+                    }
+                    // Continue retry with the next key and, for auto routing, a freshly resolved model.
+                    continue;
+                }
+                if status == 400
+                    && (body_str.contains("Invalid assistant message")
+                        || body_str.contains("invalid assistant"))
+                {
+                    eprintln!("[nimaproxy] INVALID-ASSISTANT: model '{}' rejected message structure (400): {} — retrying with next key", model_id, &body_str[..body_str.len().min(200)]);
+                    state.model_stats.record_hard_error(&model_id, body_str);
+                    log_turn_request(
+                        &original_model,
+                        &model_id,
+                        ttfc_ms as u128,
+                        false,
+                        status.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        false,
+                        Some(error_excerpt.clone()),
+                    );
+                    continue;
+                }
+                let (output_tokens, repetition_count, had_tool_call) =
+                    extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
+                if output_tokens > 0 || repetition_count > 0 {
+                    if key_label.is_some() {
+                        state.model_stats.record_with_circuit_breaker(
+                            &model_id,
+                            ttfc_ms,
+                            ok,
+                            output_tokens,
+                            repetition_count,
+                            had_tool_call,
+                        );
+                    } else {
+                        state.model_stats.record_with_circuit_breaker(
+                            &model_id,
+                            ttfc_ms,
+                            ok,
+                            output_tokens,
+                            repetition_count,
+                            had_tool_call,
+                        );
+                    }
+                } else {
+                    if let Some(label) = key_label.as_ref() {
+                        state
+                            .model_stats
+                            .record_with_key(&model_id, label, ttfc_ms, ok);
+                    } else {
+                        state.model_stats.record(&model_id, ttfc_ms, ok);
+                    }
+                }
+                let body = Body::from(full_body);
+                let mut response = Response::new(body);
+                *response.status_mut() = resp_status;
+                response.headers_mut().insert(
+                    "content-type",
+                    HeaderValue::from_str(&content_type)
+                        .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+                );
+                // Track which key was used for rotation debugging
+                if let Some(label) = key_label.as_ref() {
+                    response.headers_mut().insert(
+                        "x-key-label",
+                        HeaderValue::from_str(label)
+                            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                    );
+                }
+                if content_type.contains("event-stream") {
+                    response
+                        .headers_mut()
+                        .insert("cache-control", HeaderValue::from_static("no-cache"));
+                    response
+                        .headers_mut()
+                        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+                }
+                log_turn_request(
+                    &original_model,
+                    &model_id,
+                    ttfc_ms as u128,
+                    ok,
+                    status.as_u16(),
+                    message_count,
+                    has_tool_calls,
+                    tool_call_count,
+                    key_label.as_deref(),
+                    false,
+                    if ok { None } else { Some(error_excerpt) },
+                );
+                return response;
+            }
+        }
+    }
+    if let Some(response) = last_auth_failure_response {
+        return response;
+    }
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        "all keys exhausted after retries",
+    )
+        .into_response()
+}

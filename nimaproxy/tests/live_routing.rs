@@ -23,6 +23,7 @@ fn make_live_state_with_routing(models: Vec<String>, _strategy: &str) -> Option<
     let key_entries = vec![KeyEntry {
         key: api_key,
         label: Some("live-routing-test".to_string()),
+        disabled: false,
     }];
 
     Some(AppState::new(
@@ -53,7 +54,7 @@ async fn send_chat_request(state: &Arc<AppState>, model: &str) -> u16 {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),

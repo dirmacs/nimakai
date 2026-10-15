@@ -9,19 +9,20 @@ pub mod proxy;
 pub mod test_utils;
 pub mod turn_log;
 
-pub use proxy::validate_model_exists;
+pub use proxy::messages::validate_model_exists;
 
 pub use config::{load as config_load, Config, KeyEntry, ModelParams, RoutingConfig};
 pub use key_pool::{KeyAcquireError, KeyLease, KeyPool};
 pub use model_router::{ModelRouter, Strategy};
 pub use model_stats::{ModelSnapshot, ModelStatsStore, ModelStatus, RecordOutcome};
-pub use proxy::{completions, embeddings, props};
+pub use proxy::http::{completions, embeddings, props};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 fn push_unique_model(models: &mut Vec<String>, model: &str) {
@@ -406,6 +407,15 @@ impl AppState {
 
     pub fn racing_enabled(&self) -> bool {
         self.racing_models.len() >= 2 && self.racing_max_parallel >= 2
+    }
+
+    /// How long a request can wait for a permit before admission gives up.
+    ///
+    /// Used to size the timeout-retry budget: `started` in the request
+    /// handlers measures from the start of the REQUEST, so this wait counts
+    /// against the budget just like the attempt windows do.
+    pub fn admission_wait_duration(&self) -> Duration {
+        Duration::from_millis(self.admission_wait_ms)
     }
 
     pub fn try_acquire_upstream(&self) -> Option<UpstreamPermit> {
@@ -1012,6 +1022,7 @@ label = "test"
         let keys = vec![KeyEntry {
             key: NVIDIA_API_KEY.to_string(),
             label: Some("test-key".to_string()),
+            disabled: false,
         }];
         let model_params = HashMap::new();
         let model_compat = config::ModelCompat::default();

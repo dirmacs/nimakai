@@ -23,6 +23,7 @@ fn make_live_state() -> Option<Arc<AppState>> {
     let key_entries = vec![KeyEntry {
         key: api_key,
         label: Some("live-streaming".to_string()),
+        disabled: false,
     }];
 
     Some(AppState::new(
@@ -69,7 +70,7 @@ async fn test_live_streaming_chunked_response() {
         "stream": true
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -180,7 +181,7 @@ async fn test_live_streaming_early_termination() {
 
     let start_time = std::time::Instant::now();
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),

@@ -23,6 +23,7 @@ fn make_live_state_with_circuit_breaker() -> Option<Arc<AppState>> {
     let key_entries = vec![KeyEntry {
         key: api_key,
         label: Some("live-circuit-breaker".to_string()),
+        disabled: false,
     }];
 
     // Configure circuit breaker with low thresholds for testing
@@ -62,7 +63,7 @@ async fn send_chat_request(state: &Arc<AppState>, model: &str, content: &str) ->
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -111,7 +112,7 @@ async fn test_live_circuit_breaker_degradation() {
     }
 
     // Check model stats
-    let stats_response = nimaproxy::proxy::stats(axum::extract::State(state.clone())).await;
+    let stats_response = nimaproxy::proxy::http::stats(axum::extract::State(state.clone())).await;
     let response = stats_response.into_response();
     let (_parts, body) = response.into_parts();
     let body_bytes = axum::body::to_bytes(body, 65536).await.unwrap();
@@ -197,7 +198,7 @@ async fn test_live_circuit_breaker_recovery() {
     }
 
     // Check stats after recovery attempts
-    let stats_response = nimaproxy::proxy::stats(axum::extract::State(state.clone())).await;
+    let stats_response = nimaproxy::proxy::http::stats(axum::extract::State(state.clone())).await;
     let response = stats_response.into_response();
     let (_parts, body) = response.into_parts();
     let body_bytes = axum::body::to_bytes(body, 65536).await.unwrap();

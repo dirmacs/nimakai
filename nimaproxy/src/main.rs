@@ -75,7 +75,7 @@ async fn main() {
 
     // Load config to determine actual port
     let config_path = config_path.unwrap_or_else(|| "nimaproxy.toml".to_string());
-    let cfg = match config::load(&config_path) {
+    let mut cfg = match config::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -87,6 +87,29 @@ async fn main() {
         eprintln!("error: no keys defined in config — add at least one [[keys]] entry");
         std::process::exit(1);
     }
+
+    // Parked keys (`disabled = true`) stay in the config for reference but must
+    // never enter the lease pool. Before Config::partition_keys they did: serde
+    // ignored the unknown `disabled` field, so a parked key was leased and its
+    // 403 was only discovered at request time, quarantining it after the failed
+    // call.
+    let (leasable, parked) = cfg.partition_keys();
+    if !parked.is_empty() {
+        let labels: Vec<&str> = parked
+            .iter()
+            .filter_map(|k| k.label.as_deref())
+            .collect();
+        eprintln!(
+            "[nimaproxy main] parking {} disabled key(s): {}",
+            parked.len(),
+            labels.join(", ")
+        );
+    }
+    if leasable.is_empty() {
+        eprintln!("error: every configured key is disabled (disabled = true) — no keys available to lease");
+        std::process::exit(1);
+    }
+    cfg.keys.retain(|k| !k.disabled);
 
     if cfg.logging_enabled() {
         let log_path = cfg.logging_path();
@@ -281,16 +304,16 @@ async fn main() {
     let app = Router::new()
         .route(
             "/v1/chat/completions",
-            post(nimaproxy::proxy::chat_completions),
+            post(nimaproxy::proxy::chat::chat_completions),
         )
-        .route("/test-post", post(nimaproxy::proxy::chat_completions))
-        .route("/v1/models", get(nimaproxy::proxy::models))
-        .route("/models", get(nimaproxy::proxy::models)) // alias: OMP polls /models without /v1/ prefix
-        .route("/health", get(nimaproxy::proxy::health))
-        .route("/stats", get(nimaproxy::proxy::stats))
-        .route("/v1/completions", post(nimaproxy::proxy::completions))
-        .route("/v1/embeddings", post(nimaproxy::proxy::embeddings))
-        .route("/props", get(nimaproxy::proxy::props))
+        .route("/test-post", post(nimaproxy::proxy::chat::chat_completions))
+        .route("/v1/models", get(nimaproxy::proxy::http::models))
+        .route("/models", get(nimaproxy::proxy::http::models)) // alias: OMP polls /models without /v1/ prefix
+        .route("/health", get(nimaproxy::proxy::http::health))
+        .route("/stats", get(nimaproxy::proxy::http::stats))
+        .route("/v1/completions", post(nimaproxy::proxy::http::completions))
+        .route("/v1/embeddings", post(nimaproxy::proxy::http::embeddings))
+        .route("/props", get(nimaproxy::proxy::http::props))
         .fallback(fallback_handler)
         .with_state(state.clone());
 

@@ -63,6 +63,7 @@ impl MockAppStateBuilder {
             keys: vec![KeyEntry {
                 key: "test-key-1".to_string(),
                 label: Some("test-key".to_string()),
+                disabled: false,
             }],
             target: "http://127.0.0.1:8080".to_string(),
             racing_models: Vec::new(),
@@ -91,6 +92,7 @@ impl MockAppStateBuilder {
             .map(|n| KeyEntry {
                 key: format!("test-key-{}", n),
                 label: Some(format!("test-key-{}", n)),
+                disabled: false,
             })
             .collect();
         self

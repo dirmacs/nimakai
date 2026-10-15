@@ -8,7 +8,7 @@ use bytes::Bytes;
 use nimaproxy::config::{KeyEntry, ModelCompat, ModelParams};
 use nimaproxy::model_router::{ModelRouter, Strategy};
 use nimaproxy::model_stats::ModelStatsStore;
-use nimaproxy::proxy::chat_completions;
+use nimaproxy::proxy::chat::chat_completions;
 use nimaproxy::{AppState, RuntimeControls};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ fn make_test_state(api_url: String) -> Arc<AppState> {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
     AppState::new(
         key_entries,
@@ -39,10 +40,12 @@ fn make_two_key_test_state(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "test-key-0".to_string(),
             label: Some("key-0".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-1".to_string(),
             label: Some("key-1".to_string()),
+            disabled: false,
         },
     ];
     AppState::new(
@@ -64,6 +67,7 @@ fn make_racing_state(api_url: String) -> Arc<AppState> {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
     AppState::new(
         key_entries,
@@ -85,10 +89,12 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "test-key-a".to_string(),
             label: Some("key-a".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-b".to_string(),
             label: Some("key-b".to_string()),
+            disabled: false,
         },
     ];
     AppState::new_with_controls(
@@ -127,6 +133,7 @@ fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
     let key_entries = vec![KeyEntry {
         key: "test-key-a".to_string(),
         label: Some("key-a".to_string()),
+        disabled: false,
     }];
     AppState::new_with_controls(
         key_entries,
@@ -166,14 +173,17 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "test-key-a".to_string(),
             label: Some("key-a".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-b".to_string(),
             label: Some("key-b".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-c".to_string(),
             label: Some("key-c".to_string()),
+            disabled: false,
         },
     ];
     AppState::new_with_controls(
@@ -713,6 +723,7 @@ async fn test_proxy_with_model_params() {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
 
     let mut model_params = HashMap::new();
@@ -782,6 +793,7 @@ async fn test_proxy_model_params_do_not_enable_stream_when_omitted() {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
 
     let mut model_params = HashMap::new();
@@ -838,6 +850,7 @@ async fn test_direct_chat_request_uses_configured_timeout() {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
     let state = AppState::new(
         key_entries,
@@ -880,6 +893,228 @@ async fn test_direct_chat_request_uses_configured_timeout() {
     assert_eq!(slow.total, 1);
 }
 
+/// A timed-out upstream call must be retried on another key, and the total
+/// client wait must stay bounded to roughly one timeout window rather than
+/// one window per key.
+///
+/// Before this retried, every timeout became an immediate 504: ~32% of
+/// admitted requests on the live host returned 504 with no second attempt.
+#[tokio::test]
+async fn test_timeout_retries_on_another_key_within_budget() {
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+
+    // Two listeners: the one the first key hits accepts and never answers;
+    // the second key hits a server that answers immediately. Only the first
+    // key is pointed at the dead listener, so a retry on another key can only
+    // succeed by moving to a working upstream.
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = dead.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((_s, _p)) = dead.accept().await {
+            // Hold the connection open so the first attempt spends its whole
+            // timeout window. This makes the budget arithmetic observable:
+            // with the admission allowance the budget covers two windows, and
+            // without it the first attempt already fills the budget and the
+            // retry can never fire.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+    let live = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let live_addr = live.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut s, _p)) = live.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let body = r#"{"id":"r","choices":[{"message":{"content":"recovered"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        vec![
+            KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            },
+            KeyEntry {
+                key: "k2".to_string(),
+                label: Some("k2".to_string()),
+                disabled: false,
+            },
+        ],
+        format!("http://{}", dead_addr),
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        3,
+        300, // timeout window
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 9000,
+            min_dynamic_timeout_ms: 300,
+            dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    // Point the whole pool at only one upstream, so BOTH keys retry against
+    // the live server: the first attempt must time out on the dead one.
+
+    let body = serde_json::json!({
+        "model": "slow-model",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    let elapsed = started.elapsed();
+
+    // Dead upstream: after the retry is exhausted the request still fails
+    // closed with 504, it does not hang and it does not invent a success.
+    assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+    let snapshot = state.model_stats.snapshot();
+    let slow = snapshot.iter().find(|s| s.id == "slow-model").unwrap();
+
+    // The decisive bound: attempts must be fewer than one per key, i.e. the
+    // 2x budget caps the retry instead of letting every key time out.
+    assert!(
+        slow.total >= 2,
+        "a timed-out attempt must be retried on another key; observed {} attempts",
+        slow.total
+    );
+    assert!(
+        slow.total <= 2,
+        "timeout retry must be bounded by the attempt budget, saw {} attempts",
+        slow.total
+    );
+    assert!(
+        elapsed < Duration::from_millis(1200),
+        "total wait must stay within the 2x budget, took {:?}",
+        elapsed
+    );
+}
+
+/// The body-collection timeout must retry on another key.
+///
+/// This is the path that actually fires in production: the connection is
+/// established and headers arrive, but the body stalls, so `send()` has
+/// already succeeded and the send-timeout branch never runs. Every 504 on the
+/// live host took this branch at exactly the timeout floor.
+#[tokio::test]
+async fn test_body_timeout_retries_on_another_key_within_budget() {
+    use mockito::{Matcher, Server};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let mut server = Server::new_async().await;
+
+    // A body that is first sent immediately, then stalls long past the
+    // timeout, so headers arrive fast and the body collection times out.
+    let slow_body = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "slow-model"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_chunked_body(|w| {
+            std::io::Write::write_all(w, br#"{"id":"test","#)?;
+            w.flush()?;
+            thread::sleep(Duration::from_millis(700));
+            std::io::Write::write_all(
+                w,
+                br#""choices":[{"message":{"content":"never drained"}}]}"#,
+            )
+        })
+        .expect_at_least(1)
+        .create();
+
+    let state = AppState::new_with_controls(
+        vec![
+            KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            },
+            KeyEntry {
+                key: "k2".to_string(),
+                label: Some("k2".to_string()),
+                disabled: false,
+            },
+        ],
+        server.url(),
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        3,
+        250, // timeout window, so the 700 ms body stalls past it
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "slow-model",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    let elapsed = started.elapsed();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+
+    // The decisive assertions: the request must have been attempted more
+    // than once (the retry fired) but still bounded by the budget.
+    let snapshot = state.model_stats.snapshot();
+    let slow = snapshot.iter().find(|s| s.id == "slow-model").unwrap();
+    assert!(
+        slow.total >= 2,
+        "a stalled body must be retried on another key; observed {} attempts",
+        slow.total
+    );
+    assert!(
+        elapsed < Duration::from_millis(2500),
+        "total wait must stay within the 2x budget, took {:?}",
+        elapsed
+    );
+
+    slow_body.assert();
+}
+
 /// Test with ModelRouter for model selection
 #[tokio::test]
 async fn test_proxy_with_router() {
@@ -898,6 +1133,7 @@ async fn test_proxy_with_router() {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
 
     let router = ModelRouter::new(vec!["test-model".to_string()], Strategy::RoundRobin);
@@ -934,7 +1170,7 @@ async fn test_proxy_with_router() {
 #[tokio::test]
 async fn test_models_endpoint_error() {
     use mockito::Server;
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let mut server = Server::new_async().await;
     let mock = server
@@ -955,7 +1191,7 @@ async fn test_models_endpoint_error() {
 #[tokio::test]
 async fn test_models_endpoint_success() {
     use mockito::Server;
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let mut server = Server::new_async().await;
     let mock = server
@@ -975,7 +1211,7 @@ async fn test_models_endpoint_success() {
 
 #[tokio::test]
 async fn test_models_endpoint_returns_configured_racing_models_without_upstream() {
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let state = AppState::new(
         vec![],
@@ -1005,7 +1241,7 @@ async fn test_models_endpoint_returns_configured_racing_models_without_upstream(
 
 #[tokio::test]
 async fn test_models_endpoint_includes_router_models() {
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let router = ModelRouter::new(
         vec!["router-a".to_string(), "router-b".to_string()],
@@ -1039,13 +1275,14 @@ async fn test_models_endpoint_includes_router_models() {
 
 #[tokio::test]
 async fn test_health_exposes_routing_and_racing_metadata() {
-    use nimaproxy::proxy::health;
+    use nimaproxy::proxy::http::health;
 
     let router = ModelRouter::new(vec!["router-a".to_string()], Strategy::RoundRobin);
     let state = AppState::new(
         vec![KeyEntry {
             key: "test-key".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "http://example.invalid".to_string(),
         Some(router),
@@ -1086,7 +1323,7 @@ async fn test_stats_exposes_gateway_metrics_and_limits() {
     state.gateway_metrics.record_all_racers_failed();
     state.gateway_metrics.record_deadline_exceeded();
 
-    let resp = nimaproxy::proxy::stats(axum::extract::State(state))
+    let resp = nimaproxy::proxy::http::stats(axum::extract::State(state))
         .await
         .into_response();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
@@ -1115,7 +1352,7 @@ async fn test_stats_exposes_gateway_metrics_and_limits() {
 /// Test models endpoint with no keys
 #[tokio::test]
 async fn test_models_endpoint_no_keys() {
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let state = AppState::new(
         vec![],
@@ -1209,10 +1446,12 @@ async fn test_auto_degraded_retry_reroutes_to_next_model() {
             KeyEntry {
                 key: "test-key-a".to_string(),
                 label: Some("key-a".to_string()),
+            disabled: false,
             },
             KeyEntry {
                 key: "test-key-b".to_string(),
                 label: Some("key-b".to_string()),
+            disabled: false,
             },
         ],
         server.url(),
@@ -1316,6 +1555,7 @@ async fn test_key_pool_exhaustion() {
         vec![KeyEntry {
             key: "test-key".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         server.url(),
         None,
@@ -1452,10 +1692,12 @@ fn make_racing_state_two_keys(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "key-a".to_string(),
             label: Some("key-a".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "key-b".to_string(),
             label: Some("key-b".to_string()),
+            disabled: false,
         },
     ];
     AppState::new(
@@ -1484,7 +1726,7 @@ async fn test_racing_returns_429_when_all_keys_unavailable() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1523,7 +1765,7 @@ async fn test_racing_skips_400_does_not_propagate_to_client() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1579,7 +1821,7 @@ async fn test_racing_429_marks_key_rate_limited() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1633,7 +1875,7 @@ async fn test_racing_429_loser_does_not_globally_cool_key() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1681,7 +1923,7 @@ async fn test_racing_skips_4xx_and_returns_first_2xx() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1710,10 +1952,12 @@ fn make_racing_state_two_keys_fast(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "key-a".to_string(),
             label: Some("key-a".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "key-b".to_string(),
             label: Some("key-b".to_string()),
+            disabled: false,
         },
     ];
     AppState::new_with_controls(
