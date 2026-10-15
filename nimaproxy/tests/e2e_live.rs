@@ -34,6 +34,7 @@ fn make_state() -> Arc<AppState> {
         .map(|(k, l)| KeyEntry {
             key: k.clone(),
             label: Some(l.clone()),
+            disabled: false,
         })
         .collect();
     AppState::new(
@@ -57,6 +58,7 @@ fn make_state_no_racing() -> Arc<AppState> {
         .map(|(k, l)| KeyEntry {
             key: k.clone(),
             label: Some(l.clone()),
+            disabled: false,
         })
         .collect();
     AppState::new(

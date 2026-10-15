@@ -23,6 +23,7 @@ fn make_live_state_with_circuit_breaker() -> Option<Arc<AppState>> {
     let key_entries = vec![KeyEntry {
         key: api_key,
         label: Some("live-circuit-breaker".to_string()),
+        disabled: false,
     }];
 
     // Configure circuit breaker with low thresholds for testing

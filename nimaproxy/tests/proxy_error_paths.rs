@@ -18,6 +18,7 @@ fn make_test_state(api_url: String) -> Arc<AppState> {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
     AppState::new(
         key_entries,
@@ -39,10 +40,12 @@ fn make_two_key_test_state(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "test-key-0".to_string(),
             label: Some("key-0".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-1".to_string(),
             label: Some("key-1".to_string()),
+            disabled: false,
         },
     ];
     AppState::new(
@@ -64,6 +67,7 @@ fn make_racing_state(api_url: String) -> Arc<AppState> {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
     AppState::new(
         key_entries,
@@ -85,10 +89,12 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "test-key-a".to_string(),
             label: Some("key-a".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-b".to_string(),
             label: Some("key-b".to_string()),
+            disabled: false,
         },
     ];
     AppState::new_with_controls(
@@ -127,6 +133,7 @@ fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
     let key_entries = vec![KeyEntry {
         key: "test-key-a".to_string(),
         label: Some("key-a".to_string()),
+        disabled: false,
     }];
     AppState::new_with_controls(
         key_entries,
@@ -166,14 +173,17 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "test-key-a".to_string(),
             label: Some("key-a".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-b".to_string(),
             label: Some("key-b".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-c".to_string(),
             label: Some("key-c".to_string()),
+            disabled: false,
         },
     ];
     AppState::new_with_controls(
@@ -713,6 +723,7 @@ async fn test_proxy_with_model_params() {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
 
     let mut model_params = HashMap::new();
@@ -782,6 +793,7 @@ async fn test_proxy_model_params_do_not_enable_stream_when_omitted() {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
 
     let mut model_params = HashMap::new();
@@ -838,6 +850,7 @@ async fn test_direct_chat_request_uses_configured_timeout() {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
     let state = AppState::new(
         key_entries,
@@ -898,6 +911,7 @@ async fn test_proxy_with_router() {
     let key_entries = vec![KeyEntry {
         key: "test-key".to_string(),
         label: Some("test".to_string()),
+        disabled: false,
     }];
 
     let router = ModelRouter::new(vec!["test-model".to_string()], Strategy::RoundRobin);
@@ -1046,6 +1060,7 @@ async fn test_health_exposes_routing_and_racing_metadata() {
         vec![KeyEntry {
             key: "test-key".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "http://example.invalid".to_string(),
         Some(router),
@@ -1209,10 +1224,12 @@ async fn test_auto_degraded_retry_reroutes_to_next_model() {
             KeyEntry {
                 key: "test-key-a".to_string(),
                 label: Some("key-a".to_string()),
+            disabled: false,
             },
             KeyEntry {
                 key: "test-key-b".to_string(),
                 label: Some("key-b".to_string()),
+            disabled: false,
             },
         ],
         server.url(),
@@ -1316,6 +1333,7 @@ async fn test_key_pool_exhaustion() {
         vec![KeyEntry {
             key: "test-key".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         server.url(),
         None,
@@ -1452,10 +1470,12 @@ fn make_racing_state_two_keys(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "key-a".to_string(),
             label: Some("key-a".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "key-b".to_string(),
             label: Some("key-b".to_string()),
+            disabled: false,
         },
     ];
     AppState::new(
@@ -1710,10 +1730,12 @@ fn make_racing_state_two_keys_fast(api_url: String) -> Arc<AppState> {
         KeyEntry {
             key: "key-a".to_string(),
             label: Some("key-a".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "key-b".to_string(),
             label: Some("key-b".to_string()),
+            disabled: false,
         },
     ];
     AppState::new_with_controls(

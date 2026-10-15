@@ -1012,6 +1012,7 @@ label = "test"
         let keys = vec![KeyEntry {
             key: NVIDIA_API_KEY.to_string(),
             label: Some("test-key".to_string()),
+            disabled: false,
         }];
         let model_params = HashMap::new();
         let model_compat = config::ModelCompat::default();

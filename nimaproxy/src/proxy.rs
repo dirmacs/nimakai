@@ -984,6 +984,25 @@ pub async fn chat_completions(
                             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                     );
                     last_auth_failure_response = Some(auth_response);
+                    // A quarantined key IS a turn outcome: without this record the
+                    // auth-failure path was the only failure mode with no line in
+                    // turns.jsonl, so "check the logs" could not see it at all.
+                    log_turn_request(
+                        &original_model,
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        status.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        false,
+                        Some(format!(
+                            "upstream auth failure ({}); key quarantined",
+                            status.as_u16()
+                        )),
+                    );
                     continue;
                 }
 
@@ -2537,10 +2556,12 @@ mod tests {
                 crate::KeyEntry {
                     key: "key-a".to_string(),
                     label: Some("key-a".to_string()),
+            disabled: false,
                 },
                 crate::KeyEntry {
                     key: "key-b".to_string(),
                     label: Some("key-b".to_string()),
+            disabled: false,
                 },
             ],
             "https://test.api.nvidia.com".to_string(),
@@ -3781,6 +3802,22 @@ pub async fn completions(
                             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                     );
                     last_auth_failure_response = Some(auth_response);
+                    log_turn_request(
+                        &model_id,
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        status.as_u16(),
+                        1,
+                        false,
+                        0,
+                        key_label.as_deref(),
+                        false,
+                        Some(format!(
+                            "upstream auth failure ({}); key quarantined",
+                            status.as_u16()
+                        )),
+                    );
                     continue;
                 }
                 if ok {
@@ -3942,6 +3979,22 @@ pub async fn embeddings(
                             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                     );
                     last_auth_failure_response = Some(auth_response);
+                    log_turn_request(
+                        &model_id,
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        status.as_u16(),
+                        1,
+                        false,
+                        0,
+                        key_label.as_deref(),
+                        false,
+                        Some(format!(
+                            "upstream auth failure ({}); key quarantined",
+                            status.as_u16()
+                        )),
+                    );
                     continue;
                 }
                 if ok {

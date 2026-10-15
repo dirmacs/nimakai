@@ -12,10 +12,12 @@ fn make_key_pool() -> KeyPool {
         KeyEntry {
             key: "test-key-1".to_string(),
             label: Some("test1".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "test-key-2".to_string(),
             label: Some("test2".to_string()),
+            disabled: false,
         },
     ];
     KeyPool::new(keys)
@@ -157,10 +159,12 @@ fn test_mock_app_state_builder_custom_keys() {
         KeyEntry {
             key: "custom-key-1".to_string(),
             label: Some("custom-1".to_string()),
+            disabled: false,
         },
         KeyEntry {
             key: "custom-key-2".to_string(),
             label: None,
+            disabled: false,
         },
     ];
 
@@ -325,6 +329,7 @@ fn test_integration_app_state_creation() {
     let keys = vec![KeyEntry {
         key: "key1".to_string(),
         label: Some("primary".to_string()),
+        disabled: false,
     }];
     let stats = make_stats();
     let router = make_router();
@@ -479,6 +484,7 @@ fn test_integration_auto_routing_no_router() {
     let keys = vec![KeyEntry {
         key: "test-key".to_string(),
         label: None,
+        disabled: false,
     }];
     let stats = make_stats();
 
@@ -537,14 +543,17 @@ fn make_pool_3keys() -> nimaproxy::key_pool::KeyPool {
         nimaproxy::config::KeyEntry {
             key: "key-a1".to_string(),
             label: Some("k1".to_string()),
+            disabled: false,
         },
         nimaproxy::config::KeyEntry {
             key: "key-b2".to_string(),
             label: Some("k2".to_string()),
+            disabled: false,
         },
         nimaproxy::config::KeyEntry {
             key: "key-c3".to_string(),
             label: Some("k3".to_string()),
+            disabled: false,
         },
     ];
     nimaproxy::key_pool::KeyPool::new(keys)
@@ -555,10 +564,12 @@ fn make_pool_2keys() -> nimaproxy::key_pool::KeyPool {
         nimaproxy::config::KeyEntry {
             key: "key-x1".to_string(),
             label: Some("x1".to_string()),
+            disabled: false,
         },
         nimaproxy::config::KeyEntry {
             key: "key-y2".to_string(),
             label: Some("y2".to_string()),
+            disabled: false,
         },
     ];
     nimaproxy::key_pool::KeyPool::new(keys)
@@ -763,6 +774,7 @@ fn test_model_validation_rejects_invalid_model() {
         vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "https://test.com".to_string(),
         None,
@@ -802,6 +814,7 @@ fn test_model_validation_allows_auto_and_empty() {
         vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "https://test.com".to_string(),
         None,
@@ -834,6 +847,7 @@ fn test_model_validation_passes_when_no_cache() {
         vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "https://test.com".to_string(),
         None,
@@ -861,6 +875,7 @@ fn test_role_transformation_developer_to_user() {
         vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "https://test.com".to_string(),
         None,
@@ -905,6 +920,7 @@ fn test_role_transformation_tool_to_assistant() {
         vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "https://test.com".to_string(),
         None,
@@ -950,6 +966,7 @@ fn test_role_transformation_no_change_for_allowed_model() {
         vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "https://test.com".to_string(),
         None,
@@ -995,6 +1012,7 @@ fn test_role_transformation_all_mistral_models() {
         vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
+            disabled: false,
         }],
         "https://test.com".to_string(),
         None,

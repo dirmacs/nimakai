@@ -313,6 +313,7 @@ mod tests {
         KeyEntry {
             key: key.to_string(),
             label: Some(label.to_string()),
+            disabled: false,
         }
     }
 
@@ -560,6 +561,7 @@ mod tests {
         let keys = vec![KeyEntry {
             key: "abc".to_string(),
             label: None,
+            disabled: false,
         }];
         let pool = KeyPool::new(keys);
 
@@ -572,6 +574,7 @@ mod tests {
         let keys = vec![KeyEntry {
             key: "key1".to_string(),
             label: None,
+            disabled: false,
         }];
         let pool = KeyPool::new(keys);
 
@@ -700,6 +703,7 @@ mod tests {
         let keys = vec![KeyEntry {
             key: "key1".to_string(),
             label: None,
+            disabled: false,
         }];
         let pool = KeyPool::new(keys);
 

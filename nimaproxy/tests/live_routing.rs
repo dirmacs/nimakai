@@ -23,6 +23,7 @@ fn make_live_state_with_routing(models: Vec<String>, _strategy: &str) -> Option<
     let key_entries = vec![KeyEntry {
         key: api_key,
         label: Some("live-routing-test".to_string()),
+        disabled: false,
     }];
 
     Some(AppState::new(

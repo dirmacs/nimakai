@@ -23,6 +23,7 @@ fn make_live_state() -> Option<Arc<AppState>> {
     let key_entries = vec![KeyEntry {
         key: api_key,
         label: Some("live-streaming".to_string()),
+        disabled: false,
     }];
 
     Some(AppState::new(

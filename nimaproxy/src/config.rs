@@ -65,6 +65,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Split configured keys into (leasable, parked).
+    ///
+    /// A parked key (`disabled = true`) stays in the config for reference but
+    /// must never be leased. Serde silently ignored the unknown `disabled`
+    /// field before this existed, so parked keys entered the rotation and were
+    /// only discovered broken per-request (403, quarantined after the fact).
+    pub fn partition_keys(&self) -> (Vec<&KeyEntry>, Vec<&KeyEntry>) {
+        self.keys.iter().partition(|k| !k.disabled)
+    }
+
     pub fn circuit_breaker_config(&self) -> crate::model_stats::CircuitBreakerConfig {
         crate::model_stats::CircuitBreakerConfig {
             max_output_tokens: self
@@ -114,6 +124,11 @@ impl ModelParams {
 pub struct KeyEntry {
     pub key: String,
     pub label: Option<String>,
+    /// Parked key: stays in the config for reference but is never leased.
+    /// Previously this field was silently ignored by serde, so a parked key
+    /// still entered the rotation and was discovered broken per-request.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -528,6 +543,88 @@ key = "key3"
         assert_eq!(config.keys[0].label, Some("doltares".to_string()));
         assert_eq!(config.keys[1].label, Some("ares".to_string()));
         assert_eq!(config.keys[2].label, None);
+    }
+
+    #[test]
+    fn test_disabled_key_is_parsed_not_silently_dropped() {
+        // Regression: `disabled = true` used to be ignored by serde (unknown
+        // field), so a parked key was leased and failed per-request.
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "key1"
+label = "doltares"
+
+[[keys]]
+key = "key2"
+label = "ares"
+disabled = true
+
+[[keys]]
+key = "key3"
+label = "backup"
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        // All three still load (the entry is retained for reference)...
+        assert_eq!(config.keys.len(), 3);
+        // ...but only the parked one is flagged.
+        assert!(!config.keys[0].disabled);
+        assert!(config.keys[1].disabled, "parked key must parse as disabled");
+        assert!(!config.keys[2].disabled);
+
+        // Assert against the real function main.rs uses — not a re-implementation
+        // of the filter in the test, which would pass even if the filter broke.
+        let (leasable, parked) = config.partition_keys();
+        assert_eq!(
+            leasable.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+            vec!["key1", "key3"]
+        );
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].label.as_deref(), Some("ares"));
+    }
+
+    #[test]
+    fn test_partition_keys_parks_only_disabled() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "k1"
+label = "doltares"
+disabled = true
+
+[[keys]]
+key = "k2"
+
+[[keys]]
+key = "k3"
+label = "backup"
+disabled = true
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        let (leasable, parked) = config.partition_keys();
+        assert_eq!(
+            leasable.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+            vec!["k2"]
+        );
+        assert_eq!(parked.len(), 2);
+    }
+
+    #[test]
+    fn test_missing_disabled_defaults_to_false() {
+        let file = write_temp_config(
+            r#"
+[[keys]]
+key = "key1"
+label = "doltares"
+"#,
+        );
+
+        let config = load(file.path().to_str().unwrap()).unwrap();
+        assert!(!config.keys[0].disabled);
     }
 
     #[test]
