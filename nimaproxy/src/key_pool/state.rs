@@ -1,3 +1,4 @@
+use super::BenchReason;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,11 @@ pub struct KeyStatus {
     /// Observational only — a stall never changes this key's window or
     /// cooldown, because it is the upstream degrading rather than the key.
     pub stalls: u64,
+    /// Why this key is benched, if it is. `RateLimit` means a temporary 429 —
+    /// wait it out. `AuthFailure` means the credential is bad — replace the
+    /// key. Before this, both lived in one `Instant`, so an operator could not
+    /// tell them apart.
+    pub bench_reason: Option<BenchReason>,
 }
 
 impl super::KeyPool {
@@ -58,7 +64,10 @@ impl super::KeyPool {
         if idx < self.cooldowns.len() {
             self.record_rate_limited(idx);
             let mut cd = self.cooldowns[idx].lock().unwrap();
-            *cd = Some(Instant::now() + Duration::from_secs(secs));
+            *cd = Some((
+                Instant::now() + Duration::from_secs(secs),
+                BenchReason::RateLimit,
+            ));
         }
     }
 
@@ -81,7 +90,7 @@ impl super::KeyPool {
         }
         if !cooldown.is_zero() {
             let mut cd = self.cooldowns[idx].lock().unwrap();
-            *cd = Some(Instant::now() + cooldown);
+            *cd = Some((Instant::now() + cooldown, BenchReason::AuthFailure));
         }
     }
 

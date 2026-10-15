@@ -23,7 +23,7 @@ impl super::KeyPool {
             .enumerate()
             .filter_map(|(i, sem)| {
                 let cd = self.cooldowns[i].lock().unwrap();
-                if matches!(*cd, Some(expiry) if now < expiry) {
+                if matches!(*cd, Some((expiry, _)) if now < expiry) {
                     None
                 } else {
                     let in_flight = self
@@ -42,7 +42,7 @@ impl super::KeyPool {
             .enumerate()
             .filter_map(|(i, window)| {
                 let cd = self.cooldowns[i].lock().unwrap();
-                if matches!(*cd, Some(expiry) if now < expiry) {
+                if matches!(*cd, Some((expiry, _)) if now < expiry) {
                     None
                 } else {
                     Some(window.lock().unwrap().current)
@@ -58,11 +58,35 @@ impl super::KeyPool {
             .iter()
             .enumerate()
             .map(|(i, k)| {
+                // Read all four pieces of per-key state under one critical
+                // section, so a racing write cannot interleave between them.
+                //
+                // S6: the previous read took each lock separately — cooldown,
+                // then in-flight, then the window, then the counters — so a
+                // `mark_rate_limited` or `record_success` on another thread
+                // could change one piece while another was being read. The
+                // operator then saw a state that never existed: a key shown
+                // as active while its window was already shrinking, or a stall
+                // counted against a key that was simultaneously benched.
+                //
+                // Lock order here is cooldown then windows, matching the order
+                // writers use (`mark_rate_limited` -> `record_rate_limited` ->
+                // windows, then cooldown; `mark_auth_failed` -> counter then
+                // cooldown). Holding both for the whole read is safe because
+                // that order is consistent everywhere, so there is no
+                // lock-order inversion.
                 let cd = self.cooldowns[i].lock().unwrap();
-                let (active, remaining) = match *cd {
-                    Some(expiry) if now < expiry => (false, expiry.duration_since(now).as_secs()),
-                    _ => (true, 0),
+                let window = self.windows[i].lock().unwrap();
+                let (active, remaining, bench_reason) = match *cd {
+                    Some((expiry, reason)) if now < expiry => {
+                        (false, expiry.duration_since(now).as_secs(), Some(reason))
+                    }
+                    _ => (true, 0, None),
                 };
+                let in_flight = self
+                    .max_in_flight_per_key
+                    .saturating_sub(self.permits[i].available_permits());
+                let max_in_flight = window.current;
                 let hint = if k.key.len() >= 4 {
                     format!("...{}", &k.key[k.key.len() - 4..])
                 } else {
@@ -73,11 +97,12 @@ impl super::KeyPool {
                     key_hint: hint,
                     active,
                     cooldown_secs_remaining: remaining,
-                    in_flight: self.in_flight_for_key(i),
-                    max_in_flight: self.current_window(i),
+                    in_flight,
+                    max_in_flight,
                     configured_max_in_flight: self.max_in_flight_per_key,
                     auth_failures: self.auth_failures_for(i),
                     stalls: self.stalls_for(i),
+                    bench_reason,
                 }
             })
             .collect()

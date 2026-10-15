@@ -9,7 +9,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures::TryStreamExt;
 use serde_json::Value;
 /// GET /v1/models — configured model list when routing/racing is enabled, otherwise passthrough.
 use std::sync::Arc;

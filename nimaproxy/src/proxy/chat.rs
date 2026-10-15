@@ -188,10 +188,17 @@ pub async fn chat_completions(
         state.admission_wait_ms,
     );
     let started = Instant::now();
+    let mut request_state = crate::proxy::request_state::RequestState::Queued;
     for attempt in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
-            Ok(permits) => permits,
-            Err(response) => return response,
+            Ok(permits) => {
+                request_state = crate::proxy::request_state::RequestState::Admitted;
+                permits
+            }
+            Err(response) => {
+                request_state = crate::proxy::request_state::RequestState::Rejected;
+                return response;
+            }
         };
         let _upstream_permit = upstream_permit;
         let idx = key_lease.idx;
@@ -232,7 +239,15 @@ pub async fn chat_completions(
                 //     retried request cannot double-send to the caller
                 // The final attempt (or an exhausted budget) falls through
                 // to the original 504, so failure paths are unchanged.
-                if retry_policy.decide(started, attempt) == RetryDecision::Retry {
+                let may_retry = request_state.on_failure(false).can_retry(
+                    attempt,
+                    n,
+                    started,
+                    std::time::Duration::from_millis(request_timeout_ms),
+                    retry_policy.budget(),
+                );
+                if may_retry {
+                    request_state = crate::proxy::request_state::RequestState::Retryable;
                     state.pool.note_upstream_stall(idx);
                     log_turn_request(
                         &original_model,
@@ -479,6 +494,7 @@ pub async fn chat_completions(
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
                 let window = Duration::from_millis(request_timeout_ms);
 
+                request_state = crate::proxy::request_state::RequestState::InFlight;
                 // Bound the wait for the FIRST byte. This is the only part that
                 // can still produce a 504, and it is the only part that may
                 // trigger the retry, because nothing has been sent to the
@@ -504,7 +520,15 @@ pub async fn chat_completions(
                     );
                     state.pool.note_upstream_stall(idx);
 
-                    if retry_policy.decide(started, attempt) == RetryDecision::Retry {
+                    let may_retry = request_state.on_failure(false).can_retry(
+                        attempt,
+                        n,
+                        started,
+                        std::time::Duration::from_millis(request_timeout_ms),
+                        retry_policy.budget(),
+                    );
+                    if may_retry {
+                        request_state = crate::proxy::request_state::RequestState::Retryable;
                         log_turn_request(
                             &original_model,
                             &model_id,
@@ -548,9 +572,10 @@ pub async fn chat_completions(
 
                 // Headers and the first chunk are already in hand, so commit
                 // to this key: the response is now on the wire and cannot be
-                // retried. Success accounting happens here rather than on
-                // stream completion, because a client that disconnects
-                // mid-generation must not cost the key its window.
+                // retried. The state machine asserts the invariant that only
+                // Admitted/InFlight may commit — a retry from here would
+                // double-send the response body (S3).
+                request_state = request_state.on_first_byte();
                 let ttfc_ms = t0.elapsed().as_millis() as f64;
                 if ok {
                     state.pool.record_success(idx);
@@ -625,7 +650,15 @@ pub async fn chat_completions(
                         );
                         state.pool.note_upstream_stall(idx);
 
-                        if retry_policy.decide(started, attempt) == RetryDecision::Retry {
+                        let may_retry = request_state.on_failure(false).can_retry(
+                            attempt,
+                            n,
+                            started,
+                            std::time::Duration::from_millis(request_timeout_ms),
+                            retry_policy.budget(),
+                        );
+                        if may_retry {
+                            request_state = crate::proxy::request_state::RequestState::Retryable;
                             log_turn_request(
                                 &original_model,
                                 &model_id,
