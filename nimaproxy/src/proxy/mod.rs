@@ -17,6 +17,7 @@
 
 pub mod admission;
 pub mod chat;
+pub mod chat_helpers;
 pub mod fallback;
 pub mod http;
 pub mod messages;

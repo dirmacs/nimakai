@@ -5,7 +5,7 @@ body::Body,
 http::{HeaderMap, HeaderValue, StatusCode},
 response::{IntoResponse, Response},
 };
-use crate::proxy::chat::{accept_header_for_json, apply_model_params, count_repetitions};
+use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params, count_repetitions};
 use crate::proxy::http::{log_turn_request};
 use crate::proxy::messages::{extract_response_metrics, inject_minimax_system_message, inject_mistral_tool_params, normalize_assistant_messages, sanitize_tool_calls, validate_model_exists};
 use crate::proxy::timeouts::{request_turn_summary};

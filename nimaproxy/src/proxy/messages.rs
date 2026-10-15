@@ -2,7 +2,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use crate::proxy::chat::{apply_model_params, count_repetitions};
+use crate::proxy::chat_helpers::{apply_model_params, count_repetitions};
 use bytes::Bytes;
 use serde_json::Value;
 use crate::AppState;

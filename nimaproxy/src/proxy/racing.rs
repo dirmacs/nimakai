@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crate::proxy::admission::{gateway_overloaded_response, no_key_response};
-use crate::proxy::chat::{accept_header_for_json, apply_model_params};
+use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params};
 use crate::proxy::fallback::{solo_model_fallback};
 use crate::proxy::http::{log_turn_request};
 use crate::proxy::messages::{fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params, normalize_assistant_messages, sanitize_tool_calls, transform_message_roles};
