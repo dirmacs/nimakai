@@ -14,10 +14,46 @@ pub struct KeyStatus {
     pub configured_max_in_flight: usize,
     /// Cumulative count of upstream 401/403 (auth failure) responses observed for this key.
     pub auth_failures: u64,
+    /// Cumulative count of upstream stalls observed for this key: connected
+    /// and admitted, but no usable bytes inside the timeout window.
+    /// Observational only — a stall never changes this key's window or
+    /// cooldown, because it is the upstream degrading rather than the key.
+    pub stalls: u64,
 }
 
 impl super::KeyPool {
+    /// Note that an upstream *stall* was observed on this key.
+    ///
+    /// A stall is a request that connected, was admitted, and then produced no
+    /// usable bytes within the timeout window. It is deliberately NOT treated
+    /// as evidence that the key is degraded, because on this host it is not:
+    /// all four keys are NVIDIA keys on one shared account, and the measured
+    /// stall rate is roughly even across them (27%–57%) while successful
+    /// latency stays fast (p50 1427 ms, p90 1780 ms, max 3617 ms — a request
+    /// that succeeds would not have timed out). The stall is the upstream
+    /// degrading, not the key.
+    ///
+    /// Punishing the key here is what produced the fleet-wide lockout measured
+    /// on 2026-10-15: benching the key and halving its window concentrated the
+    /// same upstream load onto the remaining keys, which then stalled and got
+    /// benched too — a death spiral that took admitted traffic from 753
+    /// requests down to 97 (12.9%), with 503/429 for the rest.
+    ///
+    /// So this records the observation for observability and leaves the key's
+    /// window and cooldown untouched. A real 429 is what tells us this key is
+    /// throttled, and that still goes through `mark_rate_limited`.
+    pub fn note_upstream_stall(&self, idx: usize) {
+        if let Some(counter) = self.stalls.get(idx) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Mark a key as rate-limited for `secs` seconds.
+    ///
+    /// Reserved for a real upstream 429, i.e. the upstream explicitly saying
+    /// this key is throttled. This both benches the key and halves its window,
+    /// which is correct for a per-key limit but wrong for an upstream-wide
+    /// stall — use [`KeyPool::note_upstream_stall`] for that.
     pub fn mark_rate_limited(&self, idx: usize, secs: u64) {
         if idx < self.cooldowns.len() {
             self.record_rate_limited(idx);
@@ -106,6 +142,14 @@ impl super::KeyPool {
 
     pub(crate) fn auth_failures_for(&self, idx: usize) -> u64 {
         self.auth_failures
+            .get(idx)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Cumulative upstream stalls observed for this key. Observational only.
+    pub(crate) fn stalls_for(&self, idx: usize) -> u64 {
+        self.stalls
             .get(idx)
             .map(|c| c.load(Ordering::Relaxed))
             .unwrap_or(0)

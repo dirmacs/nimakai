@@ -24,6 +24,12 @@ pub struct KeyPool {
     max_in_flight_per_key: usize,
     /// Cumulative count of upstream 401/403 (auth failure) responses observed per key.
     auth_failures: Vec<AtomicU64>,
+    /// Cumulative count of upstream *stalls* observed per key: requests that
+    /// connected and were admitted but produced no usable bytes inside the
+    /// timeout window. Observational only — unlike `auth_failures` this never
+    /// changes the key's window or cooldown, because an upstream-wide stall is
+    /// not evidence the key is degraded.
+    stalls: Vec<AtomicU64>,
 }
 
 pub struct KeyLease {
@@ -65,6 +71,7 @@ impl KeyPool {
                 .collect(),
             max_in_flight_per_key,
             auth_failures: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            stalls: (0..n).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 

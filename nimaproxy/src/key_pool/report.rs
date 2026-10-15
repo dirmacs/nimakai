@@ -60,9 +60,7 @@ impl super::KeyPool {
             .map(|(i, k)| {
                 let cd = self.cooldowns[i].lock().unwrap();
                 let (active, remaining) = match *cd {
-                    Some(expiry) if now < expiry => {
-                        (false, expiry.duration_since(now).as_secs())
-                    }
+                    Some(expiry) if now < expiry => (false, expiry.duration_since(now).as_secs()),
                     _ => (true, 0),
                 };
                 let hint = if k.key.len() >= 4 {
@@ -79,6 +77,7 @@ impl super::KeyPool {
                     max_in_flight: self.current_window(i),
                     configured_max_in_flight: self.max_in_flight_per_key,
                     auth_failures: self.auth_failures_for(i),
+                    stalls: self.stalls_for(i),
                 }
             })
             .collect()

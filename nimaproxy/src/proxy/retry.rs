@@ -16,10 +16,6 @@
 
 use std::time::{Duration, Instant};
 
-/// How long a key is benched after timing out, so a retry picks a different
-/// key rather than re-acquiring the one that just stalled.
-pub const TIMEOUT_RETRY_KEY_COOLDOWN_SECS: u64 = 60;
-
 /// Total wall-clock ceiling for a request's upstream attempts, as a multiple
 /// of one timeout window. With a 15000 ms window this permits exactly one
 /// extra attempt, so a retry can never double the client's wait.

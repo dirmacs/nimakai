@@ -465,3 +465,130 @@ fn test_aimd_still_throttles_after_a_rate_limit() {
         "one-step deficit recovers in one success"
     );
 }
+
+/// Regression test for the fleet-wide lockout measured on 2026-10-15.
+///
+/// A timeout retry used to call `mark_rate_limited`, which benches the key and
+/// halves its window. But all keys are NVIDIA keys on one shared account and
+/// the upstream stalls across all of them roughly evenly (measured 27%–57% per
+/// key), so "this key timed out" is not evidence "this key is throttled".
+/// Punishing it concentrated the same load onto the remaining keys, which then
+/// stalled and were benched too: admitted traffic fell to 12.9% of requests
+/// and the fleet saw 503/429 for everything else.
+///
+/// The contract now: an upstream stall is observed and reported, but it never
+/// changes the key's window or cooldown. Only a real 429 does that.
+#[test]
+fn test_upstream_stall_does_not_throttle_the_key() {
+    let keys = vec![
+        make_key_entry("key0", "a"),
+        make_key_entry("key1", "b"),
+        make_key_entry("key2", "c"),
+        make_key_entry("key3", "d"),
+    ];
+    let pool = KeyPool::with_max_in_flight(keys, 2);
+
+    // Every key stalls once. Under the old behavior this benched all four and
+    // halved every window, leaving the gateway with no usable key.
+    for idx in 0..4 {
+        pool.note_upstream_stall(idx);
+    }
+
+    for idx in 0..4 {
+        assert_eq!(
+            pool.status()[idx].max_in_flight,
+            2,
+            "key {idx}: a stall must not shrink the window"
+        );
+        assert_eq!(
+            pool.status()[idx].cooldown_secs_remaining,
+            0,
+            "key {idx}: a stall must not bench the key"
+        );
+        assert_eq!(
+            pool.status()[idx].stalls,
+            1,
+            "key {idx}: the stall must still be recorded for observability"
+        );
+    }
+
+    // The gateway must still be able to serve: every key remains leasable.
+    for _ in 0..4 {
+        assert!(
+            pool.next_key_with_permit().is_ok(),
+            "a gateway whose keys merely stalled must still admit traffic"
+        );
+    }
+}
+
+/// The complement: a real 429 still throttles the key. Without this the fix
+/// above could pass by simply never throttling anything, which would be the
+/// more dangerous defect.
+#[test]
+fn test_real_rate_limit_still_throttles_the_key() {
+    let keys = vec![make_key_entry("key0", "a")];
+    let pool = KeyPool::with_max_in_flight(keys, 2);
+
+    pool.mark_rate_limited(0, 60);
+
+    assert_eq!(
+        pool.status()[0].max_in_flight,
+        1,
+        "a real 429 is per-key evidence and must still halve the window"
+    );
+    assert!(
+        pool.status()[0].cooldown_secs_remaining > 0,
+        "a real 429 must still bench the key"
+    );
+    // And it is not miscounted as a stall.
+    assert_eq!(pool.status()[0].stalls, 0);
+}
+
+/// The death spiral itself, as an executable scenario: the old code path
+/// (stall → throttle) collapsed the gateway to zero capacity, while the new
+/// one keeps it serving. This is the invariant that the live fleet violates.
+///
+/// The discriminating assertion is the cooldown, not the window: a stalling key
+/// must stay leasable. Under the old behavior every key ended up benched for
+/// 60 s, so `next_key_with_permit` failed for all four and the gateway
+/// returned 503/429 to the whole fleet. (Window capacity alone is not enough
+/// to tell the two apart — the successes in the loop restore it either way.)
+#[test]
+fn test_repeated_stalls_do_not_collapse_gateway_capacity() {
+    let keys = vec![
+        make_key_entry("key0", "a"),
+        make_key_entry("key1", "b"),
+        make_key_entry("key2", "c"),
+        make_key_entry("key3", "d"),
+    ];
+    let pool = KeyPool::with_max_in_flight(keys, 2);
+
+    // 20 rounds of "every key stalls once" — a sustained upstream degradation.
+    for _ in 0..20 {
+        for idx in 0..4 {
+            pool.note_upstream_stall(idx);
+            pool.record_success(idx);
+        }
+    }
+
+    let total_capacity: usize = pool.status().iter().map(|s| s.max_in_flight).sum();
+    assert_eq!(
+        total_capacity, 8,
+        "sustained upstream stalls must not erode aggregate capacity (got {total_capacity})"
+    );
+
+    // Every key should have recovered to its ceiling by now.
+    for s in pool.status() {
+        assert_eq!(s.max_in_flight, 2);
+    }
+
+    // The load-bearing part: a stall must never bench a key, so the gateway
+    // can still hand out leases. Under the old behavior all four keys were in
+    // a 60 s cooldown and this loop fails immediately.
+    for _ in 0..4 {
+        assert!(
+            pool.next_key_with_permit().is_ok(),
+            "a key that merely stalled must stay leasable, otherwise the fleet is locked out"
+        );
+    }
+}

@@ -5,7 +5,7 @@ use crate::proxy::messages::{
     validate_model_exists,
 };
 use crate::proxy::racing::race_models;
-use crate::proxy::retry::{RetryDecision, RetryPolicy, TIMEOUT_RETRY_KEY_COOLDOWN_SECS};
+use crate::proxy::retry::{RetryDecision, RetryPolicy};
 use crate::proxy::timeouts::{record_model_timeout, request_turn_summary, timeout_for_model};
 use crate::AppState;
 use axum::{
@@ -235,9 +235,7 @@ pub async fn chat_completions(
                 // to the original 504, so failure paths are unchanged.
                 let window = Duration::from_millis(request_timeout_ms);
                 if retry_policy.decide(started, attempt) == RetryDecision::Retry {
-                    state
-                        .pool
-                        .mark_rate_limited(idx, TIMEOUT_RETRY_KEY_COOLDOWN_SECS);
+                    state.pool.note_upstream_stall(idx);
                     log_turn_request(
                         &original_model,
                         &model_id,
@@ -425,9 +423,7 @@ pub async fn chat_completions(
                         // dropped before this point).
                         let window = Duration::from_millis(request_timeout_ms);
                         if retry_policy.decide(started, attempt) == RetryDecision::Retry {
-                            state
-                                .pool
-                                .mark_rate_limited(idx, TIMEOUT_RETRY_KEY_COOLDOWN_SECS);
+                            state.pool.note_upstream_stall(idx);
                             log_turn_request(
                                 &original_model,
                                 &model_id,
