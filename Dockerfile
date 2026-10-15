@@ -12,7 +12,7 @@
 #
 # Build context: the repo root (/opt/nimakai); the crate is copied from nimaproxy/.
 
-ARG RUST_IMAGE=rust:1.98-bookworm
+ARG RUST_IMAGE=rust:1.99-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 
 FROM ${RUST_IMAGE} AS builder
