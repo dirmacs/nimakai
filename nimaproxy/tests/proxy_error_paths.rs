@@ -912,6 +912,11 @@ async fn test_timeout_retries_on_another_key_within_budget() {
     let dead_addr = dead.local_addr().unwrap();
     tokio::spawn(async move {
         if let Ok((_s, _p)) = dead.accept().await {
+            // Hold the connection open so the first attempt spends its whole
+            // timeout window. This makes the budget arithmetic observable:
+            // with the admission allowance the budget covers two windows, and
+            // without it the first attempt already fills the budget and the
+            // retry can never fire.
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
@@ -956,7 +961,7 @@ async fn test_timeout_retries_on_another_key_within_budget() {
         RuntimeControls {
             max_upstream_in_flight: 8,
             max_in_flight_per_key: 2,
-            admission_wait_ms: 0,
+            admission_wait_ms: 9000,
             min_dynamic_timeout_ms: 300,
             dynamic_sample_floor: 10,
             auth_failure_cooldown_secs: 900,
@@ -966,6 +971,7 @@ async fn test_timeout_retries_on_another_key_within_budget() {
 
     // Point the whole pool at only one upstream, so BOTH keys retry against
     // the live server: the first attempt must time out on the dead one.
+
     let body = serde_json::json!({
         "model": "slow-model",
         "messages": [{"role": "user", "content": "test"}]

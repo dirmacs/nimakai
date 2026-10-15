@@ -889,13 +889,19 @@ pub async fn chat_completions(
     let mut last_auth_failure_response: Option<Response> = None;
     // Total wall-clock budget for this request's upstream attempts.
     //
-    // Sized to admit exactly ONE retry: a window for the first attempt plus a
-    // window for the retry, plus slack for scheduling jitter. The slack is
-    // load-bearing: the first timeout is observed at window + a few ms
-    // (302 ms against a 300 ms window), so `elapsed + window <= budget`
-    // fails on a bare 2x budget and the retry can never fire.
+    // Sized to admit exactly one retry: one window for the first attempt, one
+    // for the retry, plus the admission wait that elapses before the first
+    // permit, plus scheduling slack.
+    //
+    // The admission allowance is load-bearing and was measured, not assumed:
+    // `elapsed` is measured from the start of the REQUEST, which includes
+    // waiting for a permit (up to `admission_wait_ms`, 5000 ms in production).
+    // Observed on the live host, a single attempt measured 16546 ms against a
+    // 15000 ms window, so a bare 2x budget (30500 ms) rejected the retry
+    // because 16546 + 15000 > 30500.
     let attempt_budget = Duration::from_millis(timeout_for_model(&state, &model_id))
         .saturating_mul(TIMEOUT_RETRY_BUDGET_MULTIPLIER)
+        .saturating_add(state.admission_wait_duration())
         .saturating_add(Duration::from_millis(TIMEOUT_RETRY_BUDGET_SLACK_MS));
     let started = Instant::now();
 
@@ -1145,6 +1151,7 @@ pub async fn chat_completions(
                         // dropped before this point).
                         let window = Duration::from_millis(request_timeout_ms);
                         let fits_budget = started.elapsed() + window <= attempt_budget;
+                        eprintln!("BODY-CHECK attempt={} n={} elapsed_ms={} window_ms={} budget_ms={} fits={}", attempt, n, started.elapsed().as_millis(), window.as_millis(), attempt_budget.as_millis(), fits_budget);
                         if attempt + 1 < n && fits_budget {
                             state
                                 .pool

@@ -22,6 +22,7 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 fn push_unique_model(models: &mut Vec<String>, model: &str) {
@@ -406,6 +407,15 @@ impl AppState {
 
     pub fn racing_enabled(&self) -> bool {
         self.racing_models.len() >= 2 && self.racing_max_parallel >= 2
+    }
+
+    /// How long a request can wait for a permit before admission gives up.
+    ///
+    /// Used to size the timeout-retry budget: `started` in the request
+    /// handlers measures from the start of the REQUEST, so this wait counts
+    /// against the budget just like the attempt windows do.
+    pub fn admission_wait_duration(&self) -> Duration {
+        Duration::from_millis(self.admission_wait_ms)
     }
 
     pub fn try_acquire_upstream(&self) -> Option<UpstreamPermit> {
