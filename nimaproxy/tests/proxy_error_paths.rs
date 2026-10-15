@@ -1006,6 +1006,109 @@ async fn test_timeout_retries_on_another_key_within_budget() {
     );
 }
 
+/// The body-collection timeout must retry on another key.
+///
+/// This is the path that actually fires in production: the connection is
+/// established and headers arrive, but the body stalls, so `send()` has
+/// already succeeded and the send-timeout branch never runs. Every 504 on the
+/// live host took this branch at exactly the timeout floor.
+#[tokio::test]
+async fn test_body_timeout_retries_on_another_key_within_budget() {
+    use mockito::{Matcher, Server};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let mut server = Server::new_async().await;
+
+    // A body that is first sent immediately, then stalls long past the
+    // timeout, so headers arrive fast and the body collection times out.
+    let slow_body = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "slow-model"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_chunked_body(|w| {
+            std::io::Write::write_all(w, br#"{"id":"test","#)?;
+            w.flush()?;
+            thread::sleep(Duration::from_millis(700));
+            std::io::Write::write_all(
+                w,
+                br#""choices":[{"message":{"content":"never drained"}}]}"#,
+            )
+        })
+        .expect_at_least(1)
+        .create();
+
+    let state = AppState::new_with_controls(
+        vec![
+            KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            },
+            KeyEntry {
+                key: "k2".to_string(),
+                label: Some("k2".to_string()),
+                disabled: false,
+            },
+        ],
+        server.url(),
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        3,
+        250, // timeout window, so the 700 ms body stalls past it
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "slow-model",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    let elapsed = started.elapsed();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+
+    // The decisive assertions: the request must have been attempted more
+    // than once (the retry fired) but still bounded by the budget.
+    let snapshot = state.model_stats.snapshot();
+    let slow = snapshot.iter().find(|s| s.id == "slow-model").unwrap();
+    assert!(
+        slow.total >= 2,
+        "a stalled body must be retried on another key; observed {} attempts",
+        slow.total
+    );
+    assert!(
+        elapsed < Duration::from_millis(2500),
+        "total wait must stay within the 2x budget, took {:?}",
+        elapsed
+    );
+
+    slow_body.assert();
+}
+
 /// Test with ModelRouter for model selection
 #[tokio::test]
 async fn test_proxy_with_router() {

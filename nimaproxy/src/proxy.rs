@@ -1127,6 +1127,46 @@ pub async fn chat_completions(
                             key_label.as_deref(),
                             request_timeout_ms,
                         );
+                        // Retry once on a different key, on the same bounded
+                        // budget as the send-timeout branch below. This is the
+                        // path that actually fires in production for
+                        // long-context requests: the connection is established
+                        // and headers arrive, but the body stalls, so
+                        // `send()` has already succeeded and the outer
+                        // Err(_) branch never runs. Measured on this host,
+                        // every 504 took this branch at exactly the timeout
+                        // floor, so ~32% of admitted requests returned 504 with
+                        // no second attempt.
+                        //
+                        // Binding: attempts remain, one more window fits in the
+                        // budget measured from the start of the request, and no
+                        // response bytes have been sent to the client yet
+                        // (`collected` is discarded and `<collected>` is
+                        // dropped before this point).
+                        let window = Duration::from_millis(request_timeout_ms);
+                        let fits_budget = started.elapsed() + window <= attempt_budget;
+                        if attempt + 1 < n && fits_budget {
+                            state
+                                .pool
+                                .mark_rate_limited(idx, TIMEOUT_RETRY_KEY_COOLDOWN_SECS);
+                            log_turn_request(
+                                &original_model,
+                                &model_id,
+                                t0.elapsed().as_millis(),
+                                false,
+                                StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                                message_count,
+                                has_tool_calls,
+                                tool_call_count,
+                                key_label.as_deref(),
+                                false,
+                                Some(format!(
+                                    "upstream body timeout after {}ms; retrying on another key",
+                                    request_timeout_ms
+                                )),
+                            );
+                            continue;
+                        }
                         log_turn_request(
                             &original_model,
                             &model_id,
