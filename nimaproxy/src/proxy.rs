@@ -285,12 +285,27 @@ fn no_key_response(state: &AppState) -> Response {
 fn try_acquire_gateway_permits(
     state: &AppState,
 ) -> Result<(UpstreamPermit, KeyLease), GatewayAcquireError> {
-    let upstream_permit = state
-        .try_acquire_upstream()
-        .ok_or(GatewayAcquireError::Overloaded)?;
-
+    // Acquire the KEY LEASE FIRST, then the global permit.
+    //
+    // `try_acquire_upstream` increments `upstream_attempts` on success
+    // (lib.rs:413), and that increment is never undone when the permit is
+    // dropped. Acquiring the global permit first meant every failed key
+    // acquisition burned a phantom "attempt": the caller loops every 25 ms
+    // for up to `admission_wait_ms`, so a request queued behind saturated
+    // keys accumulated ~admission_wait_ms/25 attempts (200 at the 5000 ms
+    // setting) that represented no upstream call at all. That inflated
+    // `upstream_attempts` by ~74x over real upstream calls on this host and
+    // made the ratio useless for capacity reasoning.
+    //
+    // Ordering the key lease first means a failed acquisition costs nothing:
+    // we only count an attempt once we actually hold a key and a permit.
     match state.pool.next_key_with_permit() {
-        Ok(key_lease) => Ok((upstream_permit, key_lease)),
+        Ok(key_lease) => {
+            let upstream_permit = state
+                .try_acquire_upstream()
+                .ok_or(GatewayAcquireError::Overloaded)?;
+            Ok((upstream_permit, key_lease))
+        }
         Err(KeyAcquireError::AllBusy) => Err(GatewayAcquireError::Overloaded),
         Err(KeyAcquireError::NoKeys | KeyAcquireError::AllCoolingDown) => {
             Err(GatewayAcquireError::NoKeys)
@@ -3427,6 +3442,107 @@ mod tests {
             sse_body_error(body, Some("text/event-stream")).expect("expected an embedded error");
         assert_eq!(code, 503);
         assert_eq!(msg, "overloaded");
+    }
+
+    /// Regression for the phantom-attempt defect.
+    ///
+    /// `try_acquire_gateway_permits` used to acquire the global upstream
+    /// permit first, and that path increments `upstream_attempts`
+    /// (lib.rs:413) with no undo on drop. When all keys were busy the
+    /// permit was discarded and the caller re-tried every 25 ms for
+    /// `admission_wait_ms`, so a request queued behind saturated keys
+    /// accumulated attempts representing no upstream call.
+    ///
+    /// Measured on the live host before the fix: `upstream_attempts` grew
+    /// 8.3x per request while keys were saturated vs 1.0x while quiet, with
+    /// the counter reaching ~74x total upstream calls.
+    #[test]
+    fn test_failed_key_acquisition_does_not_count_an_attempt() {
+        let state = saturated_single_key_state(1);
+        let held = state
+            .pool
+            .next_key_with_permit()
+            .expect("first lease should succeed");
+        assert_eq!(
+            state.pool.available_permits(),
+            0,
+            "keys must be saturated for this test to be discriminating"
+        );
+
+        let before = state.gateway_metrics.snapshot().upstream_attempts;
+        for _ in 0..50 {
+            match try_acquire_gateway_permits(&state) {
+                Ok(_) => panic!("saturated keys must reject, not admit"),
+                Err(GatewayAcquireError::Overloaded | GatewayAcquireError::NoKeys) => {}
+            }
+        }
+        let after = state.gateway_metrics.snapshot().upstream_attempts;
+
+        assert_eq!(
+            after, before,
+            "a failed admission must not inflate upstream_attempts: 50 attempts were counted"
+        );
+        assert_eq!(
+            before, 0,
+            "no upstream work happened, so the base must be 0"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn test_successful_admission_counts_exactly_one_attempt() {
+        let state = saturated_single_key_state(2);
+        let before = state.gateway_metrics.snapshot().upstream_attempts;
+        let permits = match try_acquire_gateway_permits(&state) {
+            Ok(p) => p,
+            Err(GatewayAcquireError::Overloaded) => panic!("should be admitted"),
+            Err(GatewayAcquireError::NoKeys) => panic!("should be admitted"),
+        };
+        assert_eq!(
+            state.gateway_metrics.snapshot().upstream_attempts,
+            before + 1,
+            "one real admission must count exactly one attempt"
+        );
+        drop(permits);
+    }
+
+    /// One leasable key, abundant global permits, so the KEY is the only
+    /// constraint on admission. `max_in_flight_per_key` is passed in full.
+    fn saturated_single_key_state(max_in_flight_per_key: usize) -> Arc<AppState> {
+        AppState::new_with_controls(
+            vec![crate::KeyEntry {
+                key: "key-a".to_string(),
+                label: Some("key-a".to_string()),
+                disabled: false,
+            }],
+            "https://test.api.nvidia.com".to_string(),
+            None,
+            ModelStatsStore::new(3000.0),
+            vec![],
+            8,
+            8000,
+            "complete".to_string(),
+            HashMap::new(),
+            ModelCompat::default(),
+            RuntimeControls {
+                racing_adaptive: false,
+                racing_min_parallel: 2,
+                racing_pressure_parallel: 2,
+                racing_degraded_parallel: 2,
+                racing_fast_models: vec![],
+                racing_fallback_models: vec![],
+                racing_large_prompt_char_threshold: 0,
+                racing_large_prompt_parallel: 1,
+                racing_solo_fallback: true,
+                racing_max_total_request_ms: 25_000,
+                max_upstream_in_flight: 8,
+                max_in_flight_per_key,
+                admission_wait_ms: 5000,
+                min_dynamic_timeout_ms: 15_000,
+                dynamic_sample_floor: 25,
+                auth_failure_cooldown_secs: 900,
+            },
+        )
     }
 
     #[test]
