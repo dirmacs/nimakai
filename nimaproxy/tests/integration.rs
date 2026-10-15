@@ -767,7 +767,7 @@ fn test_racing_preallocate_max_parallel_capped_at_model_count() {
 
 #[test]
 fn test_model_validation_rejects_invalid_model() {
-    use nimaproxy::proxy::validate_model_exists;
+    use nimaproxy::proxy::messages::validate_model_exists;
     use std::sync::Mutex;
 
     let state = AppState::new(
@@ -808,7 +808,7 @@ fn test_model_validation_rejects_invalid_model() {
 
 #[test]
 fn test_model_validation_allows_auto_and_empty() {
-    use nimaproxy::proxy::validate_model_exists;
+    use nimaproxy::proxy::messages::validate_model_exists;
 
     let state = AppState::new(
         vec![KeyEntry {
@@ -841,7 +841,7 @@ fn test_model_validation_allows_auto_and_empty() {
 
 #[test]
 fn test_model_validation_passes_when_no_cache() {
-    use nimaproxy::proxy::validate_model_exists;
+    use nimaproxy::proxy::messages::validate_model_exists;
 
     let state = AppState::new(
         vec![KeyEntry {
@@ -897,7 +897,7 @@ fn test_role_transformation_developer_to_user() {
 
     let body_bytes = serde_json::to_vec(&request_body).unwrap();
     let (_model_id, result) =
-        nimaproxy::proxy::resolve_model(bytes::Bytes::from(body_bytes), &state);
+        nimaproxy::proxy::messages::resolve_model(bytes::Bytes::from(body_bytes), &state);
 
     let result_str = std::str::from_utf8(&result).unwrap();
     let transformed: serde_json::Value = serde_json::from_str(result_str).unwrap();
@@ -942,7 +942,7 @@ fn test_role_transformation_tool_to_assistant() {
 
     let body_bytes = serde_json::to_vec(&request_body).unwrap();
     let (_model_id, result) =
-        nimaproxy::proxy::resolve_model(bytes::Bytes::from(body_bytes), &state);
+        nimaproxy::proxy::messages::resolve_model(bytes::Bytes::from(body_bytes), &state);
 
     let result_str = std::str::from_utf8(&result).unwrap();
     let transformed: serde_json::Value = serde_json::from_str(result_str).unwrap();
@@ -988,7 +988,7 @@ fn test_role_transformation_no_change_for_allowed_model() {
 
     let body_bytes = serde_json::to_vec(&request_body).unwrap();
     let (_model_id, result) =
-        nimaproxy::proxy::resolve_model(bytes::Bytes::from(body_bytes), &state);
+        nimaproxy::proxy::messages::resolve_model(bytes::Bytes::from(body_bytes), &state);
 
     let result_str = std::str::from_utf8(&result).unwrap();
     let transformed: serde_json::Value = serde_json::from_str(result_str).unwrap();
@@ -1038,7 +1038,7 @@ fn test_role_transformation_all_mistral_models() {
 
     let body_bytes = serde_json::to_vec(&request_body).unwrap();
     let (_model_id, result) =
-        nimaproxy::proxy::resolve_model(bytes::Bytes::from(body_bytes), &state);
+        nimaproxy::proxy::messages::resolve_model(bytes::Bytes::from(body_bytes), &state);
 
     let result_str = std::str::from_utf8(&result).unwrap();
     let transformed: serde_json::Value = serde_json::from_str(result_str).unwrap();

@@ -73,7 +73,7 @@ async fn send_chat(
     state: Arc<AppState>,
     body: serde_json::Value,
 ) -> (u16, Option<serde_json::Value>) {
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),

@@ -163,14 +163,27 @@ impl TurnLogger {
             return Ok(());
         }
 
-        let mut writer_guard = self.writer.lock().unwrap();
-
-        // Reopen if needed (e.g., after rotation)
-        if writer_guard.is_none() {
+        // The writer mutex must NOT be held while calling `open_file`.
+        //
+        // Holding it used to deadlock: `log` locked `self.writer`, found it
+        // `None` (e.g. after `rotate`), and called `open_file` which locks
+        // `self.writer` again — `std::sync::Mutex` is not reentrant, so the
+        // second lock blocked forever on the first one's guard. The re-lock on
+        // the line after was unreachable.
+        //
+        // The consequence was not a crash but a wedged thread: after any
+        // rotation the next `log` call hung the caller instead of writing, so
+        // turn logging stopped with no error at all — the same silent shape as
+        // a permission failure.
+        let needs_open = {
+            let guard = self.writer.lock().unwrap();
+            guard.is_none()
+        };
+        if needs_open {
             self.open_file()?;
-            writer_guard = self.writer.lock().unwrap();
         }
 
+        let mut writer_guard = self.writer.lock().unwrap();
         if let Some(writer) = writer_guard.as_mut() {
             serde_json::to_writer(&mut *writer, turn)?;
             writer.write_all(b"\n")?;
@@ -328,5 +341,117 @@ mod tests {
         let json = serde_json::to_string(&turn).unwrap();
         assert!(json.contains("test-model"));
         assert!(json.contains("requested_model"));
+    }
+
+    /// The write path itself, previously 0% covered.
+    ///
+    /// Turn logging is the operator's only view of what the proxy did, and it
+    /// has been silently off in the past (permission errors on the container
+    /// user). These tests pin the behaviour that must hold: an enabled logger
+    /// writes a complete JSON line, a disabled logger writes nothing at all,
+    /// and a logger whose writer was rotated away reopens and continues.
+    fn sample_turn() -> TurnLog {
+        TurnLog::new(
+            "auto".to_string(),
+            "test/model".to_string(),
+            1234,
+            true,
+            200,
+            3,
+            1,
+            false,
+            0,
+            Some("key-a".to_string()),
+            false,
+        )
+    }
+
+    #[test]
+    fn test_enabled_logger_writes_one_json_line_per_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turns.jsonl");
+        let logger = TurnLogger::new(path.to_str().unwrap(), true).unwrap();
+
+        logger.log(&sample_turn()).unwrap();
+        logger.log(&sample_turn()).unwrap();
+        drop(logger);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per record, got {lines:?}");
+        // Every line must be a complete, parseable JSON object.
+        for line in &lines {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["requested_model"], "auto");
+            assert_eq!(v["status_code"], 200);
+        }
+    }
+
+    #[test]
+    fn test_disabled_logger_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turns.jsonl");
+        let logger = TurnLogger::new(path.to_str().unwrap(), false).unwrap();
+
+        // Must succeed silently rather than erroring, and must not create a file.
+        logger.log(&sample_turn()).unwrap();
+        assert!(
+            !path.exists(),
+            "a disabled logger must not create any file, found {:?}",
+            path
+        );
+    }
+
+    #[test]
+    fn test_logger_reopens_after_writer_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turns.jsonl");
+        let logger = TurnLogger::new(path.to_str().unwrap(), true).unwrap();
+        logger.log(&sample_turn()).unwrap();
+
+        // Simulate rotation tearing down the writer: the next log must reopen
+        // rather than silently dropping the record.
+        *logger.writer.lock().unwrap() = None;
+        logger.log(&sample_turn()).unwrap();
+        drop(logger);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content.lines().count(),
+            2,
+            "record after reopen must be persisted, not lost"
+        );
+    }
+
+    #[test]
+    fn test_logger_appends_never_truncates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turns.jsonl");
+        // Pre-existing content must survive.
+        std::fs::write(&path, b"existing line\n").unwrap();
+
+        let logger = TurnLogger::new(path.to_str().unwrap(), true).unwrap();
+        logger.log(&sample_turn()).unwrap();
+        drop(logger);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.starts_with("existing line\n"),
+            "append mode must preserve prior content, got {content:?}"
+        );
+        assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_logger_survives_unwritable_directory_and_reports_it() {
+        // A logger pointed at an impossible path must FAIL LOUDLY rather than
+        // silently disabling itself — the failure mode that hid a 12-day
+        // logging outage in the deployed container.
+        let bad = "/proc/definitely/not/writable/turns.jsonl";
+        let result = TurnLogger::new(bad, true);
+        assert!(
+            result.is_err(),
+            "an unwritable log path must return an error, not a silent no-op"
+        );
     }
 }

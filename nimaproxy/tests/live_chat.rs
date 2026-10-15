@@ -70,7 +70,7 @@ async fn test_live_chat_completions() {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -142,7 +142,7 @@ async fn test_live_chat_streaming() {
         "stream": true
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -229,7 +229,7 @@ async fn test_live_chat_tool_calling() {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -298,7 +298,7 @@ async fn test_live_chat_multi_turn() {
         "temperature": 0.0
     });
 
-    let resp1 = nimaproxy::proxy::chat_completions(
+    let resp1 = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body1.to_string()),
@@ -347,7 +347,7 @@ async fn test_live_chat_multi_turn() {
         "temperature": 0.0
     });
 
-    let resp2 = nimaproxy::proxy::chat_completions(
+    let resp2 = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body2.to_string()),
@@ -413,7 +413,7 @@ async fn test_live_chat_various_models() {
         });
 
         let t0 = std::time::Instant::now();
-        let resp = nimaproxy::proxy::chat_completions(
+        let resp = nimaproxy::proxy::chat::chat_completions(
             axum::extract::State(state.clone()),
             axum::http::HeaderMap::new(),
             bytes::Bytes::from(body.to_string()),

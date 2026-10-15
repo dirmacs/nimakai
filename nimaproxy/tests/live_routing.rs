@@ -54,7 +54,7 @@ async fn send_chat_request(state: &Arc<AppState>, model: &str) -> u16 {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),

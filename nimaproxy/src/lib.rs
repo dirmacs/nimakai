@@ -9,13 +9,13 @@ pub mod proxy;
 pub mod test_utils;
 pub mod turn_log;
 
-pub use proxy::validate_model_exists;
+pub use proxy::messages::validate_model_exists;
 
 pub use config::{load as config_load, Config, KeyEntry, ModelParams, RoutingConfig};
 pub use key_pool::{KeyAcquireError, KeyLease, KeyPool};
 pub use model_router::{ModelRouter, Strategy};
 pub use model_stats::{ModelSnapshot, ModelStatsStore, ModelStatus, RecordOutcome};
-pub use proxy::{completions, embeddings, props};
+pub use proxy::http::{completions, embeddings, props};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::os::raw::c_char;

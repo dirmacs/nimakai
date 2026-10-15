@@ -78,7 +78,7 @@ fn make_state_no_racing() -> Arc<AppState> {
 #[tokio::test]
 async fn test_e2e_health_returns_ok() {
     let state = make_state();
-    let resp = nimaproxy::proxy::health(axum::extract::State(state.clone())).await;
+    let resp = nimaproxy::proxy::http::health(axum::extract::State(state.clone())).await;
 
     let response = resp.into_response();
     let (_status, body) = response.into_parts();
@@ -95,7 +95,7 @@ async fn test_e2e_health_returns_ok() {
 #[tokio::test]
 async fn test_e2e_models_endpoint_reachable() {
     let state = make_state();
-    let resp = nimaproxy::proxy::models(axum::extract::State(state.clone())).await;
+    let resp = nimaproxy::proxy::http::models(axum::extract::State(state.clone())).await;
 
     let response = resp.into_response();
     let (parts, body) = response.into_parts();
@@ -131,7 +131,7 @@ async fn test_e2e_stats_endpoint() {
     state.model_stats.record("test-model", 150.0, true);
     state.model_stats.record("test-model", 200.0, true);
 
-    let resp = nimaproxy::proxy::stats(axum::extract::State(state.clone())).await;
+    let resp = nimaproxy::proxy::http::stats(axum::extract::State(state.clone())).await;
 
     let response = resp.into_response();
     let (_parts, body) = response.into_parts();
@@ -178,7 +178,7 @@ async fn test_e2e_chat_via_proxy() {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -222,7 +222,7 @@ async fn test_e2e_racing_uses_preallocated_keys() {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -273,7 +273,7 @@ async fn test_e2e_racing_responds_with_key_label_header() {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -321,7 +321,7 @@ async fn test_e2e_racing_latency_comparison() {
         });
 
         let t0 = std::time::Instant::now();
-        let resp = nimaproxy::proxy::chat_completions(
+        let resp = nimaproxy::proxy::chat::chat_completions(
             axum::extract::State(state.clone()),
             axum::http::HeaderMap::new(),
             bytes::Bytes::from(body.to_string()),
@@ -446,7 +446,7 @@ async fn test_e2e_racing_fails_gracefully_on_all_429() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -502,7 +502,7 @@ async fn test_e2e_racing_429_key_cooldown_persists() {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -564,7 +564,7 @@ async fn test_e2e_invalid_assistant_message_not_propagated() {
         "temperature": 0.0
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -609,7 +609,7 @@ async fn test_e2e_racing_returns_2xx_winner() {
     });
 
     let t0 = std::time::Instant::now();
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),

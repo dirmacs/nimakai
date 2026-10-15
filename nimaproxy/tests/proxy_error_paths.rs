@@ -8,7 +8,7 @@ use bytes::Bytes;
 use nimaproxy::config::{KeyEntry, ModelCompat, ModelParams};
 use nimaproxy::model_router::{ModelRouter, Strategy};
 use nimaproxy::model_stats::ModelStatsStore;
-use nimaproxy::proxy::chat_completions;
+use nimaproxy::proxy::chat::chat_completions;
 use nimaproxy::{AppState, RuntimeControls};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1170,7 +1170,7 @@ async fn test_proxy_with_router() {
 #[tokio::test]
 async fn test_models_endpoint_error() {
     use mockito::Server;
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let mut server = Server::new_async().await;
     let mock = server
@@ -1191,7 +1191,7 @@ async fn test_models_endpoint_error() {
 #[tokio::test]
 async fn test_models_endpoint_success() {
     use mockito::Server;
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let mut server = Server::new_async().await;
     let mock = server
@@ -1211,7 +1211,7 @@ async fn test_models_endpoint_success() {
 
 #[tokio::test]
 async fn test_models_endpoint_returns_configured_racing_models_without_upstream() {
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let state = AppState::new(
         vec![],
@@ -1241,7 +1241,7 @@ async fn test_models_endpoint_returns_configured_racing_models_without_upstream(
 
 #[tokio::test]
 async fn test_models_endpoint_includes_router_models() {
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let router = ModelRouter::new(
         vec!["router-a".to_string(), "router-b".to_string()],
@@ -1275,7 +1275,7 @@ async fn test_models_endpoint_includes_router_models() {
 
 #[tokio::test]
 async fn test_health_exposes_routing_and_racing_metadata() {
-    use nimaproxy::proxy::health;
+    use nimaproxy::proxy::http::health;
 
     let router = ModelRouter::new(vec!["router-a".to_string()], Strategy::RoundRobin);
     let state = AppState::new(
@@ -1323,7 +1323,7 @@ async fn test_stats_exposes_gateway_metrics_and_limits() {
     state.gateway_metrics.record_all_racers_failed();
     state.gateway_metrics.record_deadline_exceeded();
 
-    let resp = nimaproxy::proxy::stats(axum::extract::State(state))
+    let resp = nimaproxy::proxy::http::stats(axum::extract::State(state))
         .await
         .into_response();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
@@ -1352,7 +1352,7 @@ async fn test_stats_exposes_gateway_metrics_and_limits() {
 /// Test models endpoint with no keys
 #[tokio::test]
 async fn test_models_endpoint_no_keys() {
-    use nimaproxy::proxy::models;
+    use nimaproxy::proxy::http::models;
 
     let state = AppState::new(
         vec![],
@@ -1726,7 +1726,7 @@ async fn test_racing_returns_429_when_all_keys_unavailable() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1765,7 +1765,7 @@ async fn test_racing_skips_400_does_not_propagate_to_client() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1821,7 +1821,7 @@ async fn test_racing_429_marks_key_rate_limited() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1875,7 +1875,7 @@ async fn test_racing_429_loser_does_not_globally_cool_key() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state.clone()),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),
@@ -1923,7 +1923,7 @@ async fn test_racing_skips_4xx_and_returns_first_2xx() {
         "max_tokens": 5
     });
 
-    let resp = nimaproxy::proxy::chat_completions(
+    let resp = nimaproxy::proxy::chat::chat_completions(
         axum::extract::State(state),
         axum::http::HeaderMap::new(),
         bytes::Bytes::from(body.to_string()),

@@ -304,16 +304,16 @@ async fn main() {
     let app = Router::new()
         .route(
             "/v1/chat/completions",
-            post(nimaproxy::proxy::chat_completions),
+            post(nimaproxy::proxy::chat::chat_completions),
         )
-        .route("/test-post", post(nimaproxy::proxy::chat_completions))
-        .route("/v1/models", get(nimaproxy::proxy::models))
-        .route("/models", get(nimaproxy::proxy::models)) // alias: OMP polls /models without /v1/ prefix
-        .route("/health", get(nimaproxy::proxy::health))
-        .route("/stats", get(nimaproxy::proxy::stats))
-        .route("/v1/completions", post(nimaproxy::proxy::completions))
-        .route("/v1/embeddings", post(nimaproxy::proxy::embeddings))
-        .route("/props", get(nimaproxy::proxy::props))
+        .route("/test-post", post(nimaproxy::proxy::chat::chat_completions))
+        .route("/v1/models", get(nimaproxy::proxy::http::models))
+        .route("/models", get(nimaproxy::proxy::http::models)) // alias: OMP polls /models without /v1/ prefix
+        .route("/health", get(nimaproxy::proxy::http::health))
+        .route("/stats", get(nimaproxy::proxy::http::stats))
+        .route("/v1/completions", post(nimaproxy::proxy::http::completions))
+        .route("/v1/embeddings", post(nimaproxy::proxy::http::embeddings))
+        .route("/props", get(nimaproxy::proxy::http::props))
         .fallback(fallback_handler)
         .with_state(state.clone());
 
