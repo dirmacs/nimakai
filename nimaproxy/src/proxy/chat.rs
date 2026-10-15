@@ -1,36 +1,27 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::proxy::admission::acquire_gateway_permits;
+use crate::proxy::http::log_turn_request;
+use crate::proxy::messages::{
+    extract_response_metrics, mistral_validation_error, normalize_requested_model, resolve_model,
+    validate_model_exists,
+};
+use crate::proxy::racing::race_models;
+use crate::proxy::retry::{RetryDecision, RetryPolicy, TIMEOUT_RETRY_KEY_COOLDOWN_SECS};
+use crate::proxy::timeouts::{record_model_timeout, request_turn_summary, timeout_for_model};
+use crate::AppState;
 use axum::{
-    extract::State,
     body::Body,
+    extract::State,
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use crate::proxy::http::log_turn_request;
-use crate::proxy::admission::{acquire_gateway_permits};
-use crate::proxy::messages::{extract_response_metrics, mistral_validation_error, normalize_requested_model, resolve_model, validate_model_exists};
-use crate::proxy::racing::{race_models};
-use crate::proxy::timeouts::{record_model_timeout, request_turn_summary, timeout_for_model};
 use bytes::Bytes;
 use futures::TryStreamExt;
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::warn;
-use crate::AppState;
 pub(crate) const MAX_RETRIES: usize = 8;
-/// How long a key is benched after timing out, so the retry picks a
-/// different key rather than re-acquiring the one that just stalled.
-const TIMEOUT_RETRY_KEY_COOLDOWN_SECS: u64 = 60;
-/// Total wall-clock ceiling for a request's upstream attempts, as a
-/// multiple of one timeout window. With a 15000 ms window this permits
-/// exactly one extra attempt, so a retry can never double the client's
-/// wait.
-const TIMEOUT_RETRY_BUDGET_MULTIPLIER: u32 = 2;
-/// Scheduling slack on top of the budget. A timeout is observed at
-/// window + jitter (302 ms against a 300 ms window under load), so a bare
-/// 2x budget would fail `elapsed + window <= budget` by a few milliseconds
-/// and the retry could never fire.
-const TIMEOUT_RETRY_BUDGET_SLACK_MS: u64 = 500;
 pub(crate) fn count_repetitions(text: &str) -> u32 {
     let text_lower = text.to_lowercase();
     let words: Vec<&str> = text_lower.split_whitespace().collect();
@@ -192,10 +183,11 @@ pub async fn chat_completions(
     // Observed on the live host, a single attempt measured 16546 ms against a
     // 15000 ms window, so a bare 2x budget (30500 ms) rejected the retry
     // because 16546 + 15000 > 30500.
-    let attempt_budget = Duration::from_millis(timeout_for_model(&state, &model_id))
-        .saturating_mul(TIMEOUT_RETRY_BUDGET_MULTIPLIER)
-        .saturating_add(state.admission_wait_duration())
-        .saturating_add(Duration::from_millis(TIMEOUT_RETRY_BUDGET_SLACK_MS));
+    let retry_policy = RetryPolicy::new(
+        n,
+        timeout_for_model(&state, &model_id),
+        state.admission_wait_ms,
+    );
     let started = Instant::now();
     for attempt in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
@@ -242,8 +234,7 @@ pub async fn chat_completions(
                 // The final attempt (or an exhausted budget) falls through
                 // to the original 504, so failure paths are unchanged.
                 let window = Duration::from_millis(request_timeout_ms);
-                let fits_budget = started.elapsed() + window <= attempt_budget;
-                if attempt + 1 < n && fits_budget {
+                if retry_policy.decide(started, attempt) == RetryDecision::Retry {
                     state
                         .pool
                         .mark_rate_limited(idx, TIMEOUT_RETRY_KEY_COOLDOWN_SECS);
@@ -433,9 +424,7 @@ pub async fn chat_completions(
                         // (`collected` is discarded and `<collected>` is
                         // dropped before this point).
                         let window = Duration::from_millis(request_timeout_ms);
-                        let fits_budget = started.elapsed() + window <= attempt_budget;
-                        eprintln!("BODY-CHECK attempt={} n={} elapsed_ms={} window_ms={} budget_ms={} fits={}", attempt, n, started.elapsed().as_millis(), window.as_millis(), attempt_budget.as_millis(), fits_budget);
-                        if attempt + 1 < n && fits_budget {
+                        if retry_policy.decide(started, attempt) == RetryDecision::Retry {
                             state
                                 .pool
                                 .mark_rate_limited(idx, TIMEOUT_RETRY_KEY_COOLDOWN_SECS);

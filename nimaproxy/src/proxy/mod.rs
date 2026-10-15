@@ -21,6 +21,7 @@ pub mod fallback;
 pub mod http;
 pub mod messages;
 pub mod racing;
+pub mod retry;
 pub mod timeouts;
 pub mod upstream_errors;
 
