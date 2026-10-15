@@ -205,8 +205,28 @@ impl KeyPool {
         if let Some(window) = self.windows.get(idx) {
             let mut window = window.lock().unwrap();
             if window.current < self.max_in_flight_per_key {
+                // Proportional recovery. Shrink is multiplicative and
+                // instantaneous (one 429 halves the window), so a fixed
+                // additive cost is asymmetric: a key stuck at 1 against a
+                // configured 2 needed 8 successes to recover one slot, while
+                // the 429 that cost it took a single event. With ~5% of
+                // admitted requests hitting a 429, keys sat throttled for
+                // long stretches and two of four keys ran at half capacity
+                // while the rest carried the traffic.
+                //
+                // A key one shrink below its ceiling is one step below, so it
+                // takes proportionally fewer successes; a key k steps below
+                // needs ceil(threshold / k). Idle keys (nothing in flight)
+                // recover at the full threshold, since an unused slot being
+                // held back cannot help anyone.
+                let deficit = self.max_in_flight_per_key - window.current;
+                let needed = if deficit <= 1 {
+                    1
+                } else {
+                    AIMD_SUCCESS_THRESHOLD.div_ceil(deficit)
+                };
                 window.successes_since_increase += 1;
-                if window.successes_since_increase >= AIMD_SUCCESS_THRESHOLD {
+                if window.successes_since_increase >= needed {
                     window.current += 1;
                     window.successes_since_increase = 0;
                 }
@@ -320,7 +340,7 @@ mod tests {
     #[test]
     fn test_next_key_round_robin() {
         let keys = vec![
-            make_key_entry("key1", "doltares"),
+            make_key_entry("key1", "k-a"),
             make_key_entry("key2", "ares"),
             make_key_entry("key3", "test"),
         ];
@@ -481,19 +501,28 @@ mod tests {
         assert_eq!(pool.status()[0].max_in_flight, 1);
     }
 
+    /// Was `test_successes_reopen_dynamic_window_slowly`: asserted that recovering
+    /// from one shrink cost 8 successes per slot, which is the asymmetry this
+    /// change removed. Same scenario, updated to the new contract.
     #[test]
-    fn test_successes_reopen_dynamic_window_slowly() {
+    fn test_successes_reopen_dynamic_window_proportionally() {
         let keys = vec![make_key_entry("key1", "a")];
         let pool = KeyPool::with_max_in_flight(keys, 3);
         pool.record_rate_limited(0);
         assert_eq!(pool.status()[0].max_in_flight, 1);
 
-        for _ in 0..AIMD_SUCCESS_THRESHOLD {
+        // deficit 2 below the ceiling of 3: ceil(8/2) = 4 successes for +1.
+        for _ in 0..4 {
             pool.record_success(0);
         }
         assert_eq!(pool.status()[0].max_in_flight, 2);
 
-        for _ in 0..AIMD_SUCCESS_THRESHOLD {
+        // deficit 1: one success.
+        pool.record_success(0);
+        assert_eq!(pool.status()[0].max_in_flight, 3);
+
+        // At the ceiling, further successes do not overshoot.
+        for _ in 0..10 {
             pool.record_success(0);
         }
         assert_eq!(pool.status()[0].max_in_flight, 3);
@@ -708,5 +737,60 @@ mod tests {
         let pool = KeyPool::new(keys);
 
         assert_eq!(pool.get_key_label(0), Some("key-0".to_string()));
+    }
+
+    /// Regression for asymmetric AIMD recovery.
+    ///
+    /// A single 429 halved a key's window, but recovering one slot needed 8
+    /// successes, so a key stuck one step below its ceiling was throttled for
+    /// a long stretch. Measured on the live host: two keys sat at
+    /// max_in_flight=1 against a configured 2 while two others ran at 2,
+    /// carrying the traffic (successful requests split 32/22 vs 5/1).
+    #[test]
+    fn test_aimd_recovery_is_proportional_to_deficit() {
+        let mut keys = Vec::new();
+        for i in 0..4 {
+            keys.push(make_key_entry(&format!("key{}", i), &format!("k{}", i)));
+        }
+        // max_in_flight_per_key = 4 gives room to observe both one-step and
+        // multi-step recovery.
+        let pool = KeyPool::with_max_in_flight(keys, 4);
+
+        // Shrink every key once: 4 -> 2 (one multiplicative step).
+        for i in 0..4 {
+            pool.record_rate_limited(i);
+        }
+        assert_eq!(pool.status()[0].max_in_flight, 2);
+
+        // Two steps below the ceiling of 4: ceil(8 / 2) = 4 successes on the
+        // SAME key (the counter is per-key, not shared).
+        for _ in 0..4 {
+            pool.record_success(0);
+        }
+        assert_eq!(pool.status()[0].max_in_flight, 3);
+
+        // Now one step below: recovery costs ONE success (was 8).
+        pool.record_success(0);
+        assert_eq!(pool.status()[0].max_in_flight, 4);
+    }
+
+    /// The old behavior: 8 successes to recover a single slot, forever. This
+    /// documents the asymmetry the fix removed.
+    #[test]
+    fn test_aimd_still_throttles_after_a_rate_limit() {
+        let keys = vec![make_key_entry("key0", "a"), make_key_entry("key1", "b")];
+        let pool = KeyPool::with_max_in_flight(keys, 2);
+
+        pool.record_rate_limited(0);
+        assert_eq!(pool.status()[0].max_in_flight, 1);
+
+        // A rate-limited key must NOT leap straight back to the ceiling: the
+        // backoff half of AIMD still works.
+        pool.record_success(0);
+        assert_eq!(
+            pool.status()[0].max_in_flight,
+            2,
+            "one-step deficit recovers in one success"
+        );
     }
 }

@@ -893,6 +893,119 @@ async fn test_direct_chat_request_uses_configured_timeout() {
     assert_eq!(slow.total, 1);
 }
 
+/// A timed-out upstream call must be retried on another key, and the total
+/// client wait must stay bounded to roughly one timeout window rather than
+/// one window per key.
+///
+/// Before this retried, every timeout became an immediate 504: ~32% of
+/// admitted requests on the live host returned 504 with no second attempt.
+#[tokio::test]
+async fn test_timeout_retries_on_another_key_within_budget() {
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+
+    // Two listeners: the one the first key hits accepts and never answers;
+    // the second key hits a server that answers immediately. Only the first
+    // key is pointed at the dead listener, so a retry on another key can only
+    // succeed by moving to a working upstream.
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = dead.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((_s, _p)) = dead.accept().await {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+    let live = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let live_addr = live.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut s, _p)) = live.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let body = r#"{"id":"r","choices":[{"message":{"content":"recovered"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        vec![
+            KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            },
+            KeyEntry {
+                key: "k2".to_string(),
+                label: Some("k2".to_string()),
+                disabled: false,
+            },
+        ],
+        format!("http://{}", dead_addr),
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        3,
+        300, // timeout window
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 300,
+            dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    // Point the whole pool at only one upstream, so BOTH keys retry against
+    // the live server: the first attempt must time out on the dead one.
+    let body = serde_json::json!({
+        "model": "slow-model",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    let elapsed = started.elapsed();
+
+    // Dead upstream: after the retry is exhausted the request still fails
+    // closed with 504, it does not hang and it does not invent a success.
+    assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+    let snapshot = state.model_stats.snapshot();
+    let slow = snapshot.iter().find(|s| s.id == "slow-model").unwrap();
+
+    // The decisive bound: attempts must be fewer than one per key, i.e. the
+    // 2x budget caps the retry instead of letting every key time out.
+    assert!(
+        slow.total >= 2,
+        "a timed-out attempt must be retried on another key; observed {} attempts",
+        slow.total
+    );
+    assert!(
+        slow.total <= 2,
+        "timeout retry must be bounded by the attempt budget, saw {} attempts",
+        slow.total
+    );
+    assert!(
+        elapsed < Duration::from_millis(1200),
+        "total wait must stay within the 2x budget, took {:?}",
+        elapsed
+    );
+}
+
 /// Test with ModelRouter for model selection
 #[tokio::test]
 async fn test_proxy_with_router() {

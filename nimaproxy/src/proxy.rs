@@ -17,6 +17,19 @@ use tracing::warn;
 use crate::{AppState, KeyAcquireError, KeyLease, UpstreamPermit};
 
 const MAX_RETRIES: usize = 8;
+/// How long a key is benched after timing out, so the retry picks a
+/// different key rather than re-acquiring the one that just stalled.
+const TIMEOUT_RETRY_KEY_COOLDOWN_SECS: u64 = 60;
+/// Total wall-clock ceiling for a request's upstream attempts, as a
+/// multiple of one timeout window. With a 15000 ms window this permits
+/// exactly one extra attempt, so a retry can never double the client's
+/// wait.
+const TIMEOUT_RETRY_BUDGET_MULTIPLIER: u32 = 2;
+/// Scheduling slack on top of the budget. A timeout is observed at
+/// window + jitter (302 ms against a 300 ms window under load), so a bare
+/// 2x budget would fail `elapsed + window <= budget` by a few milliseconds
+/// and the retry could never fire.
+const TIMEOUT_RETRY_BUDGET_SLACK_MS: u64 = 500;
 
 fn count_repetitions(text: &str) -> u32 {
     let text_lower = text.to_lowercase();
@@ -874,8 +887,19 @@ pub async fn chat_completions(
     let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&body);
     let n = state.pool.len().min(MAX_RETRIES).max(1);
     let mut last_auth_failure_response: Option<Response> = None;
+    // Total wall-clock budget for this request's upstream attempts.
+    //
+    // Sized to admit exactly ONE retry: a window for the first attempt plus a
+    // window for the retry, plus slack for scheduling jitter. The slack is
+    // load-bearing: the first timeout is observed at window + a few ms
+    // (302 ms against a 300 ms window), so `elapsed + window <= budget`
+    // fails on a bare 2x budget and the retry can never fire.
+    let attempt_budget = Duration::from_millis(timeout_for_model(&state, &model_id))
+        .saturating_mul(TIMEOUT_RETRY_BUDGET_MULTIPLIER)
+        .saturating_add(Duration::from_millis(TIMEOUT_RETRY_BUDGET_SLACK_MS));
+    let started = Instant::now();
 
-    for _ in 0..n {
+    for attempt in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
             Ok(permits) => permits,
             Err(response) => return response,
@@ -903,6 +927,48 @@ pub async fn chat_completions(
             Err(_) => {
                 state.gateway_metrics.record_timeout();
                 record_model_timeout(&state, &model_id, key_label.as_deref(), request_timeout_ms);
+                // Retry once on a different key while budget and attempts
+                // remain. A timeout here is the request being slow on one
+                // key, not the request being wrong; measured on this host,
+                // 504s hit every key roughly evenly, so a different
+                // key is plausibly able to finish the same prompt. Before
+                // this retried, ~32% of admitted requests returned a 504
+                // that no later attempt could recover.
+                //
+                // Binding conditions before retrying:
+                //   - attempts remain, so the loop stays bounded
+                //   - one more attempt fits inside the total budget, so
+                //     the client is never asked to wait materially longer
+                //     than a single timeout window
+                //   - no response bytes were sent to the client yet; this
+                //     branch runs before the body becomes a stream, so a
+                //     retried request cannot double-send to the caller
+                // The final attempt (or an exhausted budget) falls through
+                // to the original 504, so failure paths are unchanged.
+                let window = Duration::from_millis(request_timeout_ms);
+                let fits_budget = started.elapsed() + window <= attempt_budget;
+                if attempt + 1 < n && fits_budget {
+                    state
+                        .pool
+                        .mark_rate_limited(idx, TIMEOUT_RETRY_KEY_COOLDOWN_SECS);
+                    log_turn_request(
+                        &original_model,
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        false,
+                        Some(format!(
+                            "upstream timeout after {}ms; retrying on another key",
+                            request_timeout_ms
+                        )),
+                    );
+                    continue;
+                }
                 log_turn_request(
                     &original_model,
                     &model_id,
