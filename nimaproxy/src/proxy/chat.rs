@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::warn;
 pub(crate) const MAX_RETRIES: usize = 8;
+
 /// POST /v1/chat/completions
 ///
 /// V1: injects key, retries on 429, streams SSE byte-for-byte.
