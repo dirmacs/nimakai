@@ -163,6 +163,7 @@ pub(crate) fn normalize_assistant_messages(json: &mut Value) {
             };
             obj.remove("tool_call_id");
             obj.remove("reasoning");
+            obj.remove("reasoning_content");
             let has_tool_calls = obj
                 .get("tool_calls")
                 .and_then(|tc| tc.as_array())
@@ -181,6 +182,152 @@ pub(crate) fn normalize_assistant_messages(json: &mut Value) {
             }
         }
     }
+}
+
+/// Convert XML tool-call syntax in assistant messages to structured `tool_calls`.
+///
+/// When a model's structured `tool_calls` response fails to reach the harness
+/// (e.g. because the proxy returned a 503 mid-stream), the harness records
+/// the model's attempt as literal text: `<invoke name="bash">…</tool_call>`.
+/// On the next turn that text goes back into the conversation history, and the
+/// model imitates it — emitting more XML instead of structured tool_calls.
+/// This is a self-reinforcing feedback loop.
+///
+/// We break it by converting the XML back into a proper `tool_calls` field on
+/// the assistant message. The model sees its previous calls as structured
+/// (reinforcing correct behavior) and the non-XML text content is preserved.
+///
+/// NVIDIA accepts `tool_calls` without a matching `tool` result, so no
+/// synthetic result message is needed.
+pub(crate) fn recover_xml_tool_calls(json: &mut Value) {
+    let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    let mut recovered_counter = 0u32;
+    for msg in messages.iter_mut() {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        // Already has structured tool_calls — nothing to recover.
+        if msg
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .is_some_and(|tc| !tc.is_empty())
+        {
+            continue;
+        }
+        let Some(content) = msg.get("content").and_then(|c| c.as_str()).map(|s| s.to_string())
+        else {
+            continue;
+        };
+        if !content.contains("<invoke") {
+            continue;
+        }
+        let (cleaned_text, tool_calls) = extract_invoke_blocks(&content, &mut recovered_counter);
+        if tool_calls.is_empty() {
+            continue;
+        }
+        if let Some(obj) = msg.as_object_mut() {
+            let text = cleaned_text.trim();
+            if text.is_empty() {
+                obj.insert("content".to_string(), Value::Null);
+            } else {
+                obj.insert("content".to_string(), Value::String(text.to_string()));
+            }
+            obj.insert("tool_calls".to_string(), Value::Array(tool_calls));
+        }
+    }
+}
+
+/// Parse `<invoke name="X"><parameter …>…</parameter>…</tool_call|function>`
+/// blocks out of `text`. Returns (remaining_text, Vec<tool_call JSON values>).
+fn extract_invoke_blocks(text: &str, counter: &mut u32) -> (String, Vec<Value>) {
+    let mut remaining = text.to_string();
+    let mut tool_calls = Vec::new();
+    for end_marker in ["</tool_call>", "</function>"] {
+        loop {
+            let Some(start) = remaining.find("<invoke") else {
+                break;
+            };
+            let Some(rel_end) = remaining[start..].find(end_marker) else {
+                break;
+            };
+            let end = start + rel_end + end_marker.len();
+            let block = remaining[start..end].to_string();
+            remaining = format!("{}{}", &remaining[..start], &remaining[end..]);
+
+            if let Some(tc) = parse_invoke_block(&block, counter) {
+                tool_calls.push(tc);
+            }
+        }
+    }
+    (remaining, tool_calls)
+}
+
+/// Parse a single `<invoke name="…">…` block into an OpenAI `tool_calls` entry.
+fn parse_invoke_block(block: &str, counter: &mut u32) -> Option<Value> {
+    // Extract function name from <invoke name="…">
+    let name = block.find("name=\"").and_then(|i| {
+        let rest = &block[i + 6..];
+        rest.find('"').map(|j| rest[..j].to_string())
+    })?;
+
+    // Extract parameters into a JSON object for the arguments field.
+    let mut args = serde_json::Map::new();
+    let mut search = block;
+    loop {
+        let Some(idx) = search.find("<parameter") else {
+            break;
+        };
+        let tag_rest = &search[idx..];
+
+        // Two forms: <parameter name="key"> and <parameter=key>
+        let (key, after_tag) = if let Some(nq) = tag_rest.find("name=\"") {
+            let ks = nq + 6;
+            let ke = tag_rest[ks..].find('"').unwrap_or(0) + ks;
+            let k = tag_rest[ks..ke].to_string();
+            let gt = tag_rest.find('>').unwrap_or(tag_rest.len() - 1) + 1;
+            (k, &tag_rest[gt..])
+        } else if let Some(eq) = tag_rest.find("parameter=") {
+            let ks = eq + 10;
+            let ke = tag_rest[ks..].find('>').unwrap_or(0) + ks;
+            let k = tag_rest[ks..ke].to_string();
+            (k, &tag_rest[ke + 1..])
+        } else {
+            search = &search[idx + 10..];
+            continue;
+        };
+
+        let value = if let Some(ei) = after_tag.find("</parameter>") {
+            after_tag[..ei].trim().to_string()
+        } else {
+            after_tag.lines().next().unwrap_or("").trim().to_string()
+        };
+        args.insert(key, Value::String(value));
+
+        let consumed = if let Some(ei) = after_tag.find("</parameter>") {
+            idx + (after_tag.as_ptr() as usize - tag_rest.as_ptr() as usize)
+                + ei
+                + "</parameter>".len()
+        } else {
+            idx + 10
+        };
+        if consumed < search.len() {
+            search = &search[consumed..];
+        } else {
+            break;
+        }
+    }
+
+    *counter += 1;
+    Some(serde_json::json!({
+        "id": format!("recovered_{}", counter),
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": serde_json::to_string(&args).unwrap_or_default()
+        }
+    }))
 }
 /// Validate tool call IDs for Mistral models.
 /// Mistral requires tool call IDs to be exactly 9 alphanumeric characters.
@@ -420,6 +567,12 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     transform_message_roles(&mut json, &model_id, state);
     fix_message_ordering(&mut json);
     normalize_assistant_messages(&mut json);
+    // Recover XML tool-call syntax (<invoke>…</tool_call>) into structured
+    // tool_calls. Models that failed mid-tool-call emit XML as text; when
+    // that text goes back in the conversation, the model imitates it instead
+    // of using structured tool_calls. Converting it back to tool_calls breaks
+    // the feedback loop while preserving what the model intended to do.
+    recover_xml_tool_calls(&mut json);
     if let Some(params) = state.model_params.get(&model_id) {
         apply_model_params(&mut json, params);
     }
