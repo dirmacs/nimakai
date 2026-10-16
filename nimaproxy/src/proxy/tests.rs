@@ -1012,3 +1012,21 @@ fn test_recover_xml_tool_calls_skips_existing_tool_calls() {
     recover_xml_tool_calls(&mut json);
     assert_eq!(json.to_string(), before, "should not touch messages with existing tool_calls");
 }
+
+#[test]
+fn test_recover_xml_tool_calls_handles_invoke_closing_tag() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "<invoke name=\"bash\">\n<parameter=command>\necho hello\n</parameter>\n<parameter=i>\ntest\n</parameter>\n</invoke>"}
+        ]
+    });
+    recover_xml_tool_calls(&mut json);
+    let msg = &json["messages"][0];
+    assert!(msg["content"].is_null(), "XML-only content should be null");
+    let tc = msg["tool_calls"].as_array().expect("should have tool_calls");
+    assert_eq!(tc.len(), 1);
+    assert_eq!(tc[0]["function"]["name"], "bash");
+    let args: serde_json::Value = serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(args["command"], "echo hello");
+}
