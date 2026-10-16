@@ -270,31 +270,67 @@ pub(crate) fn strip_degenerate_assistant_messages(json: &mut Value) {
         {
             return true;
         }
-        let text = match msg.get("content").and_then(|c| c.as_str()) {
-            Some(s) => s.trim(),
-            None => return true, // null content — keep (might be tool_calls-only)
-        };
-        !is_degenerate_content(text)
+        let text = extract_assistant_text(msg.get("content"));
+        !is_degenerate_content(&text)
     });
 }
 
+/// Extract the effective text from an assistant message's content field.
+/// Handles both string content and array-of-content-parts (OpenAI format).
+fn extract_assistant_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.trim().to_string(),
+        Some(Value::Array(parts)) => {
+            // Concatenate all text-type parts, skip thinking blocks
+            let mut texts = Vec::new();
+            for part in parts {
+                let typ = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if typ == "thinking" {
+                    continue; // Skip reasoning blocks
+                }
+                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                    let trimmed = t.trim();
+                    if !trimmed.is_empty() {
+                        texts.push(trimmed.to_string());
+                    }
+                }
+            }
+            texts.join(" ")
+        }
+        _ => String::new(), // null or missing — will not match degenerate
+    }
+}
+
 /// Returns true if the text is a known degenerate rendering artifact.
+///
+/// Tolerates surrounding whitespace, brackets, pipes, and box-drawing
+/// characters that omp's display layer may inject.
 fn is_degenerate_content(text: &str) -> bool {
-    // Exact known patterns (case-insensitive, bracket-insensitive)
-    let normalized = text
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
-    let lower = normalized.to_ascii_lowercase();
+    if text.is_empty() {
+        return false; // Empty/null content is not degenerate — may be tool_calls-only
+    }
+    // Strip junk characters that omp rendering or content-block joining may add:
+    // brackets, pipes, box-drawing (U+2500–U+257F), whitespace
+    let cleaned: String = text
+        .chars()
+        .filter(|c| {
+            !c.is_whitespace()
+                && *c != '['
+                && *c != ']'
+                && *c != '|'
+                && !('\u{2500}'..='\u{257F}').contains(c)
+        })
+        .collect();
+    let lower = cleaned.to_ascii_lowercase();
     matches!(
         lower.as_str(),
-        "tool result omitted"
-            | "tool results omitted"
-            | "tool output omitted"
-            | "tool call result omitted"
-            | "output omitted"
-            | "result omitted"
-            | "results omitted"
+        "toolresultomitted"
+            | "toolresultsomitted"
+            | "tooloutputomitted"
+            | "toolcallresultomitted"
+            | "outputomitted"
+            | "resultomitted"
+            | "resultsomitted"
     )
 }
 
