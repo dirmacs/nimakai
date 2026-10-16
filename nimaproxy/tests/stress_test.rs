@@ -53,15 +53,12 @@ fn assert_nimaproxy_target(client: &reqwest::blocking::Client, proxy_url: &str) 
         health_url,
         body
     );
+    // The stress test sends `auto` requests and observes key rotation. That
+    // works with or without racing: the gateway round-robins keys for the
+    // resolved model regardless of racing_enabled.
     assert!(
-        json.get("keys_total").and_then(|v| v.as_u64()).unwrap_or(0) > 0,
-        "stress test target at {} has no configured keys: {}",
-        health_url,
-        body
-    );
-    assert!(
-        json.get("racing_enabled").and_then(|v| v.as_bool()) == Some(true),
-        "stress test requires racing_enabled=true at {}: {}",
+        json.get("keys_total").and_then(|v| v.as_u64()).unwrap_or(0) >= 2,
+        "stress test needs at least 2 keys to exercise rotation at {}: {}",
         health_url,
         body
     );
