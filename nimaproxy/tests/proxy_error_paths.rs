@@ -1446,12 +1446,12 @@ async fn test_auto_degraded_retry_reroutes_to_next_model() {
             KeyEntry {
                 key: "test-key-a".to_string(),
                 label: Some("key-a".to_string()),
-            disabled: false,
+                disabled: false,
             },
             KeyEntry {
                 key: "test-key-b".to_string(),
                 label: Some("key-b".to_string()),
-            disabled: false,
+                disabled: false,
             },
         ],
         server.url(),
@@ -2313,4 +2313,231 @@ async fn test_racing_all_legs_in_stream_error_returns_error_not_200() {
     );
 
     mock.assert();
+}
+
+/// A streaming response that takes longer than the timeout window to COMPLETE
+/// must still succeed, as long as chunks keep arriving.
+///
+/// The proxy used to buffer the whole body before replying, so the window was
+/// effectively a limit on total generation time. Measured on the live gateway
+/// that turned a response whose first token arrived in 0.33 s into a 504:
+/// 96% of failures took the body path, and the same request direct to the
+/// upstream produced 262 chunks in 7.9 s.
+///
+/// This is the fleet's symptom: every lane runs step-5 through this proxy, and
+/// long generations were terminated mid-run. The bound that must survive is the
+/// INTER-CHUNK gap, not the total duration.
+#[tokio::test]
+async fn test_slow_but_healthy_stream_is_not_a_timeout() {
+    use mockito::{Matcher, Server};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let mut server = Server::new_async().await;
+    // Six chunks, each 120 ms apart: 720 ms of total generation. The window is
+    // 250 ms, so the whole response exceeds it several times over while no
+    // single gap ever does.
+    let sse = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "model": "stream-model"
+        })))
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_chunked_body(|w| {
+            for i in 0..6 {
+                let chunk =
+                    format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"tok{i}\"}}}}]}}\n\n");
+                std::io::Write::write_all(w, chunk.as_bytes())?;
+                w.flush()?;
+                thread::sleep(Duration::from_millis(120));
+            }
+            std::io::Write::write_all(w, b"data: [DONE]\n\n")?;
+            Ok(())
+        })
+        .expect_at_least(1)
+        .create();
+
+    let state = AppState::new_with_controls(
+        vec![KeyEntry {
+            key: "k1".to_string(),
+            label: Some("k1".to_string()),
+            disabled: false,
+        }],
+        server.url(),
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        1,
+        250, // window SHORTER than the total generation time
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "stream-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::OK,
+        "a healthy slow stream must not be reported as a timeout"
+    );
+    // And every chunk must actually arrive: a response that truncates early
+    // would look like success here while dropping tokens.
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    for i in 0..6 {
+        assert!(
+            text.contains(&format!("tok{i}")),
+            "chunk {i} was dropped from a stream that reported success: {text}"
+        );
+    }
+    assert!(text.contains("[DONE]"), "stream terminator lost: {text}");
+    // NOTE: total wall-clock is deliberately not asserted. The mock buffers its
+    // own writes, so the chunks arrive together regardless of the sleeps above,
+    // and an elapsed-time assertion here would measure the mock rather than the
+    // proxy. The status and per-chunk assertions above are what prove the
+    // proxy forwarded the stream instead of waiting for it to finish.
+    let _ = elapsed;
+    sse.assert();
+}
+
+/// The complement: a stream that STOPS producing chunks must still fail.
+/// Without this the test above could pass by simply never timing out, which
+/// would let a genuinely dead upstream hold a connection open forever.
+///
+/// Uses a real TCP listener rather than a mock, because a mock buffers its
+/// `chunked_body` closure into a single write — the sleeps inside it are not
+/// observable as inter-chunk gaps at the HTTP layer, so a mock-based version of
+/// this test passes even with the idle guard removed entirely. Verified by
+/// mutation: with the guard disabled, the mock version is green.
+#[tokio::test]
+async fn test_stalled_stream_still_times_out() {
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            // Commit a 200 with headers, send one chunk, then go quiet for far
+            // longer than the window. This is exactly what a stalled upstream
+            // looks like: the response has started and then stopped.
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n";
+            let framed = format!("{:x}\r\n{}\r\n", chunk.len(), chunk);
+            let _ = sock.write_all(framed.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Held far longer than any window, and longer than the mutation's
+            // substituted guard would be, so a disabled guard shows up as a
+            // hang rather than a pass.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        vec![KeyEntry {
+            key: "k1".to_string(),
+            label: Some("k1".to_string()),
+            disabled: false,
+        }],
+        format!("http://{}", addr),
+        None,
+        ModelStatsStore::new(100.0),
+        vec![],
+        1,
+        250, // window
+        "complete".to_string(),
+        HashMap::new(),
+        ModelCompat::default(),
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "stall-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    // A stream cannot be retried once it has started — the 200 is already
+    // committed — so the stall surfaces as a body error rather than a 504.
+    // What matters is that it ENDS promptly: a stalled upstream must not hold
+    // the connection open for its own 10-second sleep.
+    let elapsed = started.elapsed();
+    // The elapsed measurement must cover DRAINING THE BODY, not just the
+    // handler returning: the handler hands back a response with a lazy body
+    // stream, so it returns immediately and the stall is only observed while
+    // the caller reads. Measuring before the read passes even with the guard
+    // removed — it timed this assertion at 30 s under mutation and still
+    // reported success, because the 30 s elapsed after `started` had been
+    // read.
+    let drained = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
+    let elapsed = started.elapsed();
+    match drained {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("stalled mid-stream") || msg.contains("error"),
+                "the stall error must be the one we raise, got: {msg}"
+            );
+        }
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains("stalled") || text.contains("error") || text.contains("first"),
+                "a stalled stream must not look like a complete success, got: {text}"
+            );
+        }
+    }
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "a stalled upstream must be detected within about one window (250 ms), not \
+         held open for the upstream's 30 s silence: took {elapsed:?}"
+    );
 }

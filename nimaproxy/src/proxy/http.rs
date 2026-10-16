@@ -1,20 +1,19 @@
-/// GET /v1/models — configured model list when routing/racing is enabled, otherwise passthrough.
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::proxy::admission::acquire_gateway_permits;
+use crate::proxy::chat::MAX_RETRIES;
+use crate::proxy::messages::extract_response_metrics;
+use crate::AppState;
 use axum::{
-    extract::State,
     body::Body,
+    extract::State,
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use crate::proxy::admission::{acquire_gateway_permits};
-use crate::proxy::chat::{MAX_RETRIES};
-use crate::proxy::messages::{extract_response_metrics};
 use bytes::Bytes;
-use futures::TryStreamExt;
 use serde_json::Value;
+/// GET /v1/models — configured model list when routing/racing is enabled, otherwise passthrough.
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::warn;
-use crate::AppState;
 pub async fn models(State(state): State<Arc<AppState>>) -> Response {
     let configured_models = state.configured_models();
     if !configured_models.is_empty() {
@@ -358,16 +357,19 @@ pub async fn completions(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("application/json")
                     .to_string();
-                let stream = resp
-                    .bytes_stream()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-                let collected = match stream.try_collect::<Vec<Bytes>>().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
-                    }
-                };
-                let full_body = collected.concat();
+                let stream = crate::proxy::streaming::map_upstream(resp.bytes_stream());
+                // Assemble under an inter-chunk idle bound rather than a
+                // whole-body deadline: these endpoints need the full body to
+                // extract token metrics, but a long generation must not be
+                // killed for taking a long time. See `proxy::streaming`.
+                let window = std::time::Duration::from_millis(state.racing_timeout_ms);
+                let full_body =
+                    match crate::proxy::streaming::assemble_with_idle_bound(stream, window).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                        }
+                    };
                 let (output_tokens, repetition_count, had_tool_call) =
                     extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
                 if output_tokens > 0 || repetition_count > 0 {
@@ -533,16 +535,15 @@ pub async fn embeddings(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("application/json")
                     .to_string();
-                let stream = resp
-                    .bytes_stream()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-                let collected = match stream.try_collect::<Vec<Bytes>>().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
-                    }
-                };
-                let full_body = collected.concat();
+                let stream = crate::proxy::streaming::map_upstream(resp.bytes_stream());
+                let window = std::time::Duration::from_millis(state.racing_timeout_ms);
+                let full_body =
+                    match crate::proxy::streaming::assemble_with_idle_bound(stream, window).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                        }
+                    };
                 if let Some(label) = key_label.as_ref() {
                     state
                         .model_stats

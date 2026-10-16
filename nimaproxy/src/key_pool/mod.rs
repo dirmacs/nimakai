@@ -15,10 +15,27 @@ use self::aimd::KeyWindow;
 
 const DEFAULT_MAX_IN_FLIGHT_PER_KEY: usize = 1_000_000;
 
+/// Why a key is benched.
+///
+/// Cooling and auth-quarantine used to share one `Instant`, so there was no
+/// way to ask "which failure?": a key benched for a temporary 429 looked the
+/// same as one whose credential was revoked. These are different operator
+/// actions (wait it out, vs replace the key), and mixing them is the failure
+/// mode that made the fleet-wide lockout invisible — every benched key looked
+/// like a transient throttle when some were auth failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BenchReason {
+    /// A real upstream 429: the key is temporarily throttled. Short cooldown.
+    RateLimit,
+    /// An upstream 401/403: the key's credential is bad. Longer quarantine, and
+    /// counted in `auth_failures`.
+    AuthFailure,
+}
+
 pub struct KeyPool {
     keys: Vec<KeyEntry>,
     index: AtomicUsize,
-    cooldowns: Vec<Mutex<Option<Instant>>>,
+    cooldowns: Vec<Mutex<Option<(Instant, BenchReason)>>>,
     permits: Vec<Arc<Semaphore>>,
     windows: Vec<Mutex<KeyWindow>>,
     max_in_flight_per_key: usize,
@@ -91,7 +108,7 @@ impl KeyPool {
             let idx = (start + i) % n;
             let cd = self.cooldowns[idx].lock().unwrap();
             match *cd {
-                Some(expiry) if Instant::now() < expiry => continue, // still cooling
+                Some((expiry, _)) if Instant::now() < expiry => continue, // still cooling
                 _ => return Some((self.keys[idx].key.clone(), idx)),
             }
         }
@@ -112,7 +129,7 @@ impl KeyPool {
         for i in 0..n {
             let idx = (start + i) % n;
             let cd = self.cooldowns[idx].lock().unwrap();
-            if matches!(*cd, Some(expiry) if now < expiry) {
+            if matches!(*cd, Some((expiry, _)) if now < expiry) {
                 continue;
             }
             drop(cd);

@@ -1,8 +1,8 @@
 use crate::proxy::admission::acquire_gateway_permits;
+use crate::proxy::chat_helpers::accept_header_for_body;
 use crate::proxy::http::log_turn_request;
 use crate::proxy::messages::{
-    extract_response_metrics, mistral_validation_error, normalize_requested_model, resolve_model,
-    validate_model_exists,
+    mistral_validation_error, normalize_requested_model, resolve_model, validate_model_exists,
 };
 use crate::proxy::racing::race_models;
 use crate::proxy::retry::{RetryDecision, RetryPolicy};
@@ -15,118 +15,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::warn;
 pub(crate) const MAX_RETRIES: usize = 8;
-pub(crate) fn count_repetitions(text: &str) -> u32 {
-    let text_lower = text.to_lowercase();
-    let words: Vec<&str> = text_lower.split_whitespace().collect();
-    if words.len() < 4 {
-        return 0;
-    }
-    let mut repetitions = 0u32;
-    for window_size in 3..=6 {
-        if words.len() < window_size * 2 {
-            continue;
-        }
-        for i in 0..words.len() - window_size {
-            let slice = &words[i..i + window_size];
-            let pattern = slice.join(" ");
-            let mut count = 1;
-            for j in (i + window_size..)
-                .step_by(window_size)
-                .take_while(|&j| j + window_size <= words.len())
-            {
-                let next_slice = &words[j..j + window_size];
-                if next_slice.join(" ") == pattern {
-                    count += 1;
-                } else {
-                    break;
-                }
-            }
-            if count > 1 {
-                repetitions += count - 1;
-            }
-        }
-    }
-    repetitions.min(10)
-}
-pub(crate) fn accept_header_for_json(json: &Value) -> &'static str {
-    if json.get("stream").and_then(Value::as_bool).unwrap_or(false) {
-        "text/event-stream"
-    } else {
-        "application/json"
-    }
-}
-pub(crate) fn accept_header_for_body(body: &Bytes) -> &'static str {
-    serde_json::from_slice::<Value>(body)
-        .map(|json| accept_header_for_json(&json))
-        .unwrap_or("application/json")
-}
-pub(crate) fn apply_model_params(json: &mut Value, params: &crate::config::ModelParams) {
-    if let Some(temp) = params.temperature {
-        json["temperature"] = Value::from(temp);
-    }
-    if let Some(tp) = params.top_p {
-        json["top_p"] = Value::from(tp);
-    }
-    if let Some(tk) = params.top_k {
-        json["top_k"] = Value::from(tk);
-    }
-    if let Some(fp) = params.frequency_penalty {
-        json["frequency_penalty"] = Value::from(fp);
-    }
-    if let Some(pp) = params.presence_penalty {
-        json["presence_penalty"] = Value::from(pp);
-    }
-    if let Some(rp) = params.repetition_penalty {
-        json["repetition_penalty"] = Value::from(rp);
-    }
-    if let Some(min_p) = params.min_p {
-        json["min_p"] = Value::from(min_p);
-    }
-    if let Some(max_tokens) = params.max_tokens {
-        json["max_tokens"] = Value::from(max_tokens);
-    }
-    if let Some(reasoning_budget) = params.reasoning_budget {
-        json["reasoning_budget"] = Value::from(reasoning_budget);
-    }
-    if let Some(reasoning_effort) = &params.reasoning_effort {
-        json["reasoning_effort"] = Value::String(reasoning_effort.clone());
-    }
-    if let Some(seed) = params.seed {
-        json["seed"] = Value::from(seed);
-    }
-    // Treat stream as a client response-mode choice, not as a model
-    // hyperparameter. Callers that explicitly request streaming or
-    // non-streaming keep control, and omitted stream must remain JSON-compatible.
-    if let Some(stream) = params.stream {
-        if json.get("stream").is_some_and(|v| !v.is_null()) {
-            // Preserve the caller's explicit response mode.
-        } else if !stream {
-            json["stream"] = Value::Bool(stream);
-        }
-    }
-    if let Some(ctk) = &params.chat_template_kwargs {
-        if let Some(obj) = json.as_object_mut() {
-            let entry = obj
-                .entry("chat_template_kwargs".to_string())
-                .or_insert_with(|| Value::Object(serde_json::Map::new()));
-            if !entry.is_object() {
-                *entry = Value::Object(serde_json::Map::new());
-            }
-            if let Some(kwargs) = entry.as_object_mut() {
-                for (k, v) in ctk {
-                    kwargs.insert(k.clone(), v.clone());
-                }
-            }
-        }
-    }
-}
 /// POST /v1/chat/completions
 ///
 /// V1: injects key, retries on 429, streams SSE byte-for-byte.
@@ -189,10 +84,17 @@ pub async fn chat_completions(
         state.admission_wait_ms,
     );
     let started = Instant::now();
+    let mut request_state = crate::proxy::request_state::RequestState::Queued;
     for attempt in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
-            Ok(permits) => permits,
-            Err(response) => return response,
+            Ok(permits) => {
+                request_state = crate::proxy::request_state::RequestState::Admitted;
+                permits
+            }
+            Err(response) => {
+                request_state = crate::proxy::request_state::RequestState::Rejected;
+                return response;
+            }
         };
         let _upstream_permit = upstream_permit;
         let idx = key_lease.idx;
@@ -233,8 +135,15 @@ pub async fn chat_completions(
                 //     retried request cannot double-send to the caller
                 // The final attempt (or an exhausted budget) falls through
                 // to the original 504, so failure paths are unchanged.
-                let window = Duration::from_millis(request_timeout_ms);
-                if retry_policy.decide(started, attempt) == RetryDecision::Retry {
+                let may_retry = request_state.on_failure(false).can_retry(
+                    attempt,
+                    n,
+                    started,
+                    std::time::Duration::from_millis(request_timeout_ms),
+                    retry_policy.budget(),
+                );
+                if may_retry {
+                    request_state = crate::proxy::request_state::RequestState::Retryable;
                     state.pool.note_upstream_stall(idx);
                     log_turn_request(
                         &original_model,
@@ -369,13 +278,103 @@ pub async fn chat_completions(
                     );
                     continue;
                 }
-                // Record TTFC (response headers received = first bytes available)
-                let ttfc_ms = t0.elapsed().as_millis() as f64;
-                let ok = status.is_success();
-                if ok {
-                    state.pool.record_success(idx);
+                // Non-2xx bodies must be inspected BEFORE the response is
+                // committed to the wire, because the DEGRADED and
+                // invalid-assistant paths retry on the next key and a stream
+                // that has already started cannot be retried.
+                if status == 400 {
+                    let upstream_content_type = resp
+                        .headers()
+                        .get("content-type")
+                        .cloned()
+                        .unwrap_or_else(|| HeaderValue::from_static("application/json"));
+                    // Read the error body: a 400 is an error response, so it is
+                    // short and bounded, unlike a generation body. This
+                    // consumes `resp`, so it must happen before any streaming.
+                    let err_body = match timeout(
+                        Duration::from_millis(request_timeout_ms),
+                        resp.bytes_stream().try_collect::<Vec<Bytes>>(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(parts)) => Bytes::from(parts.concat()),
+                        _ => Bytes::new(),
+                    };
+                    let body_str = std::str::from_utf8(&err_body).unwrap_or("");
+                    let error_excerpt = body_str.chars().take(400).collect::<String>();
+                    if body_str.contains("DEGRADED") || body_str.contains("degraded") {
+                        eprintln!("[nimaproxy] SERVER-DEGRADED: model '{}' returned DEGRADED error from NVIDIA (server-side block)", model_id);
+                        // Record as server-side degraded - this immediately marks the model as unavailable
+                        state.model_stats.record_server_degraded(&model_id);
+                        if routing_model == "auto" {
+                            let (next_model_id, next_body) =
+                                resolve_model(original_body.clone(), &state);
+                            model_id = next_model_id;
+                            body = next_body;
+                            if let Some(response) = mistral_validation_error(&model_id, &body) {
+                                return response;
+                            }
+                        }
+                        // Continue retry with the next key and, for auto routing, a freshly resolved model.
+                        continue;
+                    }
+                    if body_str.contains("Invalid assistant message")
+                        || body_str.contains("invalid assistant")
+                    {
+                        eprintln!("[nimaproxy] INVALID-ASSISTANT: model '{}' rejected message structure (400): {} — retrying with next key", model_id, &body_str[..body_str.len().min(200)]);
+                        state.model_stats.record_hard_error(&model_id, body_str);
+                        log_turn_request(
+                            &original_model,
+                            &model_id,
+                            t0.elapsed().as_millis(),
+                            false,
+                            status.as_u16(),
+                            message_count,
+                            has_tool_calls,
+                            tool_call_count,
+                            key_label.as_deref(),
+                            false,
+                            Some(error_excerpt),
+                        );
+                        continue;
+                    }
+                    // An unrecognised 400 is forwarded verbatim so the caller
+                    // sees exactly what the upstream said.
+                    let mut response = Response::new(if err_body.is_empty() {
+                        Body::empty()
+                    } else {
+                        Body::from(err_body)
+                    });
+                    *response.status_mut() = StatusCode::BAD_REQUEST;
+                    response
+                        .headers_mut()
+                        .insert("content-type", upstream_content_type);
+                    return response;
                 }
-                // Forward response — stream bytes directly (works for JSON + SSE)
+
+                let ok = status.is_success();
+                // Forward the response.
+                //
+                // Streaming is forwarded BYTE-FOR-BYTE as it arrives. It used
+                // to be buffered to completion first (`try_collect`), which
+                // silently turned a streaming response into a batch one: the
+                // client got nothing until the LAST token, so a generation that
+                // streamed its first token in 0.33 s and finished in 8 s was
+                // instead held for the whole duration and then judged against
+                // a 15 s window. Measured on the live gateway, 96% of failures
+                // took this path, and the same request direct to the upstream
+                // needed 80 s+ to produce a complete non-streaming body where
+                // the stream had delivered 262 chunks in 7.9 s.
+                //
+                // The contract that must survive the change: a stall is still
+                // detected. Two separate bounds do that now —
+                //   1. the first byte must arrive within the timeout window
+                //      (that is the "is the upstream alive" signal, and it is
+                //      what the retry and the 504 are keyed on), and
+                //   2. no single inter-chunk gap may exceed the window, which
+                //      catches a mid-stream stall.
+                // A response that merely takes a long time to finish is
+                // therefore allowed, which is the whole point.
                 let resp_status = axum::http::StatusCode::from_u16(status.as_u16())
                     .unwrap_or(StatusCode::BAD_GATEWAY);
                 let content_type = resp
@@ -384,20 +383,160 @@ pub async fn chat_completions(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("application/json")
                     .to_string();
-                let stream = resp
+                let is_stream = content_type.contains("event-stream");
+
+                let upstream = resp
                     .bytes_stream()
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
-                let collected = match timeout(
-                    std::time::Duration::from_millis(request_timeout_ms),
-                    stream.try_collect::<Vec<Bytes>>(),
-                )
-                .await
-                {
-                    Ok(Ok(c)) => c,
-                    Ok(Err(e)) => {
+                let window = Duration::from_millis(request_timeout_ms);
+
+                request_state = crate::proxy::request_state::RequestState::InFlight;
+                // Bound the wait for the FIRST byte. This is the only part that
+                // can still produce a 504, and it is the only part that may
+                // trigger the retry, because nothing has been sent to the
+                // client yet.
+                let mut upstream = upstream;
+                let first = match timeout(window, upstream.next()).await {
+                    Ok(Some(Ok(chunk))) => Some(chunk),
+                    Ok(Some(Err(e))) => {
                         return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
                     }
-                    Err(_) => {
+                    // A stream that ends without a single byte is a stall, not
+                    // an empty success.
+                    Ok(None) | Err(_) => None,
+                };
+
+                let Some(first) = first else {
+                    state.gateway_metrics.record_timeout();
+                    record_model_timeout(
+                        &state,
+                        &model_id,
+                        key_label.as_deref(),
+                        request_timeout_ms,
+                    );
+                    state.pool.note_upstream_stall(idx);
+
+                    let may_retry = request_state.on_failure(false).can_retry(
+                        attempt,
+                        n,
+                        started,
+                        std::time::Duration::from_millis(request_timeout_ms),
+                        retry_policy.budget(),
+                    );
+                    if may_retry {
+                        request_state = crate::proxy::request_state::RequestState::Retryable;
+                        log_turn_request(
+                            &original_model,
+                            &model_id,
+                            t0.elapsed().as_millis(),
+                            false,
+                            StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                            message_count,
+                            has_tool_calls,
+                            tool_call_count,
+                            key_label.as_deref(),
+                            false,
+                            Some(format!(
+                                "upstream sent no bytes within {}ms; retrying on another key",
+                                request_timeout_ms
+                            )),
+                        );
+                        continue;
+                    }
+                    log_turn_request(
+                        &original_model,
+                        &model_id,
+                        t0.elapsed().as_millis(),
+                        false,
+                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label.as_deref(),
+                        false,
+                        Some(format!(
+                            "upstream sent no bytes within {}ms",
+                            request_timeout_ms
+                        )),
+                    );
+                    return (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        format!("upstream sent no bytes within {}ms", request_timeout_ms),
+                    )
+                        .into_response();
+                };
+
+                // Headers and the first chunk are already in hand, so commit
+                // to this key: the response is now on the wire and cannot be
+                // retried. The state machine asserts the invariant that only
+                // Admitted/InFlight may commit — a retry from here would
+                // double-send the response body (S3).
+                request_state = request_state.on_first_byte();
+                let ttfc_ms = t0.elapsed().as_millis() as f64;
+                if ok {
+                    state.pool.record_success(idx);
+                }
+                if let Some(label) = key_label.as_ref() {
+                    state
+                        .model_stats
+                        .record_with_key(&model_id, label, ttfc_ms, ok);
+                } else {
+                    state.model_stats.record(&model_id, ttfc_ms, ok);
+                }
+
+                // Both branches forward the upstream stream as-is, with the
+                // first chunk prepended (it was consumed while bounding the
+                // time-to-first-byte).
+                //
+                // The two response modes differ in what they can still do once
+                // the first byte is in hand, and that difference is the whole
+                // point of this shape:
+                //
+                //   - streaming (SSE): the response is already on the wire, so
+                //     it is forwarded chunk-by-chunk with only an inter-chunk
+                //     idle guard. A mid-stream stall aborts the stream; it can
+                //     no longer be retried, and there is no status code left to
+                //     correct because the client already has a 200.
+                //   - non-streaming: nothing has been sent yet, so the body is
+                //     ASSEMBLED here and a mid-stream stall is still retryable.
+                //     The assembly is bounded by the same idle guard rather
+                //     than a whole-body deadline, which is what let a long
+                //     generation be killed before it finished.
+                let mapped = upstream.map(|chunk| match chunk {
+                    Ok(bytes) => Ok(bytes),
+                    Err(e) => Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    )),
+                });
+                let with_first = futures::stream::once(async move { Ok(first) }).chain(mapped);
+
+                let body = if is_stream {
+                    Body::from_stream(crate::proxy::streaming::with_idle_timeout(
+                        with_first, window,
+                    ))
+                } else {
+                    // Assemble the body. A timeout here means the upstream went
+                    // quiet mid-body, which is retryable because the caller has
+                    // received nothing yet.
+                    let mut collected = Vec::new();
+                    let mut stalled = false;
+                    futures::pin_mut!(with_first);
+                    loop {
+                        match timeout(window, with_first.next()).await {
+                            Ok(Some(Ok(chunk))) => collected.push(chunk),
+                            Ok(Some(Err(e))) => {
+                                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                stalled = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if stalled {
                         state.gateway_metrics.record_timeout();
                         record_model_timeout(
                             &state,
@@ -405,25 +544,17 @@ pub async fn chat_completions(
                             key_label.as_deref(),
                             request_timeout_ms,
                         );
-                        // Retry once on a different key, on the same bounded
-                        // budget as the send-timeout branch below. This is the
-                        // path that actually fires in production for
-                        // long-context requests: the connection is established
-                        // and headers arrive, but the body stalls, so
-                        // `send()` has already succeeded and the outer
-                        // Err(_) branch never runs. Measured on this host,
-                        // every 504 took this branch at exactly the timeout
-                        // floor, so ~32% of admitted requests returned 504 with
-                        // no second attempt.
-                        //
-                        // Binding: attempts remain, one more window fits in the
-                        // budget measured from the start of the request, and no
-                        // response bytes have been sent to the client yet
-                        // (`collected` is discarded and `<collected>` is
-                        // dropped before this point).
-                        let window = Duration::from_millis(request_timeout_ms);
-                        if retry_policy.decide(started, attempt) == RetryDecision::Retry {
-                            state.pool.note_upstream_stall(idx);
+                        state.pool.note_upstream_stall(idx);
+
+                        let may_retry = request_state.on_failure(false).can_retry(
+                            attempt,
+                            n,
+                            started,
+                            std::time::Duration::from_millis(request_timeout_ms),
+                            retry_policy.budget(),
+                        );
+                        if may_retry {
+                            request_state = crate::proxy::request_state::RequestState::Retryable;
                             log_turn_request(
                                 &original_model,
                                 &model_id,
@@ -436,7 +567,7 @@ pub async fn chat_completions(
                                 key_label.as_deref(),
                                 false,
                                 Some(format!(
-                                    "upstream body timeout after {}ms; retrying on another key",
+                                    "upstream body stalled after {}ms; retrying on another key",
                                     request_timeout_ms
                                 )),
                             );
@@ -445,7 +576,7 @@ pub async fn chat_completions(
                         log_turn_request(
                             &original_model,
                             &model_id,
-                            request_timeout_ms as u128,
+                            t0.elapsed().as_millis(),
                             false,
                             StatusCode::GATEWAY_TIMEOUT.as_u16(),
                             message_count,
@@ -454,92 +585,20 @@ pub async fn chat_completions(
                             key_label.as_deref(),
                             false,
                             Some(format!(
-                                "upstream body timeout after {}ms",
+                                "upstream body stalled after {}ms",
                                 request_timeout_ms
                             )),
                         );
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
-                            format!("upstream body timeout after {}ms", request_timeout_ms),
+                            format!("upstream body stalled after {}ms", request_timeout_ms),
                         )
                             .into_response();
                     }
+
+                    Body::from(collected.concat())
                 };
-                let full_body = collected.concat();
-                // Check for server-side degradation from NVIDIA API
-                // NVIDIA returns: {"status":400,"title":"Bad Request","detail":"Function id '...': DEGRADED function cannot be invoked"}
-                let body_str = std::str::from_utf8(&full_body).unwrap_or("");
-                let error_excerpt = body_str.chars().take(400).collect::<String>();
-                if status == 400 && (body_str.contains("DEGRADED") || body_str.contains("degraded"))
-                {
-                    eprintln!("[nimaproxy] SERVER-DEGRADED: model '{}' returned DEGRADED error from NVIDIA (server-side block)", model_id);
-                    // Record as server-side degraded - this immediately marks the model as unavailable
-                    state.model_stats.record_server_degraded(&model_id);
-                    if routing_model == "auto" {
-                        let (next_model_id, next_body) =
-                            resolve_model(original_body.clone(), &state);
-                        model_id = next_model_id;
-                        body = next_body;
-                        if let Some(response) = mistral_validation_error(&model_id, &body) {
-                            return response;
-                        }
-                    }
-                    // Continue retry with the next key and, for auto routing, a freshly resolved model.
-                    continue;
-                }
-                if status == 400
-                    && (body_str.contains("Invalid assistant message")
-                        || body_str.contains("invalid assistant"))
-                {
-                    eprintln!("[nimaproxy] INVALID-ASSISTANT: model '{}' rejected message structure (400): {} — retrying with next key", model_id, &body_str[..body_str.len().min(200)]);
-                    state.model_stats.record_hard_error(&model_id, body_str);
-                    log_turn_request(
-                        &original_model,
-                        &model_id,
-                        ttfc_ms as u128,
-                        false,
-                        status.as_u16(),
-                        message_count,
-                        has_tool_calls,
-                        tool_call_count,
-                        key_label.as_deref(),
-                        false,
-                        Some(error_excerpt.clone()),
-                    );
-                    continue;
-                }
-                let (output_tokens, repetition_count, had_tool_call) =
-                    extract_response_metrics(std::str::from_utf8(&full_body).unwrap_or(""));
-                if output_tokens > 0 || repetition_count > 0 {
-                    if key_label.is_some() {
-                        state.model_stats.record_with_circuit_breaker(
-                            &model_id,
-                            ttfc_ms,
-                            ok,
-                            output_tokens,
-                            repetition_count,
-                            had_tool_call,
-                        );
-                    } else {
-                        state.model_stats.record_with_circuit_breaker(
-                            &model_id,
-                            ttfc_ms,
-                            ok,
-                            output_tokens,
-                            repetition_count,
-                            had_tool_call,
-                        );
-                    }
-                } else {
-                    if let Some(label) = key_label.as_ref() {
-                        state
-                            .model_stats
-                            .record_with_key(&model_id, label, ttfc_ms, ok);
-                    } else {
-                        state.model_stats.record(&model_id, ttfc_ms, ok);
-                    }
-                }
-                let body = Body::from(full_body);
+
                 let mut response = Response::new(body);
                 *response.status_mut() = resp_status;
                 response.headers_mut().insert(
@@ -555,7 +614,7 @@ pub async fn chat_completions(
                             .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                     );
                 }
-                if content_type.contains("event-stream") {
+                if is_stream {
                     response
                         .headers_mut()
                         .insert("cache-control", HeaderValue::from_static("no-cache"));
@@ -574,12 +633,16 @@ pub async fn chat_completions(
                     tool_call_count,
                     key_label.as_deref(),
                     false,
-                    if ok { None } else { Some(error_excerpt) },
+                    None,
                 );
                 return response;
             }
         }
     }
+    // Every key was tried and none produced a usable response. If any of them
+    // was an auth failure, forward that upstream response verbatim rather than
+    // a generic 429: a revoked key is a different operator action from a busy
+    // gateway, and the upstream's own status and body are what diagnose it.
     if let Some(response) = last_auth_failure_response {
         return response;
     }

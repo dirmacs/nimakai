@@ -105,9 +105,24 @@ impl TurnLog {
         key_label: Option<String>,
         is_racing: bool,
     ) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // A stable identifier for this request, so the turn log can be
+        // replayed and a request followed across a retry. Before this the
+        // field was always None, so there was no way to ask "what did request
+        // X do?": the only joinable column was the timestamp, which collides
+        // on a busy gateway. The id is timestamp + pid + a process-local
+        // counter, so it is unique per record, sortable by time, and carries
+        // no user content and no key material.
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let request_id = Some(format!(
+            "{}.{}.{}",
+            Utc::now().format("%Y%m%d%H%M%S"),
+            std::process::id(),
+            seq
+        ));
         Self {
             timestamp: Utc::now(),
-            request_id: None,
+            request_id,
             requested_model,
             responding_model,
             latency_ms,
@@ -144,9 +159,6 @@ pub struct TurnLogger {
     /// which also swaps in a fresh file, so the two can never disagree.
     bytes_since_rotate: Mutex<u64>,
     rotate_at_bytes: u64,
-    /// Logged once, the first time a rotation succeeds, so an operator can
-    /// see that rotation is live rather than inferring it from filenames.
-    rotated_once: std::sync::atomic::AtomicBool,
 }
 
 impl TurnLogger {
@@ -172,7 +184,6 @@ impl TurnLogger {
             enabled,
             bytes_since_rotate: Mutex::new(0),
             rotate_at_bytes,
-            rotated_once: std::sync::atomic::AtomicBool::new(false),
         };
 
         if enabled {
@@ -374,6 +385,45 @@ mod tests {
         assert_eq!(turn.latency_ms, 742);
         assert!(turn.success);
         assert!(!turn.has_tool_calls);
+    }
+
+    /// The request id must be populated and unique, otherwise the log cannot
+    /// be replayed and a retry cannot be followed across attempts. Before this
+    /// change the field was always None.
+    #[test]
+    fn test_request_id_is_populated_and_unique() {
+        let a = TurnLog::new(
+            "auto".to_string(),
+            "m".to_string(),
+            1,
+            true,
+            200,
+            1,
+            1,
+            false,
+            0,
+            None,
+            false,
+        );
+        let b = TurnLog::new(
+            "auto".to_string(),
+            "m".to_string(),
+            1,
+            true,
+            200,
+            1,
+            1,
+            false,
+            0,
+            None,
+            false,
+        );
+        assert!(a.request_id.is_some(), "request_id must be populated");
+        assert!(b.request_id.is_some(), "request_id must be populated");
+        assert_ne!(
+            a.request_id, b.request_id,
+            "two turns must not share an id, or a retry cannot be told apart"
+        );
     }
 
     #[test]

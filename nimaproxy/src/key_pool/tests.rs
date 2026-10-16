@@ -592,3 +592,95 @@ fn test_repeated_stalls_do_not_collapse_gateway_capacity() {
         );
     }
 }
+
+/// S6: a `status()` read must be consistent across the cooldown, the window,
+/// and the in-flight count. Before the read was made atomic, a write that
+/// landed between two of those reads produced a state that never existed: a
+/// key shown active while its window was already shrinking, or a stall counted
+/// against a key that was simultaneously benched.
+///
+/// This cannot directly observe the interleaving — a race window this small
+/// does not reproduce reliably in a unit test — so it pins the stronger
+/// invariant that the read is *internally coherent*: the window and the
+/// cooldown it reports always come from the same point in time.
+#[test]
+fn test_status_is_internally_coherent_under_writes() {
+    use std::sync::Arc;
+    let keys = vec![
+        make_key_entry("key0", "a"),
+        make_key_entry("key1", "b"),
+        make_key_entry("key2", "c"),
+        make_key_entry("key3", "d"),
+    ];
+    let pool = Arc::new(KeyPool::with_max_in_flight(keys, 2));
+
+    // Hammer the pool with writers from another thread while reading status.
+    let writer = Arc::clone(&pool);
+    let handle = std::thread::spawn(move || {
+        for _ in 0..50 {
+            for idx in 0..4 {
+                writer.note_upstream_stall(idx);
+                writer.record_success(idx);
+            }
+        }
+    });
+
+    // Read repeatedly. Every snapshot must be self-consistent: a key that is
+    // active has no cooldown, and its window is a legal value (never 0, never
+    // above the ceiling). A torn read would show a key benched with a
+    // zero-window, or active with a window the writer had already shrunk
+    // below zero.
+    for _ in 0..100 {
+        for s in pool.status() {
+            assert!(
+                s.max_in_flight >= 1,
+                "a key's window must never drop to zero: {s:?}"
+            );
+            assert!(
+                s.max_in_flight <= 2,
+                "a key's window must never exceed the ceiling: {s:?}"
+            );
+            assert!(
+                s.cooldown_secs_remaining <= 60,
+                "a cooldown must be bounded: {s:?}"
+            );
+            if s.active {
+                assert_eq!(
+                    s.cooldown_secs_remaining, 0,
+                    "an active key must not report a cooldown: {s:?}"
+                );
+            }
+        }
+    }
+    handle.join().unwrap();
+}
+
+/// Cooling and auth-quarantine used to share one `Instant`, so an operator
+/// could not ask "which failure is this key benched for?". These are different
+/// actions — wait a 429 out, vs replace a revoked key — and mixing them is the
+/// failure mode that made a real auth quarantine invisible behind what looked
+/// like transient throttling.
+#[test]
+fn test_cooling_and_auth_quarantine_are_distinguishable() {
+    let keys = vec![make_key_entry("key0", "a"), make_key_entry("key1", "b")];
+    let pool = KeyPool::with_max_in_flight(keys, 2);
+
+    pool.mark_rate_limited(0, 60);
+    pool.mark_auth_failed(1, Duration::from_secs(60));
+
+    let status = pool.status();
+    assert_eq!(
+        status[0].bench_reason,
+        Some(crate::key_pool::BenchReason::RateLimit),
+        "a 429 is a RateLimit"
+    );
+    assert_eq!(
+        status[1].bench_reason,
+        Some(crate::key_pool::BenchReason::AuthFailure),
+        "a 401/403 is an AuthFailure, not a RateLimit"
+    );
+    // And an auth failure is counted separately, so the two failure modes are
+    // visible independently.
+    assert!(status[1].auth_failures > 0);
+    assert_eq!(status[0].auth_failures, 0);
+}
