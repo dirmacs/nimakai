@@ -5,7 +5,7 @@ use crate::proxy::messages::{
     mistral_validation_error, normalize_requested_model, resolve_model, validate_model_exists,
 };
 use crate::proxy::racing::race_models;
-use crate::proxy::retry::{RetryDecision, RetryPolicy};
+use crate::proxy::retry::RetryPolicy;
 use crate::proxy::timeouts::{record_model_timeout, request_turn_summary, timeout_for_model};
 use crate::AppState;
 use axum::{
@@ -65,7 +65,7 @@ pub async fn chat_completions(
         return response;
     }
     let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&body);
-    let n = state.pool.len().min(MAX_RETRIES).max(1);
+    let n = state.pool.len().clamp(1, MAX_RETRIES);
     let mut last_auth_failure_response: Option<Response> = None;
     // Total wall-clock budget for this request's upstream attempts.
     //
@@ -85,18 +85,12 @@ pub async fn chat_completions(
         state.admission_wait_ms,
     );
     let started = Instant::now();
-    let mut request_state = crate::proxy::request_state::RequestState::Queued;
     for attempt in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
-            Ok(permits) => {
-                request_state = crate::proxy::request_state::RequestState::Admitted;
-                permits
-            }
-            Err(response) => {
-                request_state = crate::proxy::request_state::RequestState::Rejected;
-                return response;
-            }
+            Ok(permits) => permits,
+            Err(response) => return response,
         };
+        let mut request_state = crate::proxy::request_state::RequestState::Admitted;
         let _upstream_permit = upstream_permit;
         let idx = key_lease.idx;
         let key_label = key_lease.label.clone();
@@ -144,7 +138,6 @@ pub async fn chat_completions(
                     retry_policy.budget(),
                 );
                 if may_retry {
-                    request_state = crate::proxy::request_state::RequestState::Retryable;
                     state.pool.note_upstream_stall(idx);
                     log_turn_request(
                         &original_model,
@@ -393,7 +386,7 @@ pub async fn chat_completions(
 
                 let upstream = resp
                     .bytes_stream()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                    .map_err(|e| std::io::Error::other(e.to_string()));
                 let window = Duration::from_millis(request_timeout_ms);
 
                 request_state = crate::proxy::request_state::RequestState::InFlight;
@@ -430,7 +423,6 @@ pub async fn chat_completions(
                         retry_policy.budget(),
                     );
                     if may_retry {
-                        request_state = crate::proxy::request_state::RequestState::Retryable;
                         log_turn_request(
                             &original_model,
                             &model_id,
@@ -512,10 +504,7 @@ pub async fn chat_completions(
                 //     generation be killed before it finished.
                 let mapped = upstream.map(|chunk| match chunk {
                     Ok(bytes) => Ok(bytes),
-                    Err(e) => Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )),
+                    Err(e) => Err(std::io::Error::other(e.to_string())),
                 });
                 let with_first = futures::stream::once(async move { Ok(first) }).chain(mapped);
 
@@ -579,7 +568,6 @@ pub async fn chat_completions(
                             retry_policy.budget(),
                         );
                         if may_retry {
-                            request_state = crate::proxy::request_state::RequestState::Retryable;
                             log_turn_request(
                                 &original_model,
                                 &model_id,

@@ -254,7 +254,7 @@ pub async fn completions(
     } else {
         String::new()
     };
-    let n = state.pool.len().min(MAX_RETRIES).max(1);
+    let n = state.pool.len().clamp(1, MAX_RETRIES);
     eprintln!("[nimaproxy] POST /v1/completions - got n={}", n);
     let mut last_auth_failure_response: Option<Response> = None;
     for _ in 0..n {
@@ -435,7 +435,7 @@ pub async fn embeddings(
     } else {
         String::new()
     };
-    let n = state.pool.len().min(MAX_RETRIES).max(1);
+    let n = state.pool.len().clamp(1, MAX_RETRIES);
     let mut last_auth_failure_response: Option<Response> = None;
     for _ in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
@@ -582,6 +582,7 @@ pub async fn embeddings(
         .into_response()
 }
 /// Log a completed turn
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn log_turn_request(
     requested_model: &str,
     responding_model: &str,

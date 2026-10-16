@@ -111,7 +111,7 @@ async fn test_live_chat_completions() {
 
     if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
         assert!(!choices.is_empty(), "Should have at least one choice");
-        if let Some(first_choice) = choices.get(0) {
+        if let Some(first_choice) = choices.first() {
             assert!(
                 first_choice.get("message").is_some(),
                 "Choice should have 'message' field"
@@ -332,7 +332,7 @@ async fn test_live_chat_multi_turn() {
         vec![serde_json::json!({"role": "user", "content": "My name is Alice. Remember this."})];
 
     if let Some(choices) = body1_json.get("choices").and_then(|c| c.as_array()) {
-        if let Some(first) = choices.get(0) {
+        if let Some(first) = choices.first() {
             if let Some(msg) = first.get("message") {
                 messages.push(msg.clone());
             }

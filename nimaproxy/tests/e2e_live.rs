@@ -106,7 +106,7 @@ async fn test_e2e_models_endpoint_reachable() {
     if status_code == 200 {
         let body_bytes = axum::body::to_bytes(body, 262144).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert!(json["data"].as_array().unwrap().len() > 0);
+        assert!(!json["data"].as_array().unwrap().is_empty());
     }
 }
 
@@ -156,7 +156,7 @@ async fn test_e2e_key_pool_status() {
     // Assert we can read labels at all, not that a placeholder named "key-0"
     // happens to be first.
     assert!(
-        statuses[0].label.len() > 0,
+        !statuses[0].label.is_empty(),
         "key pool statuses should carry non-empty labels"
     );
 

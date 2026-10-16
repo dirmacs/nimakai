@@ -1,11 +1,11 @@
+use crate::proxy::chat_helpers::{apply_model_params, count_repetitions};
+use crate::AppState;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use crate::proxy::chat_helpers::{apply_model_params, count_repetitions};
 use bytes::Bytes;
 use serde_json::Value;
-use crate::AppState;
 pub(crate) fn extract_response_metrics(text: &str) -> (u32, u32, bool) {
     let mut output_tokens = 0u32;
     let repetition_count = count_repetitions(text);
@@ -216,7 +216,10 @@ pub(crate) fn recover_xml_tool_calls(json: &mut Value) {
         {
             continue;
         }
-        let Some(content) = msg.get("content").and_then(|c| c.as_str()).map(|s| s.to_string())
+        let Some(content) = msg
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
         else {
             continue;
         };
@@ -340,10 +343,7 @@ fn extract_invoke_blocks(text: &str, counter: &mut u32) -> (String, Vec<Value>) 
     let mut remaining = text.to_string();
     let mut tool_calls = Vec::new();
     for end_marker in ["</tool_call>", "</function>", "</invoke>"] {
-        loop {
-            let Some(start) = remaining.find("<invoke") else {
-                break;
-            };
+        while let Some(start) = remaining.find("<invoke") {
             let Some(rel_end) = remaining[start..].find(end_marker) else {
                 break;
             };
@@ -370,10 +370,7 @@ fn parse_invoke_block(block: &str, counter: &mut u32) -> Option<Value> {
     // Extract parameters into a JSON object for the arguments field.
     let mut args = serde_json::Map::new();
     let mut search = block;
-    loop {
-        let Some(idx) = search.find("<parameter") else {
-            break;
-        };
+    while let Some(idx) = search.find("<parameter") {
         let tag_rest = &search[idx..];
 
         // Two forms: <parameter name="key"> and <parameter=key>
@@ -613,8 +610,9 @@ pub(crate) fn is_last_message_from_assistant(json: &Value) -> bool {
 }
 /// Inject parameters for tool calling and conversation continuation.
 /// When the last message is from the assistant, we must set:
-/// - add_generation_prompt=false (tells API we're continuing, not starting new)
-/// - continue_final_message=true (tells API to continue from assistant's partial response)
+///   - add_generation_prompt=false (tells API we're continuing, not starting new)
+///   - continue_final_message=true (tells API to continue from assistant's partial response)
+///
 /// This applies to ALL models on NVIDIA NIM, not just Mistral.
 pub(crate) fn inject_mistral_tool_params(json: &mut Value, model_id: &str) {
     let is_mistral = is_mistral_model(model_id);

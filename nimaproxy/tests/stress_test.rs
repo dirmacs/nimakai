@@ -150,7 +150,7 @@ fn stress_test() {
             attempt += 1;
             let body = serde_json::to_string(&request_body).unwrap();
             let resp = client
-                .post(&format!("{}/v1/chat/completions", proxy_url))
+                .post(format!("{}/v1/chat/completions", proxy_url))
                 .header("Content-Type", "application/json")
                 .body(body)
                 .send();

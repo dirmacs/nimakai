@@ -161,6 +161,7 @@ impl TurnLog {
     pub const RECORD_KIND_TTFB: &'static str = "ttfb";
     pub const RECORD_KIND_COMPLETION: &'static str = "completion";
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         requested_model: String,
         responding_model: String,

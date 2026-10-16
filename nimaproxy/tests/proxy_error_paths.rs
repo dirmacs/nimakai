@@ -922,6 +922,7 @@ async fn test_timeout_retries_on_another_key_within_budget() {
     });
     let live = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let live_addr = live.local_addr().unwrap();
+    eprintln!("[retry] recovery upstream bound to {live_addr}");
     tokio::spawn(async move {
         if let Ok((mut s, _p)) = live.accept().await {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2509,7 +2510,6 @@ async fn test_stalled_stream_still_times_out() {
     // committed — so the stall surfaces as a body error rather than a 504.
     // What matters is that it ENDS promptly: a stalled upstream must not hold
     // the connection open for its own 10-second sleep.
-    let elapsed = started.elapsed();
     // The elapsed measurement must cover DRAINING THE BODY, not just the
     // handler returning: the handler hands back a response with a lazy body
     // stream, so it returns immediately and the stall is only observed while

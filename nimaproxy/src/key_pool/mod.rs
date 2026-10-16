@@ -96,6 +96,10 @@ impl KeyPool {
         self.keys.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
     /// Pick the next available (non-rate-limited) key.
     /// Returns (key_string, pool_index) or None if all keys are cooling down.
     pub fn next_key(&self) -> Option<(String, usize)> {

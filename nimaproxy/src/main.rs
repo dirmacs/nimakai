@@ -95,10 +95,7 @@ async fn main() {
     // call.
     let (leasable, parked) = cfg.partition_keys();
     if !parked.is_empty() {
-        let labels: Vec<&str> = parked
-            .iter()
-            .filter_map(|k| k.label.as_deref())
-            .collect();
+        let labels: Vec<&str> = parked.iter().filter_map(|k| k.label.as_deref()).collect();
         eprintln!(
             "[nimaproxy main] parking {} disabled key(s): {}",
             parked.len(),
@@ -172,7 +169,7 @@ async fn main() {
     let mut pruned_models: Vec<String> = Vec::new();
 
     let (router, model_stats) = match &cfg.routing {
-        Some(r) if !r.models.as_ref().map_or(true, |m| m.is_empty()) => {
+        Some(r) if r.models.as_ref().is_some_and(|m| !m.is_empty()) => {
             let threshold = r.spike_threshold_ms.unwrap_or(3000.0);
             let strategy = r
                 .strategy

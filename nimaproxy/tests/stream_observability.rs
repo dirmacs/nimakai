@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use mockito::{Server, ServerGuard};
+use mockito::Server;
 use nimaproxy::config::{KeyEntry, ModelCompat};
 use nimaproxy::model_stats::ModelStatsStore;
 use nimaproxy::proxy::chat::chat_completions;
@@ -248,10 +248,7 @@ async fn truncated_stream_is_recorded_as_truncated() {
         "a stream that ended without [DONE] is a truncation, whatever it said"
     );
     assert_eq!(completion.content_chars, Some(8), "\"Comm\" + \"D1 i\"");
-    assert_eq!(
-        completion.success, false,
-        "a truncated turn is not a success"
-    );
+    assert!(!completion.success, "a truncated turn is not a success");
     assert!(
         completion
             .error
@@ -290,7 +287,7 @@ async fn tool_call_stream_is_classified_as_tool_calls() {
         "a tool-call turn is a success, not a failure"
     );
     assert_eq!(completion.stream_ended_cleanly, Some(true));
-    assert_eq!(completion.success, true);
+    assert!(completion.success);
 }
 
 /// A stream that reaches `[DONE]` but never reports a finish reason has no

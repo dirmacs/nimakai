@@ -212,7 +212,7 @@ async fn test_live_routing_latency_aware() {
 
     // At least one model should have been tested
     assert!(
-        latencies.len() > 0,
+        !latencies.is_empty(),
         "Expected at least one model to respond successfully"
     );
 }

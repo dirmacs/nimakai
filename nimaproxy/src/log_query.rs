@@ -216,8 +216,9 @@ fn main() {
     if query.is_stats || query_str.trim().is_empty() {
         println!("=== Turn Log Statistics ===");
         println!("Total requests: {}", count);
-        if count > 0 {
-            println!("Avg latency: {}ms", total_latency / count);
+        if let Some(avg) = total_latency.checked_div(count) {
+            println!("Avg latency: {}ms", avg);
+
             println!("Min latency: {}ms", min_latency);
             println!("Max latency: {}ms", max_latency);
 

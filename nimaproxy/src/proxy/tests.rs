@@ -1,35 +1,29 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use axum::{
-body::Body,
-http::{HeaderMap, HeaderValue, StatusCode},
-response::{IntoResponse, Response},
-};
-use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params, count_repetitions};
-use crate::proxy::http::{log_turn_request};
-use crate::proxy::messages::{extract_response_metrics, inject_minimax_system_message, inject_mistral_tool_params, normalize_assistant_messages, sanitize_tool_calls, validate_model_exists};
-use crate::proxy::timeouts::{request_turn_summary};
-use crate::proxy::upstream_errors::{is_transient_race_error, sse_body_error};
-use crate::proxy::admission::{GatewayAcquireError, try_acquire_gateway_permits};
-use crate::proxy::racing::{adaptive_racing_parallel, tiered_candidates, solo_candidate_model, prompt_parallel_cap, race_models};
+use crate::proxy::admission::{try_acquire_gateway_permits, GatewayAcquireError};
 use crate::proxy::chat::chat_completions;
-use axum::extract::State;
-use crate::proxy::messages::{is_minimax_model, is_mistral_model, has_tool_messages};
-use bytes::Bytes;
-use serde_json::Value;
-use tokio::time::{sleep, timeout};
-use tracing::warn;
-use crate::key_pool::{KeyAcquireError, KeyLease};
+use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params, count_repetitions};
+use crate::proxy::messages::is_minimax_model;
+use crate::proxy::messages::{
+    extract_response_metrics, inject_minimax_system_message, inject_mistral_tool_params,
+    normalize_assistant_messages, sanitize_tool_calls, validate_model_exists,
+};
+use crate::proxy::racing::{
+    adaptive_racing_parallel, prompt_parallel_cap, race_models, solo_candidate_model,
+    tiered_candidates,
+};
+use crate::proxy::upstream_errors::{is_transient_race_error, sse_body_error};
 use crate::AppState;
-use super::*;
 use crate::{
     config::{ModelCompat, ModelParams},
     key_pool::KeyPool,
     model_stats::ModelStatsStore,
     RuntimeControls,
 };
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use bytes::Bytes;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 fn create_test_app_state() -> AppState {
     let state = AppState::new(
         vec![],
@@ -54,12 +48,12 @@ fn create_adaptive_test_state() -> Arc<AppState> {
             crate::KeyEntry {
                 key: "key-a".to_string(),
                 label: Some("key-a".to_string()),
-        disabled: false,
+                disabled: false,
             },
             crate::KeyEntry {
                 key: "key-b".to_string(),
                 label: Some("key-b".to_string()),
-        disabled: false,
+                disabled: false,
             },
         ],
         "https://test.api.nvidia.com".to_string(),
@@ -341,13 +335,13 @@ fn test_extract_response_metrics_empty_string() {
     let (tokens, reps, tool) = extract_response_metrics("");
     assert_eq!(tokens, 0);
     assert_eq!(reps, 0);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_invalid_json() {
-    let (tokens, reps, tool) = extract_response_metrics("Hello, this is a test response");
+    let (tokens, _reps, tool) = extract_response_metrics("Hello, this is a test response");
     assert!(tokens > 0);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_with_usage() {
@@ -355,26 +349,27 @@ fn test_extract_response_metrics_with_usage() {
     let (tokens, reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 42);
     assert_eq!(reps, 0);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_with_tool_call() {
     let json = r#"{"usage": {"completion_tokens": 10}, "choices": [{"message": {"tool_calls": [{"id": "1"}]}}]}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let (tokens, _reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 10);
-    assert_eq!(tool, true);
+    assert!(tool);
 }
 #[test]
 fn test_extract_response_metrics_without_tool_call() {
-    let json = r#"{"usage": {"completion_tokens": 10}, "choices": [{"message": {"content": "Hello"}}]}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let json =
+        r#"{"usage": {"completion_tokens": 10}, "choices": [{"message": {"content": "Hello"}}]}"#;
+    let (tokens, _reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 10);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_no_usage_field() {
     let json = r#"{"choices": [{"message": {"content": "Hello"}}]}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let (tokens, _reps, _tool) = extract_response_metrics(json);
     assert!(tokens > 0);
 }
 #[test]
@@ -382,16 +377,16 @@ fn test_extract_response_metrics_repetition_in_json() {
     // Test that extract_response_metrics returns all three values correctly
     // This verifies the function signature and basic parsing works
     let json = r#"{"usage": {"completion_tokens": 5}, "choices": []}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let (tokens, _reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 5);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_multiple_choices() {
     let json = r#"{"usage": {"completion_tokens": 20}, "choices": [{"message": {"content": "A"}}, {"message": {"tool_calls": [{"id": "1"}]}}]}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let (tokens, _reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 20);
-    assert_eq!(tool, true);
+    assert!(tool);
 }
 // ============ inject_minimax_system_message tests ============
 #[test]
@@ -754,16 +749,15 @@ async fn test_chat_completions_empty_bytes() {
 #[tokio::test]
 async fn test_stream_termination_edge_cases() {
     let state = Arc::new(create_test_app_state());
-    let body = json!({"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": true});
+    let body =
+        json!({"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": true});
     let response = chat_completions(
         State(state),
         HeaderMap::new(),
         Bytes::from(body.to_string()),
     )
     .await;
-    assert!(
-        response.status() >= StatusCode::BAD_REQUEST || response.status() == StatusCode::OK
-    );
+    assert!(response.status() >= StatusCode::BAD_REQUEST || response.status() == StatusCode::OK);
 }
 // ============ sse_body_error tests ============
 #[test]
@@ -808,8 +802,7 @@ fn test_sse_body_error_none_for_normal_json_body() {
 }
 #[test]
 fn test_sse_body_error_tolerates_crlf_and_blank_lines() {
-    let body =
-        b"\r\ndata: {\"message\":\"overloaded\",\"code\":503}\r\n\r\ndata: [DONE]\r\n\r\n";
+    let body = b"\r\ndata: {\"message\":\"overloaded\",\"code\":503}\r\n\r\ndata: [DONE]\r\n\r\n";
     let (code, msg) =
         sse_body_error(body, Some("text/event-stream")).expect("expected an embedded error");
     assert_eq!(code, 503);
@@ -913,8 +906,7 @@ fn saturated_single_key_state(max_in_flight_per_key: usize) -> Arc<AppState> {
 }
 #[test]
 fn test_sse_body_error_tolerates_partial_utf8() {
-    let mut body =
-        b"data: {\"message\":\"overloaded\",\"code\":503}\n\ndata: [DONE]\n\n".to_vec();
+    let mut body = b"data: {\"message\":\"overloaded\",\"code\":503}\n\ndata: [DONE]\n\n".to_vec();
     body.push(0xE2); // trailing incomplete multi-byte UTF-8 sequence
     let (code, msg) = sse_body_error(&body, Some("text/event-stream"))
         .expect("expected an embedded error despite trailing partial UTF-8");
@@ -961,13 +953,22 @@ fn test_recover_xml_tool_calls_converts_to_structured() {
     let msg = &json["messages"][1];
     // XML removed from content, non-XML text preserved
     let content = msg["content"].as_str().unwrap();
-    assert!(!content.contains("<invoke"), "XML should be gone: {content}");
-    assert!(content.contains("I will run that"), "text preserved: {content}");
+    assert!(
+        !content.contains("<invoke"),
+        "XML should be gone: {content}"
+    );
+    assert!(
+        content.contains("I will run that"),
+        "text preserved: {content}"
+    );
     // Structured tool_calls added
-    let tc = msg["tool_calls"].as_array().expect("tool_calls should exist");
+    let tc = msg["tool_calls"]
+        .as_array()
+        .expect("tool_calls should exist");
     assert_eq!(tc.len(), 1);
     assert_eq!(tc[0]["function"]["name"], "bash");
-    let args: serde_json::Value = serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+    let args: serde_json::Value =
+        serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(args["command"], "echo hi");
     assert_eq!(args["i"], "test");
 }
@@ -981,7 +982,10 @@ fn test_recover_xml_tool_calls_sets_null_content_when_only_xml() {
         ]
     });
     recover_xml_tool_calls(&mut json);
-    assert!(json["messages"][0]["content"].is_null(), "content should be null when only XML");
+    assert!(
+        json["messages"][0]["content"].is_null(),
+        "content should be null when only XML"
+    );
     assert!(json["messages"][0]["tool_calls"].as_array().unwrap().len() == 1);
 }
 
@@ -1010,7 +1014,11 @@ fn test_recover_xml_tool_calls_skips_existing_tool_calls() {
     });
     let before = json.to_string();
     recover_xml_tool_calls(&mut json);
-    assert_eq!(json.to_string(), before, "should not touch messages with existing tool_calls");
+    assert_eq!(
+        json.to_string(),
+        before,
+        "should not touch messages with existing tool_calls"
+    );
 }
 
 #[test]
@@ -1024,10 +1032,13 @@ fn test_recover_xml_tool_calls_handles_invoke_closing_tag() {
     recover_xml_tool_calls(&mut json);
     let msg = &json["messages"][0];
     assert!(msg["content"].is_null(), "XML-only content should be null");
-    let tc = msg["tool_calls"].as_array().expect("should have tool_calls");
+    let tc = msg["tool_calls"]
+        .as_array()
+        .expect("should have tool_calls");
     assert_eq!(tc.len(), 1);
     assert_eq!(tc[0]["function"]["name"], "bash");
-    let args: serde_json::Value = serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+    let args: serde_json::Value =
+        serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(args["command"], "echo hello");
 }
 
@@ -1045,7 +1056,11 @@ fn test_strip_degenerate_tool_result_omitted() {
     });
     strip_degenerate_assistant_messages(&mut json);
     let msgs = json["messages"].as_array().unwrap();
-    assert_eq!(msgs.len(), 3, "both degenerate assistant messages should be removed");
+    assert_eq!(
+        msgs.len(),
+        3,
+        "both degenerate assistant messages should be removed"
+    );
     assert_eq!(msgs[0]["role"], "user");
     assert_eq!(msgs[1]["role"], "user");
     assert_eq!(msgs[2]["role"], "user");
@@ -1080,7 +1095,11 @@ fn test_strip_degenerate_preserves_tool_calls() {
     });
     strip_degenerate_assistant_messages(&mut json);
     let msgs = json["messages"].as_array().unwrap();
-    assert_eq!(msgs.len(), 2, "assistant with tool_calls should be kept even with degenerate content");
+    assert_eq!(
+        msgs.len(),
+        2,
+        "assistant with tool_calls should be kept even with degenerate content"
+    );
 }
 
 #[test]
@@ -1143,7 +1162,11 @@ fn test_strip_degenerate_preserves_real_content_in_array() {
     });
     strip_degenerate_assistant_messages(&mut json);
     let msgs = json["messages"].as_array().unwrap();
-    assert_eq!(msgs.len(), 1, "message with real diagnostic content must be kept");
+    assert_eq!(
+        msgs.len(),
+        1,
+        "message with real diagnostic content must be kept"
+    );
 }
 
 #[test]
@@ -1154,7 +1177,7 @@ fn test_strip_degenerate_with_pipe_and_box_drawing() {
         " | \n\n[Tool result omitted]",
         "| [Tool result omitted] |",
         "\n\n | [Tool result omitted]",
-        "│[Tool result omitted]│",  // box-drawing U+2502
+        "│[Tool result omitted]│", // box-drawing U+2502
     ];
     for variant in &variants {
         let mut json = serde_json::json!({

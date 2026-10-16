@@ -47,7 +47,7 @@ fn skip_if_no_api_key() -> bool {
 fn extract_assistant_message(json: &serde_json::Value) -> Option<String> {
     json.get("choices")
         .and_then(|c| c.as_array())
-        .and_then(|choices| choices.get(0))
+        .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
         .and_then(|msg| msg.get("content"))
         .and_then(|content| content.as_str())

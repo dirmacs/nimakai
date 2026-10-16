@@ -59,7 +59,7 @@ pub(crate) async fn solo_model_fallback(
         if let Some(response) = mistral_validation_error(&model_id, &req_body) {
             return response;
         }
-        let n = state.pool.len().min(MAX_RETRIES).max(1);
+        let n = state.pool.len().clamp(1, MAX_RETRIES);
         for _ in 0..n {
             let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
                 Ok(permits) => permits,

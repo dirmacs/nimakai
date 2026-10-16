@@ -466,7 +466,10 @@ mod tests {
     #[test]
     fn test_create_test_state() {
         let state = create_test_state();
-        assert!(state.pool.len() >= 1);
+        assert!(
+            !state.pool.is_empty(),
+            "create_test_state should build a pool with at least one key"
+        );
     }
 
     #[test]

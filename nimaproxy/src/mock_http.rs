@@ -472,7 +472,7 @@ mod tests {
             .mock("POST", "/v1/chat/completions")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body("{invalid json response".to_string())
+            .with_body("{invalid json response")
             .create();
         mock_api.mocks.push(mock);
         assert_eq!(mock_api.mocks.len(), 1);
