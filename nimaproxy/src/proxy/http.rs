@@ -342,6 +342,7 @@ pub async fn completions(
                             "upstream auth failure ({}); key quarantined",
                             status.as_u16()
                         )),
+                        (None, None),
                     );
                     continue;
                 }
@@ -520,6 +521,7 @@ pub async fn embeddings(
                             "upstream auth failure ({}); key quarantined",
                             status.as_u16()
                         )),
+                        (None, None),
                     );
                     continue;
                 }
@@ -592,6 +594,10 @@ pub(crate) fn log_turn_request(
     key_label: Option<&str>,
     is_racing: bool,
     error: Option<String>,
+    // (prompt_tokens, completion_tokens) as the upstream reported them. Each
+    // half is independent: an upstream that reports only prompt tokens must
+    // not have its completion count recorded as 0.
+    usage: (Option<u32>, Option<u32>),
 ) {
     use crate::turn_log::{log_turn as log_turn_event, TurnLog};
     let mut turn = TurnLog::new(
@@ -608,6 +614,8 @@ pub(crate) fn log_turn_request(
         is_racing,
     );
     turn.error = error;
+    turn.request_tokens = usage.0;
+    turn.response_tokens = usage.1;
     log_turn_event(&turn);
 }
 
@@ -642,6 +650,10 @@ pub struct StreamCompletion {
     pub stream_ended_cleanly: bool,
     pub chunk_count: u64,
     pub body_bytes: u64,
+    /// Usage tokens the upstream reported, if it reported any. `None` means
+    /// the upstream sent no usage object — never "0 tokens".
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
     /// Set when the stream was aborted rather than ended (idle-guard timeout,
     /// upstream error), which is also a truncation.
     pub abort_reason: Option<String>,
@@ -682,6 +694,11 @@ pub(crate) fn log_turn_completion(turn: &TurnContext, completion: &StreamComplet
     record.stream_ended_cleanly = Some(completion.stream_ended_cleanly);
     record.chunk_count = Some(completion.chunk_count);
     record.body_bytes = Some(completion.body_bytes);
+    // Only when the upstream actually reported usage. A completion record with
+    // no usage frame keeps the fields `None`, so a query can tell "0 tokens"
+    // from "unknown".
+    record.request_tokens = completion.prompt_tokens;
+    record.response_tokens = completion.completion_tokens;
     record.failure_mode = Some(
         classify(
             completion.finish_reason.as_deref(),

@@ -1,26 +1,29 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::proxy::admission::{acquire_gateway_permits, no_key_response};
+use crate::proxy::chat::MAX_RETRIES;
+use crate::proxy::chat_helpers::accept_header_for_body;
+use crate::proxy::chat_helpers::apply_model_params;
+use crate::proxy::http::log_turn_request;
+use crate::proxy::messages::fix_message_ordering;
+use crate::proxy::messages::{
+    inject_minimax_system_message, inject_mistral_tool_params, mistral_validation_error,
+    normalize_assistant_messages, sanitize_tool_calls, transform_message_roles,
+};
+use crate::proxy::racing::{racing_deadline_response, timeout_before_deadline};
+use crate::proxy::timeouts::request_turn_summary;
+use crate::proxy::timeouts::{record_model_timeout, timeout_for_model};
+use crate::proxy::upstream_errors::{is_hard_model_error, sse_body_error};
+use crate::AppState;
 use axum::{
     body::Body,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use crate::proxy::admission::{acquire_gateway_permits, no_key_response};
-use crate::proxy::chat::{MAX_RETRIES};
-use crate::proxy::http::{log_turn_request};
-use crate::proxy::messages::{inject_minimax_system_message, inject_mistral_tool_params, mistral_validation_error, normalize_assistant_messages, sanitize_tool_calls, transform_message_roles};
-use crate::proxy::timeouts::{record_model_timeout, timeout_for_model};
-use crate::proxy::messages::fix_message_ordering;
-use crate::proxy::chat_helpers::apply_model_params;
-use crate::proxy::racing::{timeout_before_deadline, racing_deadline_response};
-use crate::proxy::timeouts::request_turn_summary;
-use crate::proxy::chat_helpers::accept_header_for_body;
-use crate::proxy::upstream_errors::{sse_body_error, is_hard_model_error};
 use bytes::Bytes;
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::warn;
-use crate::AppState;
 fn prepare_model_body(state: &AppState, body: &Bytes, model_id: &str) -> Option<Bytes> {
     let mut json: Value = serde_json::from_slice(body).ok()?;
     json["model"] = Value::String(model_id.to_string());
@@ -112,6 +115,7 @@ pub(crate) async fn solo_model_fallback(
                         key_label.as_deref(),
                         true,
                         Some(msg.clone()),
+                        (None, None),
                     );
                     last_error = Some((StatusCode::BAD_GATEWAY, msg));
                     break;
@@ -139,6 +143,7 @@ pub(crate) async fn solo_model_fallback(
                         key_label.as_deref(),
                         true,
                         Some(msg.clone()),
+                        (None, None),
                     );
                     last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
                     break;
@@ -192,6 +197,7 @@ pub(crate) async fn solo_model_fallback(
                         key_label.as_deref(),
                         true,
                         Some(msg.clone()),
+                        (None, None),
                     );
                     last_error = Some((StatusCode::BAD_GATEWAY, msg));
                     break;
@@ -219,6 +225,7 @@ pub(crate) async fn solo_model_fallback(
                         key_label.as_deref(),
                         true,
                         Some(msg.clone()),
+                        (None, None),
                     );
                     last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
                     break;
@@ -253,6 +260,7 @@ pub(crate) async fn solo_model_fallback(
                         key_label.as_deref(),
                         true,
                         Some(embedded_msg.clone()),
+                        (None, None),
                     );
                     last_error = Some((
                         StatusCode::from_u16(embedded_code).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -311,6 +319,7 @@ pub(crate) async fn solo_model_fallback(
                 } else {
                     Some(error_excerpt.clone())
                 },
+                (None, None),
             );
             if ok {
                 state.gateway_metrics.record_racing_win(&model_id);

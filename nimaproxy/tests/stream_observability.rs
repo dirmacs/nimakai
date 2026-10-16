@@ -567,3 +567,113 @@ async fn stalled_stream_still_produces_a_completion_record() {
     assert_eq!(completion.stream_ended_cleanly, Some(false));
     assert_eq!(completion.content_chars, Some(14));
 }
+
+/// A stream whose upstream emits a terminal usage frame must record the token
+/// counts it reported.
+///
+/// Upstreams that honour `include_usage` send the accounting in a final frame
+/// with `choices: []`, which is the frame a choice-only read would drop. The
+/// counts are facts about the turn the upstream stated, and they belong on the
+/// completion record so a turn can be costed without re-deriving them.
+#[tokio::test]
+async fn usage_frame_populates_token_counts_on_the_completion_record() {
+    let sse = concat!(
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"\"}]}\n\n",
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":11,\"total_tokens\":16}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (_server, url) = mock_upstream(sse).await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (_, request_id) = log.turn(state, turn_body()).await;
+
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(
+        completion.response_tokens,
+        Some(11),
+        "completion_tokens from the usage frame"
+    );
+    assert_eq!(
+        completion.request_tokens,
+        Some(5),
+        "prompt_tokens from the usage frame"
+    );
+    assert_eq!(
+        completion.failure_mode.as_deref(),
+        Some("clean_stop"),
+        "the usage frame must not disturb the structural classification"
+    );
+}
+
+/// A non-streaming turn carries its usage in the assembled JSON body, and that
+/// is where the first-byte record must read it from.
+#[tokio::test]
+async fn non_streaming_usage_body_populates_token_counts() {
+    let mut server = Server::new_async().await;
+    server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "c",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "a complete answer"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 11, "total_tokens": 16}
+            })
+            .to_string(),
+        )
+        .expect_at_least(1)
+        .create();
+    let log = LogFile::new();
+    let state = make_state(server.url());
+
+    let (_, request_id) = log
+        .turn(
+            state,
+            json!({"model": MODEL, "messages": [{"role": "user", "content": "hi"}], "stream": false}),
+        )
+        .await;
+
+    // A non-streaming turn writes exactly one record, the first-byte one, and
+    // it is the record that carries the body's usage.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let mine = log
+        .records()
+        .into_iter()
+        .filter(|r| r.request_id.as_deref() == Some(request_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(mine.len(), 1, "one record for a non-streaming turn");
+    assert_eq!(mine[0].request_tokens, Some(5));
+    assert_eq!(mine[0].response_tokens, Some(11));
+}
+
+/// A turn whose upstream reports no usage must record no token counts.
+///
+/// "The upstream said nothing" and "the upstream said 0" are different facts;
+/// recording 0 would understate every turn from a non-reporting upstream and
+/// make the field unusable for cost questions.
+#[tokio::test]
+async fn absent_usage_records_no_token_counts() {
+    let (_server, url) = mock_upstream(&format!(
+        "{}{}data: [DONE]\n\n",
+        frame("Hello", ""),
+        frame(" world", "stop")
+    ))
+    .await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (_, request_id) = log.turn(state, turn_body()).await;
+
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(
+        completion.request_tokens, None,
+        "no usage frame means no prompt count, never 0"
+    );
+    assert_eq!(
+        completion.response_tokens, None,
+        "no usage frame means no completion count, never 0"
+    );
+}

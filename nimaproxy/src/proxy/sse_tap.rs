@@ -64,6 +64,11 @@ struct SseTapInner {
     chunk_count: AtomicU64,
     /// Sum of the byte lengths of those chunks.
     body_bytes: AtomicU64,
+    /// `usage.prompt_tokens` from the terminal usage frame, if the upstream
+    /// sent one. The stream is never modified to force it.
+    prompt_tokens: Mutex<Option<u32>>,
+    /// `usage.completion_tokens` from the terminal usage frame, if any.
+    completion_tokens: Mutex<Option<u32>>,
     /// Whether the stream has already been finalized, so the completion record
     /// is written exactly once no matter how the stream ends.
     finalized: AtomicBool,
@@ -142,6 +147,19 @@ impl SseTap {
         let Ok(frame) = serde_json::from_str::<SseFrame>(payload) else {
             return;
         };
+        // The usage frame arrives with `choices: []` in most upstreams, so the
+        // choice-only read below would drop it. `include_usage` frames carry
+        // the whole request's accounting; record whatever the upstream chose
+        // to send, and never synthesise counts when it did not.
+        if let Some(usage) = frame.usage {
+            if let Some(prompt) = usage.prompt_tokens {
+                *self.inner.prompt_tokens.lock() = Some(prompt);
+            }
+            if let Some(completion) = usage.completion_tokens {
+                *self.inner.completion_tokens.lock() = Some(completion);
+            }
+        }
+
         let Some(choice) = frame.choices.into_iter().next() else {
             return;
         };
@@ -192,6 +210,19 @@ impl SseTap {
         self.inner.body_bytes.load(Ordering::Relaxed)
     }
 
+    /// `usage.prompt_tokens` from the upstream's usage frame, if it sent one.
+    ///
+    /// `None` means the upstream did not report it, which is not a zero: a
+    /// caller must not turn "no usage frame" into "0 tokens".
+    pub fn prompt_tokens(&self) -> Option<u32> {
+        *self.inner.prompt_tokens.lock()
+    }
+
+    /// `usage.completion_tokens` from the upstream's usage frame, if any.
+    pub fn completion_tokens(&self) -> Option<u32> {
+        *self.inner.completion_tokens.lock()
+    }
+
     /// Whether [`Self::finalize`] has already run.
     pub fn is_finalized(&self) -> bool {
         self.inner.finalized.load(Ordering::Relaxed)
@@ -213,6 +244,8 @@ impl SseTap {
             stream_ended_cleanly: self.saw_done(),
             chunk_count: self.chunk_count(),
             body_bytes: self.body_bytes(),
+            prompt_tokens: self.prompt_tokens(),
+            completion_tokens: self.completion_tokens(),
         }
     }
 }
@@ -229,6 +262,9 @@ pub struct SseOutcome {
     pub stream_ended_cleanly: bool,
     pub chunk_count: u64,
     pub body_bytes: u64,
+    /// Usage tokens the upstream reported. `None` when it reported none.
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
 }
 
 /// A stream adapter that observes chunks and finalizes the tap exactly once
@@ -309,6 +345,19 @@ impl Stream for TappedStream {
 struct SseFrame {
     #[serde(default)]
     choices: Vec<SseChoice>,
+    /// Terminal usage accounting, sent by upstreams the client asked for
+    /// `include_usage`. Optional: an upstream that does not report usage is
+    /// normal and leaves the token fields unset rather than zeroed.
+    #[serde(default)]
+    usage: Option<SseUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SseUsage {
+    #[serde(default)]
+    prompt_tokens: Option<u32>,
+    #[serde(default)]
+    completion_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -495,6 +544,68 @@ mod tests {
         assert_eq!(outcome.content_chars, 0);
     }
 
+    /// The terminal `include_usage` frame carries the whole request's token
+    /// accounting and an empty `choices`, so it must be read for usage even
+    /// though it contributes no content.
+    #[tokio::test]
+    async fn usage_frame_populates_tokens() {
+        let body = format!(
+            "{}data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":11,\"total_tokens\":16}}}}\n\ndata: [DONE]\n\n",
+            frame("Hello", "stop")
+        );
+        let outcome = feed(&[&body]).await;
+        assert_eq!(outcome.prompt_tokens, Some(5));
+        assert_eq!(outcome.completion_tokens, Some(11));
+        // Reading the usage frame must not disturb the structural fields.
+        assert_eq!(outcome.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(outcome.content_chars, 5);
+        assert!(outcome.stream_ended_cleanly);
+    }
+
+    /// A usage frame split across chunk boundaries is still captured: the
+    /// incremental line split is what makes this true, not a special case.
+    #[tokio::test]
+    async fn usage_frame_split_across_chunks_is_captured() {
+        let usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13,\"total_tokens\":20}}\n\n";
+        let bytes = usage.as_bytes();
+        for split in 1..usage.len() {
+            let a = std::str::from_utf8(&bytes[..split]).unwrap();
+            let b = std::str::from_utf8(&bytes[split..]).unwrap();
+            let outcome = feed(&[a, b]).await;
+            assert_eq!(outcome.prompt_tokens, Some(7), "split at {split}");
+            assert_eq!(outcome.completion_tokens, Some(13), "split at {split}");
+        }
+    }
+
+    /// An upstream that sends no usage is the common case: the fields stay
+    /// `None`, never zero, because "not reported" is not "0 tokens".
+    #[tokio::test]
+    async fn no_usage_frame_leaves_tokens_unset() {
+        let outcome = feed(&[&frame("Hello", "stop"), "data: [DONE]\n\n"]).await;
+        assert_eq!(outcome.prompt_tokens, None);
+        assert_eq!(outcome.completion_tokens, None);
+    }
+
+    /// A partial usage object (only `completion_tokens`, which is what some
+    /// upstreams send) populates only the field it reported.
+    #[tokio::test]
+    async fn partial_usage_populates_only_what_was_reported() {
+        let body = "data: {\"choices\":[],\"usage\":{\"completion_tokens\":9}}\n\ndata: [DONE]\n\n";
+        let outcome = feed(&[body]).await;
+        assert_eq!(outcome.prompt_tokens, None);
+        assert_eq!(outcome.completion_tokens, Some(9));
+    }
+
+    /// A frame that carries usage alongside a real choice (some upstreams put
+    /// usage on the final content frame) is read for both.
+    #[tokio::test]
+    async fn usage_on_a_content_frame_is_also_captured() {
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}\n\ndata: [DONE]\n\n";
+        let outcome = feed(&[body]).await;
+        assert_eq!(outcome.prompt_tokens, Some(3));
+        assert_eq!(outcome.completion_tokens, Some(4));
+        assert_eq!(outcome.content_chars, 4);
+    }
     /// `event:`/`id:`/comment lines and blank separators carry no signal.
     #[tokio::test]
     async fn non_data_lines_are_ignored() {

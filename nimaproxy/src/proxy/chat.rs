@@ -1,5 +1,5 @@
 use crate::proxy::admission::acquire_gateway_permits;
-use crate::proxy::chat_helpers::accept_header_for_body;
+use crate::proxy::chat_helpers::{accept_header_for_body, non_streaming_usage};
 use crate::proxy::http::log_turn_request;
 use crate::proxy::messages::{
     mistral_validation_error, normalize_requested_model, resolve_model, validate_model_exists,
@@ -161,6 +161,7 @@ pub async fn chat_completions(
                             "upstream timeout after {}ms; retrying on another key",
                             request_timeout_ms
                         )),
+                        (None, None),
                     );
                     continue;
                 }
@@ -176,6 +177,7 @@ pub async fn chat_completions(
                     key_label.as_deref(),
                     false,
                     Some(format!("upstream timeout after {}ms", request_timeout_ms)),
+                    (None, None),
                 );
                 return (
                     StatusCode::GATEWAY_TIMEOUT,
@@ -208,6 +210,7 @@ pub async fn chat_completions(
                     key_label.as_deref(),
                     false,
                     Some(e.to_string()),
+                    (None, None),
                 );
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
@@ -276,6 +279,7 @@ pub async fn chat_completions(
                             "upstream auth failure ({}); key quarantined",
                             status.as_u16()
                         )),
+                        (None, None),
                     );
                     continue;
                 }
@@ -336,6 +340,7 @@ pub async fn chat_completions(
                             key_label.as_deref(),
                             false,
                             Some(error_excerpt),
+                            (None, None),
                         );
                         continue;
                     }
@@ -441,6 +446,7 @@ pub async fn chat_completions(
                                 "upstream sent no bytes within {}ms; retrying on another key",
                                 request_timeout_ms
                             )),
+                            (None, None),
                         );
                         continue;
                     }
@@ -459,6 +465,7 @@ pub async fn chat_completions(
                             "upstream sent no bytes within {}ms",
                             request_timeout_ms
                         )),
+                        (None, None),
                     );
                     return (
                         StatusCode::GATEWAY_TIMEOUT,
@@ -526,6 +533,11 @@ pub async fn chat_completions(
                     crate::proxy::streaming::with_idle_timeout(with_first, window),
                 );
 
+                // Usage tokens for this turn. Streaming paths leave them to the
+                // tap, which reads the upstream's usage frame; the
+                // non-streaming path parses them out of the assembled body
+                // below. `None` until one of the two fills them in.
+                let mut usage_tokens: (Option<u32>, Option<u32>) = (None, None);
                 let body = if is_stream {
                     Body::from_stream(tapped)
                 } else {
@@ -583,6 +595,7 @@ pub async fn chat_completions(
                                     "upstream body stalled after {}ms; retrying on another key",
                                     request_timeout_ms
                                 )),
+                                (None, None),
                             );
                             continue;
                         }
@@ -601,6 +614,7 @@ pub async fn chat_completions(
                                 "upstream body stalled after {}ms",
                                 request_timeout_ms
                             )),
+                            (None, None),
                         );
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
@@ -608,6 +622,11 @@ pub async fn chat_completions(
                         )
                             .into_response();
                     }
+
+                    // Usage accounting lives in the assembled body, so it is
+                    // read from the bytes the client is about to receive rather
+                    // than from the stream. Absent means `None`, never 0.
+                    usage_tokens = non_streaming_usage(&collected.concat());
 
                     Body::from(collected.concat())
                 };
@@ -658,6 +677,7 @@ pub async fn chat_completions(
                     key_label.as_deref(),
                     false,
                     None,
+                    usage_tokens,
                 );
                 let request_id =
                     crate::turn_log::with_logger(|logger| logger.last_request_id()).flatten();
@@ -736,6 +756,8 @@ pub async fn chat_completions(
                                 stream_ended_cleanly: outcome.stream_ended_cleanly,
                                 chunk_count: outcome.chunk_count,
                                 body_bytes: outcome.body_bytes,
+                                prompt_tokens: outcome.prompt_tokens,
+                                completion_tokens: outcome.completion_tokens,
                                 abort_reason,
                             },
                         );

@@ -1,31 +1,39 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::key_pool::KeyAcquireError;
+use crate::proxy::admission::{gateway_overloaded_response, no_key_response};
+use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params};
+use crate::proxy::fallback::solo_model_fallback;
+use crate::proxy::http::log_turn_request;
+use crate::proxy::messages::{
+    fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params,
+    normalize_assistant_messages, sanitize_tool_calls, transform_message_roles,
+};
+use crate::proxy::timeouts::{
+    prompt_chars, record_model_timeout, request_turn_summary, timeout_for_model,
+};
+use crate::proxy::upstream_errors::{is_hard_model_error, is_transient_race_error, sse_body_error};
+use crate::AppState;
 use axum::{
     body::Body,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use crate::proxy::admission::{gateway_overloaded_response, no_key_response};
-use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params};
-use crate::proxy::fallback::{solo_model_fallback};
-use crate::proxy::http::{log_turn_request};
-use crate::proxy::messages::{fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params, normalize_assistant_messages, sanitize_tool_calls, transform_message_roles};
-use crate::proxy::timeouts::{prompt_chars, record_model_timeout, request_turn_summary, timeout_for_model};
-use crate::proxy::upstream_errors::{is_hard_model_error, is_transient_race_error, sse_body_error};
 use bytes::Bytes;
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::warn;
-use crate::key_pool::KeyAcquireError;
-use crate::AppState;
 pub(crate) fn racing_deadline(state: &AppState) -> Option<Instant> {
     if state.racing_max_total_request_ms == 0 {
         return None;
     }
     Instant::now().checked_add(Duration::from_millis(state.racing_max_total_request_ms))
 }
-pub(crate) fn timeout_before_deadline(deadline: Option<Instant>, per_attempt_ms: u64) -> Option<u64> {
+pub(crate) fn timeout_before_deadline(
+    deadline: Option<Instant>,
+    per_attempt_ms: u64,
+) -> Option<u64> {
     let Some(deadline) = deadline else {
         return Some(per_attempt_ms);
     };
@@ -90,7 +98,11 @@ pub(crate) fn rotated_models(models: &[String], cursor: usize) -> Vec<String> {
     let n = models.len();
     (0..n).map(|i| models[(cursor + i) % n].clone()).collect()
 }
-pub(crate) fn tiered_candidates(state: &AppState, rotated: &[String], max_parallel: usize) -> Vec<String> {
+pub(crate) fn tiered_candidates(
+    state: &AppState,
+    rotated: &[String],
+    max_parallel: usize,
+) -> Vec<String> {
     if !state.racing_adaptive || state.racing_fast_models.is_empty() {
         return state.model_stats.racing_candidates(rotated, max_parallel);
     }
@@ -340,6 +352,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                             key_label.as_deref(),
                             true,
                             Some(body_str[..body_str.len().min(400)].to_string()),
+                        (None, None),
                         );
                         return (
                             model_id_for_task,
@@ -390,6 +403,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                     key_label.as_deref(),
                                     true,
                                     Some(msg.clone()),
+                                (None, None),
                                 );
                                 return (model_id_for_task, Err(msg));
                             }
@@ -414,6 +428,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 key_label.as_deref(),
                                 true,
                                 Some(e.to_string()),
+                            (None, None),
                             );
                             return (model_id_for_task, Err(format!("body error: {}", e)));
                         }
@@ -445,6 +460,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 key_label.as_deref(),
                                 true,
                                 Some(timeout_error.clone()),
+                            (None, None),
                             );
                             return (model_id_for_task, Err(timeout_error));
                         }
@@ -469,6 +485,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 key_label.as_deref(),
                                 true,
                                 Some(embedded_msg.clone()),
+                            (None, None),
                             );
                             return (
                                 model_id_for_task,
@@ -511,6 +528,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         } else {
                             Some(format!("HTTP {}", status.as_u16()))
                         },
+                    (None, None),
                     );
                     Ok::<(Response, u16, usize, u64), String>((
                         response,
@@ -546,6 +564,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         key_label.as_deref(),
                         true,
                         Some(e.to_string()),
+                    (None, None),
                     );
                     Err(format!("request error: {}", e))
                 }
@@ -577,6 +596,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         key_label.as_deref(),
                         true,
                         Some(timeout_error.clone()),
+                    (None, None),
                     );
                     Err(timeout_error)
                 }

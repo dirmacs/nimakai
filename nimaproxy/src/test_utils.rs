@@ -108,8 +108,16 @@ impl MockAppStateBuilder {
     ///
     /// let state = MockAppStateBuilder::new()
     ///     .with_custom_keys(vec![
-    ///         KeyEntry { key: "api-key-1".into(), label: Some("key-1".into()) },
-    ///         KeyEntry { key: "api-key-2".into(), label: Some("key-2".into()) },
+    ///         KeyEntry {
+    ///             key: "api-key-1".into(),
+    ///             label: Some("key-1".into()),
+    ///             disabled: false,
+    ///         },
+    ///         KeyEntry {
+    ///             key: "api-key-2".into(),
+    ///             label: Some("key-2".into()),
+    ///             disabled: false,
+    ///         },
     ///     ])
     ///     .build();
     /// ```
