@@ -11,3 +11,7 @@ nimaproxy.toml
 
 # Test fixtures with real API keys
 tests/test_config.toml
+
+# Config backups (a .bak of the ignored nimaproxy.toml still holds live keys)
+nimaproxy.toml.bak*
+*.bak
