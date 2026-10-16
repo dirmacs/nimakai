@@ -946,3 +946,69 @@ fn test_is_transient_race_error_in_stream_4xx_is_not_transient() {
         "HTTP 400 (in-stream) from model-a: bad request"
     ));
 }
+
+#[test]
+fn test_recover_xml_tool_calls_converts_to_structured() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "I will run that.\n\n<invoke name=\"bash\">\n<parameter name=\"i\">\ntest\n</parameter>\n<parameter name=\"command\">\necho hi\n</parameter>\n</function>\n</tool_call>"},
+            {"role": "user", "content": "try again"}
+        ]
+    });
+    recover_xml_tool_calls(&mut json);
+    let msg = &json["messages"][1];
+    // XML removed from content, non-XML text preserved
+    let content = msg["content"].as_str().unwrap();
+    assert!(!content.contains("<invoke"), "XML should be gone: {content}");
+    assert!(content.contains("I will run that"), "text preserved: {content}");
+    // Structured tool_calls added
+    let tc = msg["tool_calls"].as_array().expect("tool_calls should exist");
+    assert_eq!(tc.len(), 1);
+    assert_eq!(tc[0]["function"]["name"], "bash");
+    let args: serde_json::Value = serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(args["command"], "echo hi");
+    assert_eq!(args["i"], "test");
+}
+
+#[test]
+fn test_recover_xml_tool_calls_sets_null_content_when_only_xml() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "<invoke name=\"bash\">\n<parameter name=\"command\">\necho hi\n</parameter>\n</function>\n</tool_call>"}
+        ]
+    });
+    recover_xml_tool_calls(&mut json);
+    assert!(json["messages"][0]["content"].is_null(), "content should be null when only XML");
+    assert!(json["messages"][0]["tool_calls"].as_array().unwrap().len() == 1);
+}
+
+#[test]
+fn test_recover_xml_tool_calls_leaves_non_xml_alone() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "The command returned hello"},
+            {"role": "user", "content": "good"}
+        ]
+    });
+    let before = json.to_string();
+    recover_xml_tool_calls(&mut json);
+    assert_eq!(json.to_string(), before);
+}
+
+#[test]
+fn test_recover_xml_tool_calls_skips_existing_tool_calls() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "text with <invoke name=\"x\">\n</function>\n</tool_call>",
+             "tool_calls": [{"id":"c1","type":"function","function":{"name":"y","arguments":"{}"}}]}
+        ]
+    });
+    let before = json.to_string();
+    recover_xml_tool_calls(&mut json);
+    assert_eq!(json.to_string(), before, "should not touch messages with existing tool_calls");
+}
