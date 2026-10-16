@@ -244,7 +244,7 @@ pub(crate) fn recover_xml_tool_calls(json: &mut Value) {
 fn extract_invoke_blocks(text: &str, counter: &mut u32) -> (String, Vec<Value>) {
     let mut remaining = text.to_string();
     let mut tool_calls = Vec::new();
-    for end_marker in ["</tool_call>", "</function>"] {
+    for end_marker in ["</tool_call>", "</function>", "</invoke>"] {
         loop {
             let Some(start) = remaining.find("<invoke") else {
                 break;
