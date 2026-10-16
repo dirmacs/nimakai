@@ -1106,3 +1106,64 @@ fn test_strip_degenerate_variations() {
         assert_eq!(msgs.len(), 0, "variant {:?} should be stripped", variant);
     }
 }
+
+#[test]
+fn test_strip_degenerate_content_array_format() {
+    // omp sends content as array of parts: [{type:"thinking",text:""},{type:"text",text:"..."}]
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "text": ""},
+                {"type": "text", "text": "\n\n[Tool result omitted]"}
+            ]},
+            {"role": "user", "content": "try again"}
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2, "content-array degenerate should be stripped");
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[1]["role"], "user");
+}
+
+#[test]
+fn test_strip_degenerate_preserves_real_content_in_array() {
+    // The 2 "mixed" entries from pane 0 contain real diagnostic text alongside
+    // the artifact — these MUST be preserved.
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "text": ""},
+                {"type": "text", "text": "\n\n**BLOCKED — no tool output is reaching me.**\n\nEvery tool invocation returns `[Tool result omitted]`."}
+            ]}
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1, "message with real diagnostic content must be kept");
+}
+
+#[test]
+fn test_strip_degenerate_with_pipe_and_box_drawing() {
+    // omp display may inject pipe separators between content blocks
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let variants = vec![
+        " | \n\n[Tool result omitted]",
+        "| [Tool result omitted] |",
+        "\n\n | [Tool result omitted]",
+        "│[Tool result omitted]│",  // box-drawing U+2502
+    ];
+    for variant in &variants {
+        let mut json = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": variant}
+            ]
+        });
+        strip_degenerate_assistant_messages(&mut json);
+        let msgs = json["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 0, "variant {:?} should be stripped", variant);
+    }
+}
