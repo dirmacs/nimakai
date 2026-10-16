@@ -1030,3 +1030,79 @@ fn test_recover_xml_tool_calls_handles_invoke_closing_tag() {
     let args: serde_json::Value = serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(args["command"], "echo hello");
 }
+
+#[test]
+fn test_strip_degenerate_tool_result_omitted() {
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "\n\n[Tool result omitted]"},
+            {"role": "user", "content": "try again"},
+            {"role": "assistant", "content": "[Tool result omitted]"},
+            {"role": "user", "content": "one more time"}
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 3, "both degenerate assistant messages should be removed");
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[1]["role"], "user");
+    assert_eq!(msgs[2]["role"], "user");
+}
+
+#[test]
+fn test_strip_degenerate_preserves_real_content() {
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "Here is the answer: 42"},
+            {"role": "user", "content": "thanks"}
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 3, "real content should be preserved");
+    assert_eq!(msgs[1]["content"], "Here is the answer: 42");
+}
+
+#[test]
+fn test_strip_degenerate_preserves_tool_calls() {
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "run it"},
+            {"role": "assistant", "content": "[Tool result omitted]", "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+            ]},
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2, "assistant with tool_calls should be kept even with degenerate content");
+}
+
+#[test]
+fn test_strip_degenerate_variations() {
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let variants = vec![
+        "[Tool result omitted]",
+        "[tool result omitted]",
+        "  [Tool result omitted]  ",
+        "\n\n[Tool result omitted]",
+        "[Tool results omitted]",
+        "[output omitted]",
+        "[result omitted]",
+    ];
+    for variant in &variants {
+        let mut json = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": variant}
+            ]
+        });
+        strip_degenerate_assistant_messages(&mut json);
+        let msgs = json["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 0, "variant {:?} should be stripped", variant);
+    }
+}
