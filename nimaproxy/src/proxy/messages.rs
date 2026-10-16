@@ -239,6 +239,65 @@ pub(crate) fn recover_xml_tool_calls(json: &mut Value) {
     }
 }
 
+/// Strip degenerate assistant messages that contain only rendering artifacts.
+///
+/// When the proxy returns a 503 or the model degrades, some models emit
+/// rendering artifacts as their entire text response instead of making tool
+/// calls. Example: `[Tool result omitted]` — a display placeholder from the
+/// omp harness that the model learned from its training data.
+///
+/// Once one such message enters conversation history, the model sees it as a
+/// pattern to imitate, creating a self-reinforcing loop (189 occurrences
+/// observed in one session). We break the loop by removing these degenerate
+/// messages from the request body before it reaches the model.
+///
+/// Only removes messages where the assistant's text content, after stripping
+/// whitespace, matches a known degenerate pattern AND the message has no
+/// tool_calls. Messages with real content alongside the artifact are left alone.
+pub(crate) fn strip_degenerate_assistant_messages(json: &mut Value) {
+    let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    messages.retain(|msg| {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            return true;
+        }
+        // Keep messages that have tool_calls — they're doing real work.
+        if msg
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .is_some_and(|tc| !tc.is_empty())
+        {
+            return true;
+        }
+        let text = match msg.get("content").and_then(|c| c.as_str()) {
+            Some(s) => s.trim(),
+            None => return true, // null content — keep (might be tool_calls-only)
+        };
+        !is_degenerate_content(text)
+    });
+}
+
+/// Returns true if the text is a known degenerate rendering artifact.
+fn is_degenerate_content(text: &str) -> bool {
+    // Exact known patterns (case-insensitive, bracket-insensitive)
+    let normalized = text
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
+    let lower = normalized.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "tool result omitted"
+            | "tool results omitted"
+            | "tool output omitted"
+            | "tool call result omitted"
+            | "output omitted"
+            | "result omitted"
+            | "results omitted"
+    )
+}
+
 /// Parse `<invoke name="X"><parameter …>…</parameter>…</tool_call|function>`
 /// blocks out of `text`. Returns (remaining_text, Vec<tool_call JSON values>).
 fn extract_invoke_blocks(text: &str, counter: &mut u32) -> (String, Vec<Value>) {
@@ -573,6 +632,11 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     // of using structured tool_calls. Converting it back to tool_calls breaks
     // the feedback loop while preserving what the model intended to do.
     recover_xml_tool_calls(&mut json);
+    // Strip degenerate assistant messages ("[Tool result omitted]" etc.) that
+    // are rendering artifacts the model learned to imitate. Must run AFTER
+    // recover_xml_tool_calls so we don't strip messages that had recoverable
+    // XML tool calls in them.
+    strip_degenerate_assistant_messages(&mut json);
     if let Some(params) = state.model_params.get(&model_id) {
         apply_model_params(&mut json, params);
     }
