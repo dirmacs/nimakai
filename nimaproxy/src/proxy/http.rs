@@ -610,3 +610,88 @@ pub(crate) fn log_turn_request(
     turn.error = error;
     log_turn_event(&turn);
 }
+
+/// Identity of the turn a completion record belongs to.
+///
+/// These are the fields the first-byte record already carried; the completion
+/// record repeats them so it can be read on its own, and reuses the first-byte
+/// record's `request_id` so the two can be joined.
+#[derive(Debug, Clone)]
+pub struct TurnContext {
+    pub requested_model: String,
+    pub responding_model: String,
+    pub message_count: usize,
+    pub has_tool_calls: bool,
+    pub tool_call_count: usize,
+    pub key_label: Option<String>,
+    pub is_racing: bool,
+}
+
+/// Structural outcome of a forwarded SSE stream, as carried into a turn record.
+///
+/// Every field is a fact about the stream, never about its text.
+#[derive(Debug, Clone, Default)]
+pub struct StreamCompletion {
+    /// `request_id` of the first-byte record for this turn, so the two records
+    /// can be joined.
+    pub request_id: Option<String>,
+    /// Total duration of the stream, first byte to last (ms).
+    pub duration_ms: u128,
+    pub finish_reason: Option<String>,
+    pub content_chars: u64,
+    pub stream_ended_cleanly: bool,
+    pub chunk_count: u64,
+    pub body_bytes: u64,
+    /// Set when the stream was aborted rather than ended (idle-guard timeout,
+    /// upstream error), which is also a truncation.
+    pub abort_reason: Option<String>,
+}
+
+/// Log the completion of a streamed turn.
+///
+/// This is the record that carries what the stream actually turned out to be.
+/// The first-byte record is written the moment the first SSE byte arrives and
+/// can only say "a response started"; this one is written when the stream ends
+/// and says whether it finished, what finish reason the upstream gave, and how
+/// much was forwarded. Without it a truncated generation is logged as a
+/// success.
+///
+/// The record shares the first-byte record's `request_id`, so the two halves of
+/// one turn can be read together.
+pub(crate) fn log_turn_completion(turn: &TurnContext, completion: &StreamCompletion) {
+    use crate::turn_log::{classify, log_turn as log_turn_event, TurnLog};
+    let mut record = TurnLog::new(
+        turn.requested_model.clone(),
+        turn.responding_model.clone(),
+        completion.duration_ms as u64,
+        // A truncated stream is not a success: the client was promised a
+        // completion and did not get one.
+        completion.stream_ended_cleanly,
+        200,
+        turn.message_count,
+        1, // response_message_count
+        turn.has_tool_calls,
+        turn.tool_call_count,
+        turn.key_label.clone(),
+        turn.is_racing,
+    );
+    record.record_kind = TurnLog::RECORD_KIND_COMPLETION.to_string();
+    record.request_id = completion.request_id.clone();
+    record.finish_reason = completion.finish_reason.clone();
+    record.content_chars = Some(completion.content_chars);
+    record.stream_ended_cleanly = Some(completion.stream_ended_cleanly);
+    record.chunk_count = Some(completion.chunk_count);
+    record.body_bytes = Some(completion.body_bytes);
+    record.failure_mode = Some(
+        classify(
+            completion.finish_reason.as_deref(),
+            completion.content_chars,
+            completion.stream_ended_cleanly,
+        )
+        .to_string(),
+    );
+    if let Some(reason) = completion.abort_reason.as_ref() {
+        record.error = Some(reason.clone());
+    }
+    log_turn_event(&record);
+}

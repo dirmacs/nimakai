@@ -512,19 +512,31 @@ pub async fn chat_completions(
                 });
                 let with_first = futures::stream::once(async move { Ok(first) }).chain(mapped);
 
+                // Structural observation of the forwarded stream.
+                //
+                // The tap sits INSIDE the idle guard, so it sees the chunks
+                // that were actually forwarded to the client — and it also
+                // sees the guard's abort error, which is how a stalled stream
+                // gets a completion record instead of vanishing. The first
+                // chunk was already consumed by the TTFB bound, so it is
+                // prepended back and observed like any other chunk.
+                let tap = crate::proxy::sse_tap::SseTap::new();
+                let tapped = crate::proxy::sse_tap::TappedStream::new(
+                    tap.clone(),
+                    crate::proxy::streaming::with_idle_timeout(with_first, window),
+                );
+
                 let body = if is_stream {
-                    Body::from_stream(crate::proxy::streaming::with_idle_timeout(
-                        with_first, window,
-                    ))
+                    Body::from_stream(tapped)
                 } else {
                     // Assemble the body. A timeout here means the upstream went
                     // quiet mid-body, which is retryable because the caller has
                     // received nothing yet.
                     let mut collected = Vec::new();
                     let mut stalled = false;
-                    futures::pin_mut!(with_first);
+                    futures::pin_mut!(tapped);
                     loop {
-                        match timeout(window, with_first.next()).await {
+                        match timeout(window, tapped.next()).await {
                             Ok(Some(Ok(chunk))) => collected.push(chunk),
                             Ok(Some(Err(e))) => {
                                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
@@ -623,6 +635,17 @@ pub async fn chat_completions(
                         .headers_mut()
                         .insert("x-accel-buffering", HeaderValue::from_static("no"));
                 }
+                // The first-byte record is written BEFORE the stream is
+                // handed to axum, so its generated `request_id` is known and
+                // can be threaded into the tap for the completion record.
+                // Reading the id back out of the global logger is the only way
+                // to get it: `TurnLog::new` generates it internally.
+                //
+                // The read MUST come after the write: `last_request_id` is
+                // only updated inside `log`, once the record is on disk.
+                // Reading it first returns the previous request's id (or
+                // `None` on a fresh logger), which would silently join this
+                // turn's completion record to the wrong turn — or to nothing.
                 log_turn_request(
                     &original_model,
                     &model_id,
@@ -636,6 +659,89 @@ pub async fn chat_completions(
                     false,
                     None,
                 );
+                let request_id =
+                    crate::turn_log::with_logger(|logger| logger.last_request_id()).flatten();
+                let tap_for_completion = tap.clone();
+
+                // Echo the generated request id back to the client.
+                //
+                // This is the join key the turn log is keyed on: the client
+                // cannot correlate its own turn with the JSONL records without
+                // it, and guessing by file position is not possible for anyone
+                // outside this process. It is also what makes the id available
+                // to the tests, which read it from the response instead of
+                // racing other tests' writes to the shared log.
+                response.headers_mut().insert(
+                    "x-request-id",
+                    HeaderValue::from_str(request_id.as_deref().unwrap_or("unknown"))
+                        .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                );
+
+                if is_stream {
+                    // The stream is owned by axum once it is returned, so the
+                    // completion record cannot be written here. Instead the tap
+                    // is watched by a detached task: the record is written when
+                    // the stream ends, including on the idle guard's abort,
+                    // because that is the only point at which the structural
+                    // outcome is known.
+                    //
+                    // The task holds a clone of the tap, whose counters are
+                    // shared with the one inside the body, so it reads the same
+                    // values axum's polls produced.
+                    //
+                    // The wait is bounded rather than open-ended. A client that
+                    // goes away mid-stream can leave the body unpolled forever,
+                    // and an unbounded wait would leak a task per such request.
+                    // The bound is generous (5 minutes past the inter-chunk
+                    // window) so a slow-but-healthy generation is never cut off;
+                    // if it expires, the stream is recorded as truncated, which
+                    // is what a client that stopped reading actually produced.
+                    let wait_bound = window * 20 + Duration::from_secs(60);
+                    let started_stream = Instant::now();
+                    let turn_ctx = crate::proxy::http::TurnContext {
+                        requested_model: original_model.clone(),
+                        responding_model: model_id.clone(),
+                        message_count,
+                        has_tool_calls,
+                        tool_call_count,
+                        key_label: key_label.clone(),
+                        is_racing: false,
+                    };
+                    tokio::spawn(async move {
+                        let deadline = Instant::now() + wait_bound;
+                        while !tap_for_completion.is_finalized() {
+                            if Instant::now() >= deadline {
+                                // The body was never driven to the end. Record
+                                // what was forwarded, as a truncation.
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                        let outcome = tap_for_completion.outcome();
+                        let abort_reason = if outcome.stream_ended_cleanly {
+                            None
+                        } else {
+                            // A stream that ended without [DONE] either
+                            // truncated or was aborted mid-stream; both are the
+                            // same structural fact.
+                            Some("stream ended without data: [DONE]".to_string())
+                        };
+                        crate::proxy::http::log_turn_completion(
+                            &turn_ctx,
+                            &crate::proxy::http::StreamCompletion {
+                                request_id,
+                                duration_ms: started_stream.elapsed().as_millis(),
+                                finish_reason: outcome.finish_reason,
+                                content_chars: outcome.content_chars,
+                                stream_ended_cleanly: outcome.stream_ended_cleanly,
+                                chunk_count: outcome.chunk_count,
+                                body_bytes: outcome.body_bytes,
+                                abort_reason,
+                            },
+                        );
+                    });
+                }
+
                 return response;
             }
         }

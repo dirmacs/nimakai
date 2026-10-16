@@ -24,6 +24,7 @@ pub mod messages;
 pub mod racing;
 pub mod request_state;
 pub mod retry;
+pub mod sse_tap;
 pub mod streaming;
 pub mod timeouts;
 pub mod upstream_errors;
