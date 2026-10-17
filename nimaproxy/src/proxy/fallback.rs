@@ -3,7 +3,6 @@ use crate::proxy::chat::MAX_RETRIES;
 use crate::proxy::chat_helpers::accept_header_for_body;
 use crate::proxy::chat_helpers::apply_model_params;
 use crate::proxy::http::log_turn_request;
-use crate::turn_log::TurnRecord;
 use crate::proxy::messages::{
     fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params,
     mistral_validation_error, normalize_assistant_messages, sanitize_tool_calls,
@@ -13,6 +12,7 @@ use crate::proxy::racing::{racing_deadline_response, timeout_before_deadline};
 use crate::proxy::timeouts::request_turn_summary;
 use crate::proxy::timeouts::{record_model_timeout, timeout_for_model};
 use crate::proxy::upstream_errors::{is_hard_model_error, sse_body_error};
+use crate::turn_log::TurnRecord;
 use crate::AppState;
 use axum::{
     body::Body,

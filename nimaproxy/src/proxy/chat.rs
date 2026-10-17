@@ -1,13 +1,13 @@
 use crate::proxy::admission::acquire_gateway_permits;
 use crate::proxy::chat_helpers::{accept_header_for_body, non_streaming_usage};
 use crate::proxy::http::log_turn_request;
-use crate::turn_log::TurnRecord;
 use crate::proxy::messages::{
     mistral_validation_error, normalize_requested_model, resolve_model, validate_model_exists,
 };
 use crate::proxy::racing::race_models;
 use crate::proxy::retry::RetryPolicy;
 use crate::proxy::timeouts::{record_model_timeout, request_turn_summary, timeout_for_model};
+use crate::turn_log::TurnRecord;
 use crate::AppState;
 use axum::{
     body::Body,
@@ -576,9 +576,7 @@ pub async fn chat_completions(
                             // while a genuine upstream I/O failure is not.
                             // Reading both as a 502 is what silently disabled
                             // the mid-body retry and the 504.
-                            Ok(Some(Err(e)))
-                                if crate::proxy::streaming::is_stall(&e) =>
-                            {
+                            Ok(Some(Err(e))) if crate::proxy::streaming::is_stall(&e) => {
                                 stalled = true;
                                 break;
                             }

@@ -1203,12 +1203,17 @@ async fn test_upstream_io_failure_is_not_treated_as_a_stall() {
 
     // The decisive arm: the request must NOT have been retried. A stall gets
     // retried; a connection reset does not.
+    //
+    // The I/O arm returns before any stats are recorded, so the model has no
+    // entry at all — and an absent entry is exactly what "no attempt was
+    // retried" means here. Assert that directly rather than unwrapping an
+    // entry that the code path never creates.
     let snapshot = state.model_stats.snapshot();
-    let broken_model = snapshot.iter().find(|s| s.id == "broken-model").unwrap();
-    assert_eq!(
-        broken_model.total, 1,
-        "a mid-body I/O failure must not be retried; observed {} attempts",
-        broken_model.total
+    let broken_model = snapshot.iter().find(|s| s.id == "broken-model");
+    assert!(
+        broken_model.is_none(),
+        "a mid-body I/O failure must not be retried: found a recorded attempt ({:?})",
+        broken_model.map(|s| s.total)
     );
 
     broken.assert();

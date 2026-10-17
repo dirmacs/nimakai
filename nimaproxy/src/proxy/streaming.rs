@@ -62,7 +62,8 @@ pub fn stalled_error(window: Duration) -> std::io::Error {
 /// not sufficient, because an upstream may legitimately time out on its own.
 /// Only a [`StreamStalled`] payload proves the *guard* fired.
 pub fn is_stall(e: &std::io::Error) -> bool {
-    e.get_ref().is_some_and(|payload| payload.is::<StreamStalled>())
+    e.get_ref()
+        .is_some_and(|payload| payload.is::<StreamStalled>())
 }
 
 /// Wrap a response body stream so a gap longer than `window` between chunks

@@ -291,9 +291,8 @@ impl MockAppStateBuilder {
             model_params: self.model_params,
             model_compat: self.model_compat,
         })
-}
-
     }
+}
 impl Default for MockAppStateBuilder {
     fn default() -> Self {
         Self::new()
