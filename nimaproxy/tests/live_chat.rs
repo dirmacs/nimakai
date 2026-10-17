@@ -62,7 +62,7 @@ async fn test_live_chat_completions() {
 
     // Use a commonly available model
     let body = serde_json::json!({
-        "model": "stepfun-ai/step-3.7-flash",
+        "model": "stepfun-ai/step-5-preview",
         "messages": [
             {"role": "user", "content": "Say 'hello' in exactly one word."}
         ],
@@ -133,7 +133,7 @@ async fn test_live_chat_streaming() {
     let state = make_live_state().expect("Failed to create live state");
 
     let body = serde_json::json!({
-        "model": "stepfun-ai/step-3.7-flash",
+        "model": "stepfun-ai/step-5-preview",
         "messages": [
             {"role": "user", "content": "Count from 1 to 3."}
         ],
@@ -202,7 +202,7 @@ async fn test_live_chat_tool_calling() {
     let state = make_live_state().expect("Failed to create live state");
 
     let body = serde_json::json!({
-        "model": "stepfun-ai/step-3.7-flash",
+        "model": "stepfun-ai/step-5-preview",
         "messages": [
             {"role": "user", "content": "What is the weather in Tokyo?"}
         ],
@@ -290,7 +290,7 @@ async fn test_live_chat_multi_turn() {
 
     // First turn: User asks a question
     let body1 = serde_json::json!({
-        "model": "stepfun-ai/step-3.7-flash",
+        "model": "stepfun-ai/step-5-preview",
         "messages": [
             {"role": "user", "content": "My name is Alice. Remember this."}
         ],
@@ -341,7 +341,7 @@ async fn test_live_chat_multi_turn() {
 
     // Second turn: Ask about the name
     let body2 = serde_json::json!({
-        "model": "stepfun-ai/step-3.7-flash",
+        "model": "stepfun-ai/step-5-preview",
         "messages": messages,
         "max_tokens": 50,
         "temperature": 0.0
@@ -396,8 +396,8 @@ async fn test_live_chat_various_models() {
 
     // Models confirmed available on NVIDIA NIM (verified 2026-04-20)
     let models_to_test = vec![
-        "stepfun-ai/step-3.7-flash",
-        "qwen/qwen3.5-397b-a17b", // canary: may return 502; at least one must succeed
+        "stepfun-ai/step-5-preview",
+        "openai/gpt-oss-20b", // canary: may return 502; at least one must succeed
     ];
 
     let mut results: Vec<(String, u16, Option<String>)> = vec![];
