@@ -69,7 +69,7 @@ async fn test_live_multi_turn_10_turns() {
 
     eprintln!("[conversation] Testing 10-turn conversation");
 
-    let model = "qwen/qwen3.5-397b-a17b";
+    let model = "openai/gpt-oss-20b";
     let mut messages: Vec<serde_json::Value> = Vec::new();
     let mut turn_results: Vec<(usize, u16, Option<String>)> = Vec::new();
 
@@ -192,7 +192,7 @@ async fn test_live_tool_calling_variations() {
 
     eprintln!("[tool-calling] Testing tool calling variations");
 
-    let model = "qwen/qwen3.5-397b-a17b";
+    let model = "openai/gpt-oss-20b";
     let mut tool_results: Vec<(&str, u16, Option<String>)> = Vec::new();
 
     // Variation 1: Single tool definition

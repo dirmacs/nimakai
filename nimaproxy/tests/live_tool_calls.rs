@@ -56,9 +56,9 @@ fn make_state() -> Arc<AppState> {
         router: None,
         model_stats: ModelStatsStore::new(3000.0),
         racing_models: vec![
-            "mistralai/mistral-medium-3.5-128b".to_string(),
-            "z-ai/glm-5.1".to_string(),
-            "qwen/qwen3.5-397b-a17b".to_string(),
+            "openai/gpt-oss-20b".to_string(),
+            "stepfun-ai/step-5-preview".to_string(),
+            "openai/gpt-oss-20b".to_string(),
         ],
         racing_max_parallel: 5,
         racing_timeout_ms: 20000,
@@ -100,7 +100,7 @@ async fn send_chat(
 #[ignore]
 async fn test_tool_definition_with_empty_params() {
     let state = make_state();
-    let model = "mistralai/mistral-medium-3.5-128b";
+    let model = "openai/gpt-oss-20b";
 
     let body = json!({
         "model": model,
@@ -153,7 +153,7 @@ async fn test_tool_definition_with_empty_params() {
 #[ignore]
 async fn test_tool_definition_with_parameters() {
     let state = make_state();
-    let model = "mistralai/mistral-medium-3.5-128b";
+    let model = "openai/gpt-oss-20b";
 
     let body = json!({
         "model": model,
@@ -220,7 +220,7 @@ async fn test_tool_definition_with_parameters() {
 #[ignore]
 async fn test_tool_call_sequence() {
     let state = make_state();
-    let model = "mistralai/mistral-medium-3.5-128b";
+    let model = "openai/gpt-oss-20b";
 
     // First turn: user asks to get weather, assistant should call tool
     let body1 = json!({
@@ -346,7 +346,7 @@ async fn test_tool_call_sequence() {
 #[ignore]
 async fn test_tool_role_transformation() {
     let state = make_state();
-    let model = "z-ai/glm-5.1"; // This model may not support native "tool" role
+    let model = "stepfun-ai/step-5-preview"; // This model may not support native "tool" role
 
     let body = json!({
         "model": model,
@@ -420,7 +420,7 @@ async fn test_tool_role_transformation() {
 #[ignore]
 async fn test_assistant_message_with_tool_calls_missing_content() {
     let state = make_state();
-    let model = "mistralai/mistral-medium-3.5-128b";
+    let model = "openai/gpt-oss-20b";
 
     // Some models require non-null content even for tool-call-only messages.
     // The proxy should inject an empty string if missing.
@@ -484,7 +484,7 @@ async fn test_assistant_message_with_tool_calls_missing_content() {
 #[ignore]
 async fn test_reasoning_field_stripped() {
     let state = make_state();
-    let model = "mistralai/mistral-medium-3.5-128b";
+    let model = "openai/gpt-oss-20b";
 
     // Some clients send a "reasoning" field in assistant messages.
     // The proxy should strip it to avoid Pydantic "Extra inputs" errors.
@@ -534,7 +534,7 @@ async fn test_reasoning_field_stripped() {
 
 async fn test_mismatched_tool_calls_and_responses() {
     let state = make_state();
-    let model = "mistralai/mistral-medium-3.5-128b";
+    let model = "openai/gpt-oss-20b";
 
     // First turn: get a tool call from the model
     let body1 = json!({

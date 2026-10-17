@@ -90,7 +90,7 @@ async fn test_live_circuit_breaker_degradation() {
 
     eprintln!("[circuit-breaker] Testing degradation behavior");
 
-    let test_model = "qwen/qwen3.5-397b-a17b";
+    let test_model = "openai/gpt-oss-20b";
     let mut statuses = Vec::new();
 
     // Send several requests to establish baseline
@@ -151,7 +151,7 @@ async fn test_live_circuit_breaker_recovery() {
 
     eprintln!("[circuit-breaker] Testing recovery behavior");
 
-    let test_model = "qwen/qwen3.5-397b-a17b";
+    let test_model = "openai/gpt-oss-20b";
 
     // First, establish a baseline with successful requests
     let baseline_requests = 3;
