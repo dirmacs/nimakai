@@ -61,7 +61,7 @@ async fn test_live_streaming_chunked_response() {
 
     // Request streaming with a longer response to ensure chunks
     let body = serde_json::json!({
-        "model": "qwen/qwen3.5-397b-a17b",
+        "model": "openai/gpt-oss-20b",
         "messages": [
             {"role": "user", "content": "Count from 1 to 5, saying each number on a new line."}
         ],
@@ -170,7 +170,7 @@ async fn test_live_streaming_early_termination() {
 
     // Request with streaming
     let body = serde_json::json!({
-        "model": "qwen/qwen3.5-397b-a17b",
+        "model": "openai/gpt-oss-20b",
         "messages": [
             {"role": "user", "content": "Write a short story about a robot."}
         ],

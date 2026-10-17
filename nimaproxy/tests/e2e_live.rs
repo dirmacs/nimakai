@@ -5,9 +5,9 @@ use nimaproxy::AppState;
 use std::sync::Arc;
 
 const NVIDIA_API_BASE: &str = "https://integrate.api.nvidia.com";
-const LIVE_MODEL_A: &str = "minimaxai/minimax-m2.7";
-const LIVE_MODEL_B: &str = "moonshotai/kimi-k2.6";
-const LIVE_MODEL_C: &str = "z-ai/glm-5.1";
+const LIVE_MODEL_A: &str = "nvidia/nemotron-3-super-120b-a12b";
+const LIVE_MODEL_B: &str = "meta/llama-3.2-11b-vision-instruct";
+const LIVE_MODEL_C: &str = "stepfun-ai/step-5-preview";
 
 fn get_test_keys() -> Vec<(String, String)> {
     let keys: Vec<String> = std::env::var("NVIDIA_API_KEY")

@@ -79,8 +79,8 @@ async fn test_live_routing_round_robin() {
 
     // Use models that are typically available
     let test_models = vec![
-        "qwen/qwen3.5-397b-a17b".to_string(),
-        "stepfun-ai/step-3.7-flash".to_string(),
+        "openai/gpt-oss-20b".to_string(),
+        "stepfun-ai/step-5-preview".to_string(),
     ];
 
     let state = make_live_state_with_routing(test_models.clone(), "round_robin")
@@ -149,8 +149,8 @@ async fn test_live_routing_latency_aware() {
     }
 
     let test_models = vec![
-        "qwen/qwen3.5-397b-a17b".to_string(),
-        "stepfun-ai/step-3.7-flash".to_string(),
+        "openai/gpt-oss-20b".to_string(),
+        "stepfun-ai/step-5-preview".to_string(),
     ];
 
     let state = make_live_state_with_routing(test_models.clone(), "latency_aware")

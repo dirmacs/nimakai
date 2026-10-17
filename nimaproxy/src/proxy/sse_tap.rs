@@ -335,6 +335,19 @@ impl Stream for TappedStream {
         }
     }
 }
+/// Finalize the tap when the wrapped stream is dropped without being driven to
+/// its end — for example when the client disconnects mid-stream or the handler
+/// returns without ever polling the body. `finalize` is a single compare-and-
+/// swap, so a tap already finalized by `poll_next` is a no-op: the completion
+/// record is still written exactly once, regardless of which path ends the
+/// stream.
+impl Drop for TappedStream {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.tap.finalize();
+        }
+    }
+}
 
 /// Minimal shape of an OpenAI-compatible SSE chunk.
 ///

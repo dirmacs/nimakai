@@ -7,6 +7,58 @@ on:
     branches: [main]
 
 jobs:
+  rust:
+    runs-on: [self-hosted, linux, arm64, dirmacs-ci]
+    steps:
+      - uses: actions/checkout@v4
+
+      # This gate must fail loudly on a runner without a toolchain, never
+      # silently: `cargo: command not found` inside a `run:` block would
+      # otherwise be the only signal.
+      - name: Check toolchain
+        run: |
+          echo "runner arch: $(uname -m)"
+          command -v cargo >/dev/null || { echo "FATAL: cargo not on PATH on this runner"; exit 127; }
+          command -v rustc >/dev/null || { echo "FATAL: rustc not on PATH on this runner"; exit 127; }
+          cargo --version
+          rustc --version
+
+      # Deterministic test targets. Hardcoded, not discovered: cargo's
+      # --message-format=json "test-target" filter is fragile across cargo
+      # versions, and a discovery that silently matches nothing turns this
+      # gate into a vacuous green. Adding a target here is a visible omission.
+      #
+      # Excluded on purpose:
+      #   live_chat, live_circuit_breaker, live_conversation,
+      #   live_key_rotation, live_routing, live_streaming,
+      #   live_tool_calls  - need NVIDIA_API_KEY and the live gateway
+      #   e2e_live         - same, plus it runs against placeholder keys
+      #   stress_test      - panics unless a proxy answers NIMAPROXY_URL
+      - name: Test
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.0'
+        run: |
+          set -e
+          for t in coverage_gaps integration proxy_error_paths stream_observability; do
+            echo "=== target: $t ==="
+            cargo test --locked --manifest-path nimaproxy/Cargo.toml --test "$t"
+          done
+
+      - name: Lint
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.0'
+        run: cargo clippy --locked --all-targets --manifest-path nimaproxy/Cargo.toml -- -D warnings
+
+      - name: Format
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.0'
+        run: cargo fmt --check --manifest-path nimaproxy/Cargo.toml
+
+      - name: Build
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.0'
+        run: cargo build --locked --manifest-path nimaproxy/Cargo.toml
+
   test:
     runs-on: ubuntu-latest
     steps:
