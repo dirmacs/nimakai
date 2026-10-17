@@ -69,8 +69,7 @@ fn test_ffi_proxy_free_string_null() {
     unsafe {
         nimaproxy::proxy_free_string(std::ptr::null_mut());
     }
-    // If we reach here, the function handled null correctly
-    assert!(true);
+    // If we reach here, the function handled null correctly.
 }
 
 /// Test ModelStatsStore::circuit_breaker_config getter (model_stats.rs lines 188-189)
@@ -334,18 +333,18 @@ fn test_integration_app_state_creation() {
     let stats = make_stats();
     let router = make_router();
 
-    let state = AppState::new(
+    let state = AppState::new(nimaproxy::AppStateParams {
         keys,
-        "https://api.example.com".to_string(),
-        Some(router),
-        stats,
-        vec![],
-        3,
-        8000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: "https://api.example.com".to_string(),
+        router: Some(router),
+        model_stats: stats,
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     assert_eq!(state.pool.len(), 1);
     assert_eq!(state.target, "https://api.example.com");
@@ -423,7 +422,7 @@ fn test_integration_strategy_parsing() {
 #[test]
 fn test_integration_auto_routing_picks_fastest() {
     // Fast model has 3+ samples with low avg
-    let mut stats = make_stats();
+    let stats = make_stats();
     stats.record("fast-model", 150.0, true);
     stats.record("fast-model", 200.0, true);
     stats.record("fast-model", 250.0, true);
@@ -445,7 +444,7 @@ fn test_integration_auto_routing_picks_fastest() {
 
 #[test]
 fn test_integration_auto_routing_skips_degraded() {
-    let mut stats = make_stats();
+    let stats = make_stats();
 
     // Mark model-a as degraded: 3+ successful samples (ring_len >= 3) but avg > spike
     stats.record("model-a", 6000.0, true);
@@ -489,24 +488,24 @@ fn test_integration_auto_routing_no_router() {
     let stats = make_stats();
 
     // No router configured
-    let state = AppState::new(
+    let state = AppState::new(nimaproxy::AppStateParams {
         keys,
-        "https://api.example.com".to_string(),
-        None,
-        stats,
-        vec![],
-        3,
-        8000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: "https://api.example.com".to_string(),
+        router: None,
+        model_stats: stats,
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
     assert!(state.router.is_none());
 }
 
 #[test]
 fn test_integration_auto_routing_with_multiple_healthy_models() {
-    let mut stats = make_stats();
+    let stats = make_stats();
 
     stats.record("model-a", 100.0, true);
     stats.record("model-a", 110.0, true);
@@ -768,24 +767,23 @@ fn test_racing_preallocate_max_parallel_capped_at_model_count() {
 #[test]
 fn test_model_validation_rejects_invalid_model() {
     use nimaproxy::proxy::messages::validate_model_exists;
-    use std::sync::Mutex;
 
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(nimaproxy::AppStateParams {
+        keys: vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        "https://test.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        8,
-        15000,
-        "round_robin".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: "https://test.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 8,
+        racing_timeout_ms: 15000,
+        racing_strategy: "round_robin".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     {
         let mut available = state.available_models.lock().unwrap();
@@ -810,22 +808,22 @@ fn test_model_validation_rejects_invalid_model() {
 fn test_model_validation_allows_auto_and_empty() {
     use nimaproxy::proxy::messages::validate_model_exists;
 
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(nimaproxy::AppStateParams {
+        keys: vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        "https://test.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        8,
-        15000,
-        "round_robin".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: "https://test.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 8,
+        racing_timeout_ms: 15000,
+        racing_strategy: "round_robin".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     {
         let mut available = state.available_models.lock().unwrap();
@@ -843,22 +841,22 @@ fn test_model_validation_allows_auto_and_empty() {
 fn test_model_validation_passes_when_no_cache() {
     use nimaproxy::proxy::messages::validate_model_exists;
 
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(nimaproxy::AppStateParams {
+        keys: vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        "https://test.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        8,
-        15000,
-        "round_robin".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: "https://test.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 8,
+        racing_timeout_ms: 15000,
+        racing_strategy: "round_robin".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let result = validate_model_exists("any-model", &state);
     assert!(result.is_ok(), "should pass when no cache available");
@@ -871,22 +869,22 @@ fn test_role_transformation_developer_to_user() {
     // Model NOT in supports_developer_role list, so developer role should be transformed to user
     let compat = ModelCompat::default();
 
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(nimaproxy::AppStateParams {
+        keys: vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        "https://test.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        8000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        compat,
-    );
+        target: "https://test.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: compat,
+    });
 
     let request_body = json!({
         "model": "some-model",
@@ -916,22 +914,22 @@ fn test_role_transformation_tool_to_assistant() {
     // Model NOT in supports_tool_messages list, so tool messages should be transformed
     let compat = ModelCompat::default();
 
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(nimaproxy::AppStateParams {
+        keys: vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        "https://test.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        8000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        compat,
-    );
+        target: "https://test.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: compat,
+    });
 
     let request_body = json!({
         "model": "some-model",
@@ -959,25 +957,27 @@ fn test_role_transformation_no_change_for_allowed_model() {
     use nimaproxy::config::ModelCompat;
 
     // Model in supports_developer_role list, so developer role should NOT be transformed
-    let mut compat = ModelCompat::default();
-    compat.supports_developer_role = Some(vec!["allowed-model".to_string()]);
+    let compat = ModelCompat {
+        supports_developer_role: Some(vec!["allowed-model".to_string()]),
+        ..ModelCompat::default()
+    };
 
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(nimaproxy::AppStateParams {
+        keys: vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        "https://test.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        8000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        compat,
-    );
+        target: "https://test.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: compat,
+    });
 
     let request_body = json!({
         "model": "allowed-model",
@@ -1004,26 +1004,28 @@ fn test_role_transformation_no_change_for_allowed_model() {
 fn test_role_transformation_all_mistral_models() {
     // Models IN supports_developer_role list do NOT get transformed (they support it natively).
     // Models NOT in the list DO get transformed.
-    let mut compat = ModelCompat::default();
     // Only mistral-small supports developer role natively
-    compat.supports_developer_role = Some(vec!["mistralai/mistral-small-4-119b-2603".to_string()]);
+    let compat = ModelCompat {
+        supports_developer_role: Some(vec!["mistralai/mistral-small-4-119b-2603".to_string()]),
+        ..ModelCompat::default()
+    };
 
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(nimaproxy::AppStateParams {
+        keys: vec![KeyEntry {
             key: "test".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        "https://test.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        8000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        compat,
-    );
+        target: "https://test.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: compat,
+    });
 
     // The Mistral model is NOT in the allow-list, so developer role should be transformed to user.
     let model = "mistralai/mistral-medium-3.5-128b";

@@ -1,26 +1,30 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::proxy::admission::{acquire_gateway_permits, no_key_response};
+use crate::proxy::chat::MAX_RETRIES;
+use crate::proxy::chat_helpers::accept_header_for_body;
+use crate::proxy::chat_helpers::apply_model_params;
+use crate::proxy::http::log_turn_request;
+use crate::proxy::messages::{
+    fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params,
+    mistral_validation_error, normalize_assistant_messages, sanitize_tool_calls,
+    transform_message_roles,
+};
+use crate::proxy::racing::{racing_deadline_response, timeout_before_deadline};
+use crate::proxy::timeouts::request_turn_summary;
+use crate::proxy::timeouts::{record_model_timeout, timeout_for_model};
+use crate::proxy::upstream_errors::{is_hard_model_error, sse_body_error};
+use crate::turn_log::TurnRecord;
+use crate::AppState;
 use axum::{
     body::Body,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use crate::proxy::admission::{acquire_gateway_permits, no_key_response};
-use crate::proxy::chat::{MAX_RETRIES};
-use crate::proxy::http::{log_turn_request};
-use crate::proxy::messages::{inject_minimax_system_message, inject_mistral_tool_params, mistral_validation_error, normalize_assistant_messages, sanitize_tool_calls, transform_message_roles};
-use crate::proxy::timeouts::{record_model_timeout, timeout_for_model};
-use crate::proxy::messages::fix_message_ordering;
-use crate::proxy::chat_helpers::apply_model_params;
-use crate::proxy::racing::{timeout_before_deadline, racing_deadline_response};
-use crate::proxy::timeouts::request_turn_summary;
-use crate::proxy::chat_helpers::accept_header_for_body;
-use crate::proxy::upstream_errors::{sse_body_error, is_hard_model_error};
 use bytes::Bytes;
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::warn;
-use crate::AppState;
 fn prepare_model_body(state: &AppState, body: &Bytes, model_id: &str) -> Option<Bytes> {
     let mut json: Value = serde_json::from_slice(body).ok()?;
     json["model"] = Value::String(model_id.to_string());
@@ -56,7 +60,7 @@ pub(crate) async fn solo_model_fallback(
         if let Some(response) = mistral_validation_error(&model_id, &req_body) {
             return response;
         }
-        let n = state.pool.len().min(MAX_RETRIES).max(1);
+        let n = state.pool.len().clamp(1, MAX_RETRIES);
         for _ in 0..n {
             let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
                 Ok(permits) => permits,
@@ -100,19 +104,22 @@ pub(crate) async fn solo_model_fallback(
                             .model_stats
                             .record(&model_id, t0.elapsed().as_millis() as f64, false);
                     }
-                    log_turn_request(
-                        "auto",
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        StatusCode::BAD_GATEWAY.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: "auto".to_string(),
+                        responding_model: model_id.clone(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        true,
-                        Some(msg.clone()),
-                    );
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: true,
+                        error: Some(msg.clone()),
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     last_error = Some((StatusCode::BAD_GATEWAY, msg));
                     break;
                 }
@@ -127,19 +134,22 @@ pub(crate) async fn solo_model_fallback(
                         format!("upstream timeout after {}ms", request_timeout_ms)
                     };
                     record_model_timeout(&state, &model_id, key_label.as_deref(), send_timeout_ms);
-                    log_turn_request(
-                        "auto",
-                        &model_id,
-                        send_timeout_ms as u128,
-                        false,
-                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: "auto".to_string(),
+                        responding_model: model_id.clone(),
+                        latency_ms: send_timeout_ms as u128 as u64,
+                        success: false,
+                        status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        true,
-                        Some(msg.clone()),
-                    );
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: true,
+                        error: Some(msg.clone()),
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
                     break;
                 }
@@ -180,19 +190,22 @@ pub(crate) async fn solo_model_fallback(
                 Ok(Ok(bytes)) => bytes,
                 Ok(Err(e)) => {
                     let msg = e.to_string();
-                    log_turn_request(
-                        "auto",
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        StatusCode::BAD_GATEWAY.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: "auto".to_string(),
+                        responding_model: model_id.clone(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        true,
-                        Some(msg.clone()),
-                    );
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: true,
+                        error: Some(msg.clone()),
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     last_error = Some((StatusCode::BAD_GATEWAY, msg));
                     break;
                 }
@@ -207,19 +220,22 @@ pub(crate) async fn solo_model_fallback(
                         format!("upstream body timeout after {}ms", request_timeout_ms)
                     };
                     record_model_timeout(&state, &model_id, key_label.as_deref(), body_timeout_ms);
-                    log_turn_request(
-                        "auto",
-                        &model_id,
-                        body_timeout_ms as u128,
-                        false,
-                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: "auto".to_string(),
+                        responding_model: model_id.clone(),
+                        latency_ms: body_timeout_ms as u128 as u64,
+                        success: false,
+                        status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        true,
-                        Some(msg.clone()),
-                    );
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: true,
+                        error: Some(msg.clone()),
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
                     break;
                 }
@@ -241,19 +257,22 @@ pub(crate) async fn solo_model_fallback(
                     } else {
                         state.model_stats.record(&model_id, ttfc_ms, false);
                     }
-                    log_turn_request(
-                        "auto",
-                        &model_id,
-                        ttfc_ms as u128,
-                        false,
-                        embedded_code,
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: "auto".to_string(),
+                        responding_model: model_id.clone(),
+                        latency_ms: ttfc_ms as u128 as u64,
+                        success: false,
+                        status_code: embedded_code,
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        true,
-                        Some(embedded_msg.clone()),
-                    );
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: true,
+                        error: Some(embedded_msg.clone()),
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     last_error = Some((
                         StatusCode::from_u16(embedded_code).unwrap_or(StatusCode::BAD_GATEWAY),
                         embedded_msg,
@@ -295,23 +314,26 @@ pub(crate) async fn solo_model_fallback(
             } else {
                 state.model_stats.record(&model_id, ttfc_ms, ok);
             }
-            log_turn_request(
-                "auto",
-                &model_id,
-                ttfc_ms as u128,
-                ok,
-                status.as_u16(),
-                message_count,
+            log_turn_request(TurnRecord {
+                requested_model: "auto".to_string(),
+                responding_model: model_id.clone(),
+                latency_ms: ttfc_ms as u128 as u64,
+                success: ok,
+                status_code: status.as_u16(),
+                request_message_count: message_count,
+                response_message_count: 1,
                 has_tool_calls,
                 tool_call_count,
-                key_label.as_deref(),
-                true,
-                if ok {
+                key_label: key_label.as_deref().map(|s| s.to_string()),
+                is_racing: true,
+                error: if ok {
                     None
                 } else {
                     Some(error_excerpt.clone())
                 },
-            );
+                request_tokens: None,
+                response_tokens: None,
+            });
             if ok {
                 state.gateway_metrics.record_racing_win(&model_id);
                 let mut response = Response::new(Body::from(body_bytes));

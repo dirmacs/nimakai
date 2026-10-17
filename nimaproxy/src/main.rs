@@ -1,7 +1,8 @@
 use axum::{http::StatusCode, response::IntoResponse, routing::get, routing::post, Router};
 use nimaproxy::turn_log;
 use nimaproxy::{
-    config, model_refresh, AppState, ModelRouter, ModelStatsStore, RuntimeControls, Strategy,
+    config, model_refresh, AppState, AppStateParams, ModelRouter, ModelStatsStore, RuntimeControls,
+    Strategy,
 };
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -95,10 +96,7 @@ async fn main() {
     // call.
     let (leasable, parked) = cfg.partition_keys();
     if !parked.is_empty() {
-        let labels: Vec<&str> = parked
-            .iter()
-            .filter_map(|k| k.label.as_deref())
-            .collect();
+        let labels: Vec<&str> = parked.iter().filter_map(|k| k.label.as_deref()).collect();
         eprintln!(
             "[nimaproxy main] parking {} disabled key(s): {}",
             parked.len(),
@@ -172,7 +170,7 @@ async fn main() {
     let mut pruned_models: Vec<String> = Vec::new();
 
     let (router, model_stats) = match &cfg.routing {
-        Some(r) if !r.models.as_ref().map_or(true, |m| m.is_empty()) => {
+        Some(r) if r.models.as_ref().is_some_and(|m| !m.is_empty()) => {
             let threshold = r.spike_threshold_ms.unwrap_or(3000.0);
             let strategy = r
                 .strategy
@@ -261,16 +259,18 @@ async fn main() {
         model_compat.supports_developer_role, model_compat.supports_tool_messages);
 
     let state = AppState::new_with_controls(
-        keys,
-        target.clone(),
-        router,
-        model_stats,
-        racing_models,
-        racing_max_parallel,
-        racing_timeout_ms,
-        racing_strategy,
-        model_params,
-        model_compat,
+        AppStateParams {
+            keys,
+            target: target.clone(),
+            router,
+            model_stats,
+            racing_models,
+            racing_max_parallel,
+            racing_timeout_ms,
+            racing_strategy,
+            model_params,
+            model_compat,
+        },
         runtime_controls,
     );
 

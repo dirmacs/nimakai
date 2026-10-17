@@ -3,18 +3,20 @@
 //! in the data model, but the proxy path currently writes counts and status only.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 /// A single message in a conversation
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MessageLog {
     pub role: String,
     pub content: String,
+    #[serde(default)]
     pub tool_call_id: Option<String>,
+    #[serde(default)]
     pub tool_calls: Option<String>, // JSON string for complex structure
 }
 
@@ -28,7 +30,12 @@ fn path_len(path: &str) -> Option<u64> {
 }
 
 /// Metadata about a completed turn (request/response pair)
-#[derive(Serialize, Debug, Clone)]
+///
+/// `Deserialize` is derived alongside `Serialize` so the writer's own type can
+/// be read back: a record's structural fields can then be verified against the
+/// bytes that were actually written, rather than against a separate reader
+/// struct that may not carry them.
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TurnLog {
     /// ISO8601 timestamp
     pub timestamp: DateTime<Utc>,
@@ -89,22 +96,95 @@ pub struct TurnLog {
 
     /// Response message (first choice only)
     pub response_message: Option<MessageLog>,
+
+    /// Which phase of the request this record describes: `ttfb` or
+    /// `completion` (see [`Self::RECORD_KIND_TTFB`]).
+    ///
+    /// Defaults to `ttfb` (not empty) when absent, because every record written
+    /// before this field existed was a first-byte record.
+    #[serde(default = "default_record_kind")]
+    pub record_kind: String,
+
+    // ---- Structural outcome of the forwarded SSE stream ----
+    //
+    // These fields describe what the stream DID, never what it said. They are
+    // all optional so records written before streaming observation existed —
+    // and non-streaming turns, which have no stream to observe — stay valid.
+    /// Last `finish_reason` the upstream reported, if any.
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+
+    /// Characters of `delta.content` forwarded to the client.
+    #[serde(default)]
+    pub content_chars: Option<u64>,
+
+    /// Whether the stream reached `data: [DONE]`. `false` means it ended
+    /// without one, i.e. it was truncated.
+    #[serde(default)]
+    pub stream_ended_cleanly: Option<bool>,
+
+    /// Number of chunks forwarded.
+    #[serde(default)]
+    pub chunk_count: Option<u64>,
+
+    /// Bytes forwarded.
+    #[serde(default)]
+    pub body_bytes: Option<u64>,
+
+    /// Named structural classification of the turn, from [`classify`].
+    ///
+    /// Derived only from the fields above. It never inspects response text:
+    /// a classifier that reads content is brittle the moment an upstream
+    /// phrases something differently, and a classifier that reads structure
+    /// keeps working.
+    #[serde(default)]
+    pub failure_mode: Option<String>,
+}
+
+/// Default `record_kind` for records written before the field existed.
+///
+/// Those were all first-byte records, so the honest default is `"ttfb"`, not
+/// an empty string — an empty kind would make a historical record
+/// indistinguishable from a bug.
+fn default_record_kind() -> String {
+    "ttfb".to_string()
+}
+
+/// Structural input for building a `TurnLog` record: the fields the proxy
+/// path already knows at first-byte time, passed as named fields instead of
+/// an 11-positional-argument list.
+///
+/// `TurnLog::new` and `log_turn_request` both take this, so the shape is
+/// fixed once and every call site reads the same way.
+#[derive(Debug, Clone)]
+pub struct TurnRecord {
+    pub requested_model: String,
+    pub responding_model: String,
+    pub latency_ms: u64,
+    pub success: bool,
+    pub status_code: u16,
+    pub request_message_count: usize,
+    pub response_message_count: usize,
+    pub has_tool_calls: bool,
+    pub tool_call_count: usize,
+    pub key_label: Option<String>,
+    pub is_racing: bool,
+    pub error: Option<String>,
+    pub request_tokens: Option<u32>,
+    pub response_tokens: Option<u32>,
 }
 
 impl TurnLog {
-    pub fn new(
-        requested_model: String,
-        responding_model: String,
-        latency_ms: u64,
-        success: bool,
-        status_code: u16,
-        request_message_count: usize,
-        response_message_count: usize,
-        has_tool_calls: bool,
-        tool_call_count: usize,
-        key_label: Option<String>,
-        is_racing: bool,
-    ) -> Self {
+    /// Which phase of a request a record describes.
+    /// A streamed turn now produces two records: `ttfb` when the first byte
+    /// arrives (what the proxy knew at that instant) and `completion` when the
+    /// stream ends (what the stream actually turned out to be). They share a
+    /// `request_id`, so a truncated generation can be traced back to the
+    /// attempt that produced it.
+    pub const RECORD_KIND_TTFB: &'static str = "ttfb";
+    pub const RECORD_KIND_COMPLETION: &'static str = "completion";
+
+    pub fn new(record: TurnRecord) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         // A stable identifier for this request, so the turn log can be
         // replayed and a request followed across a retry. Before this the
@@ -123,25 +203,73 @@ impl TurnLog {
         Self {
             timestamp: Utc::now(),
             request_id,
-            requested_model,
-            responding_model,
-            latency_ms,
-            success,
-            status_code,
-            request_message_count,
-            response_message_count,
-            request_tokens: None,
-            response_tokens: None,
-            has_tool_calls,
-            tool_call_count,
-            error: None,
-            key_label,
-            is_racing,
+            requested_model: record.requested_model,
+            responding_model: record.responding_model,
+            latency_ms: record.latency_ms,
+            success: record.success,
+            status_code: record.status_code,
+            request_message_count: record.request_message_count,
+            response_message_count: record.response_message_count,
+            request_tokens: record.request_tokens,
+            response_tokens: record.response_tokens,
+            has_tool_calls: record.has_tool_calls,
+            tool_call_count: record.tool_call_count,
+            error: record.error,
+            key_label: record.key_label,
+            is_racing: record.is_racing,
             racing_models_count: None,
             racing_winner: None,
             request_messages: Vec::new(),
             response_message: None,
+            record_kind: Self::RECORD_KIND_TTFB.to_string(),
+            finish_reason: None,
+            content_chars: None,
+            stream_ended_cleanly: None,
+            chunk_count: None,
+            body_bytes: None,
+            failure_mode: None,
         }
+    }
+}
+
+/// Named structural classification of a streamed turn.
+///
+/// Every input is a structural fact about the stream, never its text. The
+/// function is pure so the taxonomy can be unit-tested without a proxy, a
+/// socket, or an upstream.
+///
+/// Precedence, most severe first:
+///
+/// | order | mode | meaning |
+/// |---|---|---|
+/// | 1 | `truncated_stream` | the stream ended without `[DONE]` |
+/// | 2 | `empty_completion` | the upstream said "stop" but sent no content |
+/// | 3 | `length_cutoff` | the upstream hit its token limit |
+/// | 4 | `missing_finish_reason` | the stream ended but never said why |
+/// | 5 | `tool_calls` | the turn ended in tool calls |
+/// | 6 | `clean_stop` | a normal completion |
+///
+/// A stream can satisfy several conditions at once — a truncated stream also
+/// has no finish reason — so the precedence above decides which name is
+/// reported. The more severe name wins, because it is the one an operator has
+/// to act on.
+pub fn classify(
+    finish_reason: Option<&str>,
+    content_chars: u64,
+    stream_ended_cleanly: bool,
+) -> &'static str {
+    if !stream_ended_cleanly {
+        // No `[DONE]` means the upstream stopped on its own. This is the
+        // failure class that was invisible before: a few mid-word fragments
+        // and then silence looked exactly like success.
+        return "truncated_stream";
+    }
+    match finish_reason {
+        Some("stop") if content_chars == 0 => "empty_completion",
+        Some("length") => "length_cutoff",
+        None => "missing_finish_reason",
+        Some("tool_calls") => "tool_calls",
+        Some(_) => "clean_stop",
     }
 }
 
@@ -159,6 +287,18 @@ pub struct TurnLogger {
     /// which also swaps in a fresh file, so the two can never disagree.
     bytes_since_rotate: Mutex<u64>,
     rotate_at_bytes: u64,
+    /// `request_id` of the most recently written record.
+    ///
+    /// The proxy writes a first-byte record when a response starts and a
+    /// completion record when the stream ends, and the two must share an id so
+    /// a truncated generation can be traced back to the attempt that produced
+    /// it. `TurnLog::new` generates the id internally, so the only way for the
+    /// caller to learn it is to read it back out of the logger after the write.
+    ///
+    /// It is the last id written by ANY caller, which is why it is read
+    /// immediately after the first-byte write and before any other record can
+    /// be logged for this turn.
+    last_request_id: Mutex<Option<String>>,
 }
 
 impl TurnLogger {
@@ -184,6 +324,7 @@ impl TurnLogger {
             enabled,
             bytes_since_rotate: Mutex::new(0),
             rotate_at_bytes,
+            last_request_id: Mutex::new(None),
         };
 
         if enabled {
@@ -201,6 +342,11 @@ impl TurnLogger {
     /// Whether this logger rotates, and at what size.
     pub fn rotate_threshold(&self) -> Option<u64> {
         (self.rotate_at_bytes > 0).then_some(self.rotate_at_bytes)
+    }
+
+    /// `request_id` of the most recently written record, if any.
+    pub fn last_request_id(&self) -> Option<String> {
+        self.last_request_id.lock().unwrap().clone()
     }
 
     fn open_file(&self) -> io::Result<()> {
@@ -264,6 +410,11 @@ impl TurnLogger {
             writer.write_all(&buf)?;
             writer.flush()?;
         }
+        // Recorded after the write, so an id is only published once its record
+        // is on disk. A record whose id is visible but which was never written
+        // would be worse than no id at all: the completion record would claim
+        // a join that does not exist.
+        *self.last_request_id.lock().unwrap() = turn.request_id.clone();
 
         // Rotate once this file is over the threshold. The check is after the
         // write (not before) so the file that triggered it keeps the record
@@ -366,19 +517,22 @@ mod tests {
     use super::*;
     #[test]
     fn test_turn_log_creation() {
-        let turn = TurnLog::new(
-            "auto".to_string(),
-            "mistralai/mistral-medium-3.5-128b".to_string(),
-            742,
-            true,
-            200,
-            5,
-            1,
-            false,
-            0,
-            Some("test".to_string()),
-            true,
-        );
+        let turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "mistralai/mistral-medium-3.5-128b".to_string(),
+            latency_ms: 742,
+            success: true,
+            status_code: 200,
+            request_message_count: 5,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: Some("test".to_string()),
+            is_racing: true,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
 
         assert_eq!(turn.requested_model, "auto");
         assert_eq!(turn.responding_model, "mistralai/mistral-medium-3.5-128b");
@@ -392,32 +546,38 @@ mod tests {
     /// change the field was always None.
     #[test]
     fn test_request_id_is_populated_and_unique() {
-        let a = TurnLog::new(
-            "auto".to_string(),
-            "m".to_string(),
-            1,
-            true,
-            200,
-            1,
-            1,
-            false,
-            0,
-            None,
-            false,
-        );
-        let b = TurnLog::new(
-            "auto".to_string(),
-            "m".to_string(),
-            1,
-            true,
-            200,
-            1,
-            1,
-            false,
-            0,
-            None,
-            false,
-        );
+        let a = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "m".to_string(),
+            latency_ms: 1,
+            success: true,
+            status_code: 200,
+            request_message_count: 1,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
+        let b = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "m".to_string(),
+            latency_ms: 1,
+            success: true,
+            status_code: 200,
+            request_message_count: 1,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
         assert!(a.request_id.is_some(), "request_id must be populated");
         assert!(b.request_id.is_some(), "request_id must be populated");
         assert_ne!(
@@ -428,19 +588,22 @@ mod tests {
 
     #[test]
     fn test_turn_log_with_messages() {
-        let mut turn = TurnLog::new(
-            "auto".to_string(),
-            "qwen/qwen3.5".to_string(),
-            891,
-            true,
-            200,
-            3,
-            1,
-            true,
-            2,
-            None,
-            false,
-        );
+        let mut turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "qwen/qwen3.5".to_string(),
+            latency_ms: 891,
+            success: true,
+            status_code: 200,
+            request_message_count: 3,
+            response_message_count: 1,
+            has_tool_calls: true,
+            tool_call_count: 2,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
 
         turn.request_messages = vec![
             MessageLog {
@@ -477,19 +640,22 @@ mod tests {
 
     #[test]
     fn test_turn_log_serialization() {
-        let turn = TurnLog::new(
-            "auto".to_string(),
-            "test-model".to_string(),
-            100,
-            true,
-            200,
-            2,
-            1,
-            false,
-            0,
-            Some("key1".to_string()),
-            false,
-        );
+        let turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "test-model".to_string(),
+            latency_ms: 100,
+            success: true,
+            status_code: 200,
+            request_message_count: 2,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: Some("key1".to_string()),
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
 
         let json = serde_json::to_string(&turn).unwrap();
         assert!(json.contains("test-model"));
@@ -504,19 +670,22 @@ mod tests {
     /// writes a complete JSON line, a disabled logger writes nothing at all,
     /// and a logger whose writer was rotated away reopens and continues.
     fn sample_turn() -> TurnLog {
-        TurnLog::new(
-            "auto".to_string(),
-            "test/model".to_string(),
-            1234,
-            true,
-            200,
-            3,
-            1,
-            false,
-            0,
-            Some("key-a".to_string()),
-            false,
-        )
+        TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "test/model".to_string(),
+            latency_ms: 1234,
+            success: true,
+            status_code: 200,
+            request_message_count: 3,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: Some("key-a".to_string()),
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        })
     }
 
     #[test]
@@ -753,5 +922,115 @@ mod tests {
             moved.contains("requested_model"),
             "the triggering record must be in the rotated file too, got {moved:?}"
         );
+    }
+
+    /// Every arm of the failure taxonomy, and the precedence rules that decide
+    /// which name wins when a stream satisfies more than one.
+    #[test]
+    fn test_classify_every_arm_and_precedence() {
+        // A normal completion.
+        assert_eq!(classify(Some("stop"), 40, true), "clean_stop");
+        // An upstream that reported "stop" but forwarded nothing.
+        assert_eq!(classify(Some("stop"), 0, true), "empty_completion");
+        // An upstream that hit its token limit.
+        assert_eq!(classify(Some("length"), 500, true), "length_cutoff");
+        // A turn that ended in tool calls.
+        assert_eq!(classify(Some("tool_calls"), 0, true), "tool_calls");
+        // A stream that ended but never said why.
+        assert_eq!(classify(None, 40, true), "missing_finish_reason");
+        // A stream that ended without [DONE]: the failure class that was
+        // invisible before this record existed.
+        assert_eq!(classify(Some("stop"), 4, false), "truncated_stream");
+        assert_eq!(classify(None, 0, false), "truncated_stream");
+
+        // Precedence: truncation beats every other classification, including a
+        // finish reason the upstream did manage to send.
+        assert_eq!(classify(Some("stop"), 0, false), "truncated_stream");
+        assert_eq!(classify(Some("length"), 999, false), "truncated_stream");
+        assert_eq!(classify(Some("tool_calls"), 0, false), "truncated_stream");
+        // A clean end with an unusual finish reason is a completion, not a
+        // failure: only the named conditions are failures.
+        assert_eq!(classify(Some("content_filter"), 12, true), "clean_stop");
+        // The `stop` + empty-content arm outranks a length cutoff only when
+        // the reason really is `stop`; with `length` the cutoff is named.
+        assert_eq!(classify(Some("length"), 0, true), "length_cutoff");
+    }
+
+    /// The first-byte record and the completion record must share a request id,
+    /// or the two halves of a turn cannot be read together.
+    #[test]
+    fn test_request_id_is_shared_between_record_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turns.jsonl");
+        let logger = TurnLogger::new(path.to_str().unwrap(), true).unwrap();
+
+        let mut ttfb = sample_turn();
+        assert_eq!(ttfb.record_kind, TurnLog::RECORD_KIND_TTFB);
+        logger.log(&ttfb).unwrap();
+        let shared_id = logger
+            .last_request_id()
+            .expect("the logger must publish the id it just wrote");
+        ttfb.request_id = Some(shared_id.clone());
+
+        let mut completion = sample_turn();
+        completion.record_kind = TurnLog::RECORD_KIND_COMPLETION.to_string();
+        completion.request_id = Some(shared_id.clone());
+        completion.finish_reason = Some("stop".to_string());
+        completion.content_chars = Some(40);
+        completion.stream_ended_cleanly = Some(true);
+        completion.chunk_count = Some(12);
+        completion.body_bytes = Some(900);
+        completion.failure_mode = Some(classify(Some("stop"), 40, true).to_string());
+        logger.log(&completion).unwrap();
+        drop(logger);
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let records: Vec<TurnLog> = body
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("every line must deserialize"))
+            .collect();
+        assert_eq!(records.len(), 2, "a streamed turn writes two records");
+
+        let ttfb_record = records
+            .iter()
+            .find(|r| r.record_kind == TurnLog::RECORD_KIND_TTFB)
+            .expect("the first-byte record must exist");
+        let completion_record = records
+            .iter()
+            .find(|r| r.record_kind == TurnLog::RECORD_KIND_COMPLETION)
+            .expect("the completion record must exist");
+        assert_eq!(ttfb_record.request_id, completion_record.request_id);
+        assert!(ttfb_record.request_id.is_some());
+
+        assert_eq!(completion_record.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(completion_record.content_chars, Some(40));
+        assert_eq!(completion_record.stream_ended_cleanly, Some(true));
+        assert_eq!(completion_record.chunk_count, Some(12));
+        assert_eq!(completion_record.body_bytes, Some(900));
+        assert_eq!(
+            completion_record.failure_mode.as_deref(),
+            Some("clean_stop")
+        );
+    }
+
+    /// A record written before these fields existed — one that simply omits
+    /// them — must still deserialize, or adding a column would break every
+    /// historical log file.
+    #[test]
+    fn test_records_without_structural_fields_still_deserialize() {
+        let json = r#"{"timestamp":"2026-10-16T00:00:00Z","requested_model":"auto",
+            "responding_model":"m","latency_ms":10,"success":true,"status_code":200,
+            "has_tool_calls":false,"tool_call_count":0,"error":null,"is_racing":false,
+            "request_message_count":1,"response_message_count":1,"request_tokens":null,
+            "response_tokens":null,"racing_models_count":null,"racing_winner":null,
+            "request_messages":[],"response_message":null}"#;
+        let record: TurnLog = serde_json::from_str(json).expect("an old record must still parse");
+        assert_eq!(record.finish_reason, None);
+        assert_eq!(record.content_chars, None);
+        assert_eq!(record.stream_ended_cleanly, None);
+        assert_eq!(record.chunk_count, None);
+        assert_eq!(record.body_bytes, None);
+        assert_eq!(record.failure_mode, None);
+        assert_eq!(record.record_kind, TurnLog::RECORD_KIND_TTFB);
     }
 }

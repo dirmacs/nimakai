@@ -1,6 +1,5 @@
 //! Model racing configuration: fan-out parallelism and deadlines.
 
-
 use serde::Deserialize;
 /// Racing config for speculative execution.
 ///

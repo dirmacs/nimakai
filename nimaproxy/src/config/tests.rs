@@ -446,7 +446,7 @@ key = "test"
 "#,
     );
     let config = load(file.path().to_str().unwrap()).unwrap();
-    assert_eq!(config.racing_enabled(), true);
+    assert!(config.racing_enabled());
 }
 
 #[test]
@@ -461,7 +461,7 @@ enabled = true
 "#,
     );
     let config = load(file.path().to_str().unwrap()).unwrap();
-    assert_eq!(config.racing_enabled(), true);
+    assert!(config.racing_enabled());
 }
 
 #[test]
@@ -863,7 +863,7 @@ models = ["model1"]
 "#,
     );
     let config = load(file.path().to_str().unwrap()).unwrap();
-    assert_eq!(config.routing_enabled(), true);
+    assert!(config.routing_enabled());
 }
 
 #[test]
@@ -878,7 +878,7 @@ strategy = "round_robin"
 "#,
     );
     let config = load(file.path().to_str().unwrap()).unwrap();
-    assert_eq!(config.routing_enabled(), true);
+    assert!(config.routing_enabled());
 }
 
 #[test]

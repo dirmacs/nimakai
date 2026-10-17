@@ -1,48 +1,42 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use axum::{
-body::Body,
-http::{HeaderMap, HeaderValue, StatusCode},
-response::{IntoResponse, Response},
-};
-use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params, count_repetitions};
-use crate::proxy::http::{log_turn_request};
-use crate::proxy::messages::{extract_response_metrics, inject_minimax_system_message, inject_mistral_tool_params, normalize_assistant_messages, sanitize_tool_calls, validate_model_exists};
-use crate::proxy::timeouts::{request_turn_summary};
-use crate::proxy::upstream_errors::{is_transient_race_error, sse_body_error};
-use crate::proxy::admission::{GatewayAcquireError, try_acquire_gateway_permits};
-use crate::proxy::racing::{adaptive_racing_parallel, tiered_candidates, solo_candidate_model, prompt_parallel_cap, race_models};
+use crate::proxy::admission::{try_acquire_gateway_permits, GatewayAcquireError};
 use crate::proxy::chat::chat_completions;
-use axum::extract::State;
-use crate::proxy::messages::{is_minimax_model, is_mistral_model, has_tool_messages};
-use bytes::Bytes;
-use serde_json::Value;
-use tokio::time::{sleep, timeout};
-use tracing::warn;
-use crate::key_pool::{KeyAcquireError, KeyLease};
+use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params, count_repetitions};
+use crate::proxy::messages::is_minimax_model;
+use crate::proxy::messages::{
+    extract_response_metrics, inject_minimax_system_message, inject_mistral_tool_params,
+    normalize_assistant_messages, sanitize_tool_calls, validate_model_exists,
+};
+use crate::proxy::racing::{
+    adaptive_racing_parallel, prompt_parallel_cap, race_models, solo_candidate_model,
+    tiered_candidates,
+};
+use crate::proxy::upstream_errors::{is_transient_race_error, sse_body_error};
 use crate::AppState;
-use super::*;
 use crate::{
     config::{ModelCompat, ModelParams},
     key_pool::KeyPool,
     model_stats::ModelStatsStore,
     RuntimeControls,
 };
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use bytes::Bytes;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 fn create_test_app_state() -> AppState {
-    let state = AppState::new(
-        vec![],
-        "https://test.api.nvidia.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        8000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+    let state = AppState::new(crate::AppStateParams {
+        keys: vec![],
+        target: "https://test.api.nvidia.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
     match Arc::try_unwrap(state) {
         Ok(state) => state,
         Err(_) => panic!("test state should have a single owner"),
@@ -50,31 +44,33 @@ fn create_test_app_state() -> AppState {
 }
 fn create_adaptive_test_state() -> Arc<AppState> {
     AppState::new_with_controls(
-        vec![
-            crate::KeyEntry {
-                key: "key-a".to_string(),
-                label: Some("key-a".to_string()),
-        disabled: false,
-            },
-            crate::KeyEntry {
-                key: "key-b".to_string(),
-                label: Some("key-b".to_string()),
-        disabled: false,
-            },
-        ],
-        "https://test.api.nvidia.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![
-            "fast-a".to_string(),
-            "fast-b".to_string(),
-            "fallback-a".to_string(),
-        ],
-        10,
-        15000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        crate::AppStateParams {
+            keys: vec![
+                crate::KeyEntry {
+                    key: "key-a".to_string(),
+                    label: Some("key-a".to_string()),
+                    disabled: false,
+                },
+                crate::KeyEntry {
+                    key: "key-b".to_string(),
+                    label: Some("key-b".to_string()),
+                    disabled: false,
+                },
+            ],
+            target: "https://test.api.nvidia.com".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec![
+                "fast-a".to_string(),
+                "fast-b".to_string(),
+                "fallback-a".to_string(),
+            ],
+            racing_max_parallel: 10,
+            racing_timeout_ms: 15000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             racing_adaptive: true,
             racing_min_parallel: 2,
@@ -341,13 +337,13 @@ fn test_extract_response_metrics_empty_string() {
     let (tokens, reps, tool) = extract_response_metrics("");
     assert_eq!(tokens, 0);
     assert_eq!(reps, 0);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_invalid_json() {
-    let (tokens, reps, tool) = extract_response_metrics("Hello, this is a test response");
+    let (tokens, _reps, tool) = extract_response_metrics("Hello, this is a test response");
     assert!(tokens > 0);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_with_usage() {
@@ -355,26 +351,27 @@ fn test_extract_response_metrics_with_usage() {
     let (tokens, reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 42);
     assert_eq!(reps, 0);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_with_tool_call() {
     let json = r#"{"usage": {"completion_tokens": 10}, "choices": [{"message": {"tool_calls": [{"id": "1"}]}}]}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let (tokens, _reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 10);
-    assert_eq!(tool, true);
+    assert!(tool);
 }
 #[test]
 fn test_extract_response_metrics_without_tool_call() {
-    let json = r#"{"usage": {"completion_tokens": 10}, "choices": [{"message": {"content": "Hello"}}]}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let json =
+        r#"{"usage": {"completion_tokens": 10}, "choices": [{"message": {"content": "Hello"}}]}"#;
+    let (tokens, _reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 10);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_no_usage_field() {
     let json = r#"{"choices": [{"message": {"content": "Hello"}}]}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let (tokens, _reps, _tool) = extract_response_metrics(json);
     assert!(tokens > 0);
 }
 #[test]
@@ -382,16 +379,16 @@ fn test_extract_response_metrics_repetition_in_json() {
     // Test that extract_response_metrics returns all three values correctly
     // This verifies the function signature and basic parsing works
     let json = r#"{"usage": {"completion_tokens": 5}, "choices": []}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let (tokens, _reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 5);
-    assert_eq!(tool, false);
+    assert!(!tool);
 }
 #[test]
 fn test_extract_response_metrics_multiple_choices() {
     let json = r#"{"usage": {"completion_tokens": 20}, "choices": [{"message": {"content": "A"}}, {"message": {"tool_calls": [{"id": "1"}]}}]}"#;
-    let (tokens, reps, tool) = extract_response_metrics(json);
+    let (tokens, _reps, tool) = extract_response_metrics(json);
     assert_eq!(tokens, 20);
-    assert_eq!(tool, true);
+    assert!(tool);
 }
 // ============ inject_minimax_system_message tests ============
 #[test]
@@ -754,16 +751,15 @@ async fn test_chat_completions_empty_bytes() {
 #[tokio::test]
 async fn test_stream_termination_edge_cases() {
     let state = Arc::new(create_test_app_state());
-    let body = json!({"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": true});
+    let body =
+        json!({"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": true});
     let response = chat_completions(
         State(state),
         HeaderMap::new(),
         Bytes::from(body.to_string()),
     )
     .await;
-    assert!(
-        response.status() >= StatusCode::BAD_REQUEST || response.status() == StatusCode::OK
-    );
+    assert!(response.status() >= StatusCode::BAD_REQUEST || response.status() == StatusCode::OK);
 }
 // ============ sse_body_error tests ============
 #[test]
@@ -808,8 +804,7 @@ fn test_sse_body_error_none_for_normal_json_body() {
 }
 #[test]
 fn test_sse_body_error_tolerates_crlf_and_blank_lines() {
-    let body =
-        b"\r\ndata: {\"message\":\"overloaded\",\"code\":503}\r\n\r\ndata: [DONE]\r\n\r\n";
+    let body = b"\r\ndata: {\"message\":\"overloaded\",\"code\":503}\r\n\r\ndata: [DONE]\r\n\r\n";
     let (code, msg) =
         sse_body_error(body, Some("text/event-stream")).expect("expected an embedded error");
     assert_eq!(code, 503);
@@ -877,20 +872,22 @@ fn test_successful_admission_counts_exactly_one_attempt() {
 /// constraint on admission. `max_in_flight_per_key` is passed in full.
 fn saturated_single_key_state(max_in_flight_per_key: usize) -> Arc<AppState> {
     AppState::new_with_controls(
-        vec![crate::KeyEntry {
-            key: "key-a".to_string(),
-            label: Some("key-a".to_string()),
-            disabled: false,
-        }],
-        "https://test.api.nvidia.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        8,
-        8000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        crate::AppStateParams {
+            keys: vec![crate::KeyEntry {
+                key: "key-a".to_string(),
+                label: Some("key-a".to_string()),
+                disabled: false,
+            }],
+            target: "https://test.api.nvidia.com".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec![],
+            racing_max_parallel: 8,
+            racing_timeout_ms: 8000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             racing_adaptive: false,
             racing_min_parallel: 2,
@@ -913,8 +910,7 @@ fn saturated_single_key_state(max_in_flight_per_key: usize) -> Arc<AppState> {
 }
 #[test]
 fn test_sse_body_error_tolerates_partial_utf8() {
-    let mut body =
-        b"data: {\"message\":\"overloaded\",\"code\":503}\n\ndata: [DONE]\n\n".to_vec();
+    let mut body = b"data: {\"message\":\"overloaded\",\"code\":503}\n\ndata: [DONE]\n\n".to_vec();
     body.push(0xE2); // trailing incomplete multi-byte UTF-8 sequence
     let (code, msg) = sse_body_error(&body, Some("text/event-stream"))
         .expect("expected an embedded error despite trailing partial UTF-8");
@@ -945,4 +941,256 @@ fn test_is_transient_race_error_in_stream_4xx_is_not_transient() {
     assert!(!is_transient_race_error(
         "HTTP 400 (in-stream) from model-a: bad request"
     ));
+}
+
+#[test]
+fn test_recover_xml_tool_calls_converts_to_structured() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "I will run that.\n\n<invoke name=\"bash\">\n<parameter name=\"i\">\ntest\n</parameter>\n<parameter name=\"command\">\necho hi\n</parameter>\n</function>\n</tool_call>"},
+            {"role": "user", "content": "try again"}
+        ]
+    });
+    recover_xml_tool_calls(&mut json);
+    let msg = &json["messages"][1];
+    // XML removed from content, non-XML text preserved
+    let content = msg["content"].as_str().unwrap();
+    assert!(
+        !content.contains("<invoke"),
+        "XML should be gone: {content}"
+    );
+    assert!(
+        content.contains("I will run that"),
+        "text preserved: {content}"
+    );
+    // Structured tool_calls added
+    let tc = msg["tool_calls"]
+        .as_array()
+        .expect("tool_calls should exist");
+    assert_eq!(tc.len(), 1);
+    assert_eq!(tc[0]["function"]["name"], "bash");
+    let args: serde_json::Value =
+        serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(args["command"], "echo hi");
+    assert_eq!(args["i"], "test");
+}
+
+#[test]
+fn test_recover_xml_tool_calls_sets_null_content_when_only_xml() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "<invoke name=\"bash\">\n<parameter name=\"command\">\necho hi\n</parameter>\n</function>\n</tool_call>"}
+        ]
+    });
+    recover_xml_tool_calls(&mut json);
+    assert!(
+        json["messages"][0]["content"].is_null(),
+        "content should be null when only XML"
+    );
+    assert!(json["messages"][0]["tool_calls"].as_array().unwrap().len() == 1);
+}
+
+#[test]
+fn test_recover_xml_tool_calls_leaves_non_xml_alone() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "The command returned hello"},
+            {"role": "user", "content": "good"}
+        ]
+    });
+    let before = json.to_string();
+    recover_xml_tool_calls(&mut json);
+    assert_eq!(json.to_string(), before);
+}
+
+#[test]
+fn test_recover_xml_tool_calls_skips_existing_tool_calls() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "text with <invoke name=\"x\">\n</function>\n</tool_call>",
+             "tool_calls": [{"id":"c1","type":"function","function":{"name":"y","arguments":"{}"}}]}
+        ]
+    });
+    let before = json.to_string();
+    recover_xml_tool_calls(&mut json);
+    assert_eq!(
+        json.to_string(),
+        before,
+        "should not touch messages with existing tool_calls"
+    );
+}
+
+#[test]
+fn test_recover_xml_tool_calls_handles_invoke_closing_tag() {
+    use crate::proxy::messages::recover_xml_tool_calls;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": "<invoke name=\"bash\">\n<parameter=command>\necho hello\n</parameter>\n<parameter=i>\ntest\n</parameter>\n</invoke>"}
+        ]
+    });
+    recover_xml_tool_calls(&mut json);
+    let msg = &json["messages"][0];
+    assert!(msg["content"].is_null(), "XML-only content should be null");
+    let tc = msg["tool_calls"]
+        .as_array()
+        .expect("should have tool_calls");
+    assert_eq!(tc.len(), 1);
+    assert_eq!(tc[0]["function"]["name"], "bash");
+    let args: serde_json::Value =
+        serde_json::from_str(tc[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(args["command"], "echo hello");
+}
+
+#[test]
+fn test_strip_degenerate_tool_result_omitted() {
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "\n\n[Tool result omitted]"},
+            {"role": "user", "content": "try again"},
+            {"role": "assistant", "content": "[Tool result omitted]"},
+            {"role": "user", "content": "one more time"}
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(
+        msgs.len(),
+        3,
+        "both degenerate assistant messages should be removed"
+    );
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[1]["role"], "user");
+    assert_eq!(msgs[2]["role"], "user");
+}
+
+#[test]
+fn test_strip_degenerate_preserves_real_content() {
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "Here is the answer: 42"},
+            {"role": "user", "content": "thanks"}
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 3, "real content should be preserved");
+    assert_eq!(msgs[1]["content"], "Here is the answer: 42");
+}
+
+#[test]
+fn test_strip_degenerate_preserves_tool_calls() {
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "run it"},
+            {"role": "assistant", "content": "[Tool result omitted]", "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+            ]},
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(
+        msgs.len(),
+        2,
+        "assistant with tool_calls should be kept even with degenerate content"
+    );
+}
+
+#[test]
+fn test_strip_degenerate_variations() {
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let variants = vec![
+        "[Tool result omitted]",
+        "[tool result omitted]",
+        "  [Tool result omitted]  ",
+        "\n\n[Tool result omitted]",
+        "[Tool results omitted]",
+        "[output omitted]",
+        "[result omitted]",
+    ];
+    for variant in &variants {
+        let mut json = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": variant}
+            ]
+        });
+        strip_degenerate_assistant_messages(&mut json);
+        let msgs = json["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 0, "variant {:?} should be stripped", variant);
+    }
+}
+
+#[test]
+fn test_strip_degenerate_content_array_format() {
+    // omp sends content as array of parts: [{type:"thinking",text:""},{type:"text",text:"..."}]
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "text": ""},
+                {"type": "text", "text": "\n\n[Tool result omitted]"}
+            ]},
+            {"role": "user", "content": "try again"}
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2, "content-array degenerate should be stripped");
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[1]["role"], "user");
+}
+
+#[test]
+fn test_strip_degenerate_preserves_real_content_in_array() {
+    // The 2 "mixed" entries from pane 0 contain real diagnostic text alongside
+    // the artifact — these MUST be preserved.
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let mut json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "text": ""},
+                {"type": "text", "text": "\n\n**BLOCKED — no tool output is reaching me.**\n\nEvery tool invocation returns `[Tool result omitted]`."}
+            ]}
+        ]
+    });
+    strip_degenerate_assistant_messages(&mut json);
+    let msgs = json["messages"].as_array().unwrap();
+    assert_eq!(
+        msgs.len(),
+        1,
+        "message with real diagnostic content must be kept"
+    );
+}
+
+#[test]
+fn test_strip_degenerate_with_pipe_and_box_drawing() {
+    // omp display may inject pipe separators between content blocks
+    use crate::proxy::messages::strip_degenerate_assistant_messages;
+    let variants = vec![
+        " | \n\n[Tool result omitted]",
+        "| [Tool result omitted] |",
+        "\n\n | [Tool result omitted]",
+        "│[Tool result omitted]│", // box-drawing U+2502
+    ];
+    for variant in &variants {
+        let mut json = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": variant}
+            ]
+        });
+        strip_degenerate_assistant_messages(&mut json);
+        let msgs = json["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 0, "variant {:?} should be stripped", variant);
+    }
 }

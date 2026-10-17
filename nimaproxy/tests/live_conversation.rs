@@ -26,18 +26,18 @@ fn make_live_state() -> Option<Arc<AppState>> {
         disabled: false,
     }];
 
-    Some(AppState::new(
-        key_entries,
-        NVIDIA_API_BASE.to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    ))
+    Some(AppState::new(nimaproxy::AppStateParams {
+        keys: key_entries,
+        target: NVIDIA_API_BASE.to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    }))
 }
 
 fn skip_if_no_api_key() -> bool {
@@ -47,7 +47,7 @@ fn skip_if_no_api_key() -> bool {
 fn extract_assistant_message(json: &serde_json::Value) -> Option<String> {
     json.get("choices")
         .and_then(|c| c.as_array())
-        .and_then(|choices| choices.get(0))
+        .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
         .and_then(|msg| msg.get("content"))
         .and_then(|content| content.as_str())

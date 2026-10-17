@@ -1,4 +1,4 @@
-use crate::proxy::messages::{sanitize_tool_calls, fix_message_ordering, validate_mistral_tool_call_ids};
+use crate::proxy::messages::sanitize_tool_calls;
 use serde_json::json;
 
 #[test]
@@ -184,16 +184,20 @@ fn test_validate_mistral_tool_call_ids_valid() {
 #[test]
 fn test_validate_mistral_tool_call_ids_invalid_length() {
     let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test"}}]}]});
-    let result =
-        crate::proxy::messages::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
+    let result = crate::proxy::messages::validate_mistral_tool_call_ids(
+        &json,
+        "mistralai/mistral-7b-instruct",
+    );
     assert!(result.is_ok()); // validate is warn-only, not hard reject;
 }
 
 #[test]
 fn test_validate_mistral_tool_call_ids_invalid_chars() {
     let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]}]});
-    let result =
-        crate::proxy::messages::validate_mistral_tool_call_ids(&json, "mistralai/mistral-7b-instruct");
+    let result = crate::proxy::messages::validate_mistral_tool_call_ids(
+        &json,
+        "mistralai/mistral-7b-instruct",
+    );
     assert!(result.is_ok()); // validate is warn-only, not hard reject;
 }
 

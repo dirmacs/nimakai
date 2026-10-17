@@ -1,6 +1,7 @@
 use crate::proxy::admission::acquire_gateway_permits;
 use crate::proxy::chat::MAX_RETRIES;
 use crate::proxy::messages::extract_response_metrics;
+use crate::turn_log::TurnRecord;
 use crate::AppState;
 use axum::{
     body::Body,
@@ -254,7 +255,7 @@ pub async fn completions(
     } else {
         String::new()
     };
-    let n = state.pool.len().min(MAX_RETRIES).max(1);
+    let n = state.pool.len().clamp(1, MAX_RETRIES);
     eprintln!("[nimaproxy] POST /v1/completions - got n={}", n);
     let mut last_auth_failure_response: Option<Response> = None;
     for _ in 0..n {
@@ -327,22 +328,25 @@ pub async fn completions(
                             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                     );
                     last_auth_failure_response = Some(auth_response);
-                    log_turn_request(
-                        &model_id,
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        status.as_u16(),
-                        1,
-                        false,
-                        0,
-                        key_label.as_deref(),
-                        false,
-                        Some(format!(
+                    log_turn_request(TurnRecord {
+                        requested_model: model_id.clone(),
+                        responding_model: model_id.clone(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: status.as_u16(),
+                        request_message_count: 1,
+                        response_message_count: 1,
+                        has_tool_calls: false,
+                        tool_call_count: 0,
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: false,
+                        error: Some(format!(
                             "upstream auth failure ({}); key quarantined",
                             status.as_u16()
                         )),
-                    );
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     continue;
                 }
                 if ok {
@@ -434,7 +438,7 @@ pub async fn embeddings(
     } else {
         String::new()
     };
-    let n = state.pool.len().min(MAX_RETRIES).max(1);
+    let n = state.pool.len().clamp(1, MAX_RETRIES);
     let mut last_auth_failure_response: Option<Response> = None;
     for _ in 0..n {
         let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
@@ -505,22 +509,25 @@ pub async fn embeddings(
                             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                     );
                     last_auth_failure_response = Some(auth_response);
-                    log_turn_request(
-                        &model_id,
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        status.as_u16(),
-                        1,
-                        false,
-                        0,
-                        key_label.as_deref(),
-                        false,
-                        Some(format!(
+                    log_turn_request(TurnRecord {
+                        requested_model: model_id.clone(),
+                        responding_model: model_id.clone(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: status.as_u16(),
+                        request_message_count: 1,
+                        response_message_count: 1,
+                        has_tool_calls: false,
+                        tool_call_count: 0,
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: false,
+                        error: Some(format!(
                             "upstream auth failure ({}); key quarantined",
                             status.as_u16()
                         )),
-                    );
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     continue;
                 }
                 if ok {
@@ -580,33 +587,104 @@ pub async fn embeddings(
         .into_response()
 }
 /// Log a completed turn
-pub(crate) fn log_turn_request(
-    requested_model: &str,
-    responding_model: &str,
-    latency_ms: u128,
-    success: bool,
-    status_code: u16,
-    message_count: usize,
-    has_tool_calls: bool,
-    tool_call_count: usize,
-    key_label: Option<&str>,
-    is_racing: bool,
-    error: Option<String>,
-) {
+pub(crate) fn log_turn_request(record: TurnRecord) {
     use crate::turn_log::{log_turn as log_turn_event, TurnLog};
-    let mut turn = TurnLog::new(
-        requested_model.to_string(),
-        responding_model.to_string(),
-        latency_ms as u64,
-        success,
-        status_code,
-        message_count,
-        1, // response_message_count
-        has_tool_calls,
-        tool_call_count,
-        key_label.map(String::from),
-        is_racing,
+    log_turn_event(&TurnLog::new(record));
+}
+
+/// Identity of the turn a completion record belongs to.
+///
+/// These are the fields the first-byte record already carried; the completion
+/// record repeats them so it can be read on its own, and reuses the first-byte
+/// record's `request_id` so the two can be joined.
+#[derive(Debug, Clone)]
+pub struct TurnContext {
+    pub requested_model: String,
+    pub responding_model: String,
+    pub message_count: usize,
+    pub has_tool_calls: bool,
+    pub tool_call_count: usize,
+    pub key_label: Option<String>,
+    pub is_racing: bool,
+}
+
+/// Structural outcome of a forwarded SSE stream, as carried into a turn record.
+///
+/// Every field is a fact about the stream, never about its text.
+#[derive(Debug, Clone, Default)]
+pub struct StreamCompletion {
+    /// `request_id` of the first-byte record for this turn, so the two records
+    /// can be joined.
+    pub request_id: Option<String>,
+    /// Total duration of the stream, first byte to last (ms).
+    pub duration_ms: u128,
+    pub finish_reason: Option<String>,
+    pub content_chars: u64,
+    pub stream_ended_cleanly: bool,
+    pub chunk_count: u64,
+    pub body_bytes: u64,
+    /// Usage tokens the upstream reported, if it reported any. `None` means
+    /// the upstream sent no usage object — never "0 tokens".
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    /// Set when the stream was aborted rather than ended (idle-guard timeout,
+    /// upstream error), which is also a truncation.
+    pub abort_reason: Option<String>,
+}
+
+/// Log the completion of a streamed turn.
+///
+/// This is the record that carries what the stream actually turned out to be.
+/// The first-byte record is written the moment the first SSE byte arrives and
+/// can only say "a response started"; this one is written when the stream ends
+/// and says whether it finished, what finish reason the upstream gave, and how
+/// much was forwarded. Without it a truncated generation is logged as a
+/// success.
+///
+/// The record shares the first-byte record's `request_id`, so the two halves of
+/// one turn can be read together.
+pub(crate) fn log_turn_completion(turn: &TurnContext, completion: &StreamCompletion) {
+    use crate::turn_log::{classify, log_turn as log_turn_event, TurnLog};
+    let mut record = TurnLog::new(TurnRecord {
+        requested_model: turn.requested_model.clone(),
+        responding_model: turn.responding_model.clone(),
+        latency_ms: completion.duration_ms as u64,
+        // A truncated stream is not a success: the client was promised a
+        // completion and did not get one.
+        success: completion.stream_ended_cleanly,
+        status_code: 200,
+        request_message_count: turn.message_count,
+        response_message_count: 1,
+        has_tool_calls: turn.has_tool_calls,
+        tool_call_count: turn.tool_call_count,
+        key_label: turn.key_label.clone(),
+        is_racing: turn.is_racing,
+        error: completion.abort_reason.clone(),
+        request_tokens: completion.prompt_tokens,
+        response_tokens: completion.completion_tokens,
+    });
+    record.record_kind = TurnLog::RECORD_KIND_COMPLETION.to_string();
+    record.request_id = completion.request_id.clone();
+    record.finish_reason = completion.finish_reason.clone();
+    record.content_chars = Some(completion.content_chars);
+    record.stream_ended_cleanly = Some(completion.stream_ended_cleanly);
+    record.chunk_count = Some(completion.chunk_count);
+    record.body_bytes = Some(completion.body_bytes);
+    // Only when the upstream actually reported usage. A completion record with
+    // no usage frame keeps the fields `None`, so a query can tell "0 tokens"
+    // from "unknown".
+    record.request_tokens = completion.prompt_tokens;
+    record.response_tokens = completion.completion_tokens;
+    record.failure_mode = Some(
+        classify(
+            completion.finish_reason.as_deref(),
+            completion.content_chars,
+            completion.stream_ended_cleanly,
+        )
+        .to_string(),
     );
-    turn.error = error;
-    log_turn_event(&turn);
+    if let Some(reason) = completion.abort_reason.as_ref() {
+        record.error = Some(reason.clone());
+    }
+    log_turn_event(&record);
 }

@@ -29,18 +29,18 @@ fn make_live_state() -> Option<Arc<AppState>> {
         disabled: false,
     }];
 
-    Some(AppState::new(
-        key_entries,
-        NVIDIA_API_BASE.to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    ))
+    Some(AppState::new(nimaproxy::AppStateParams {
+        keys: key_entries,
+        target: NVIDIA_API_BASE.to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    }))
 }
 
 /// Helper to check if test should be skipped
@@ -111,7 +111,7 @@ async fn test_live_chat_completions() {
 
     if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
         assert!(!choices.is_empty(), "Should have at least one choice");
-        if let Some(first_choice) = choices.get(0) {
+        if let Some(first_choice) = choices.first() {
             assert!(
                 first_choice.get("message").is_some(),
                 "Choice should have 'message' field"
@@ -332,7 +332,7 @@ async fn test_live_chat_multi_turn() {
         vec![serde_json::json!({"role": "user", "content": "My name is Alice. Remember this."})];
 
     if let Some(choices) = body1_json.get("choices").and_then(|c| c.as_array()) {
-        if let Some(first) = choices.get(0) {
+        if let Some(first) = choices.first() {
             if let Some(msg) = first.get("message") {
                 messages.push(msg.clone());
             }

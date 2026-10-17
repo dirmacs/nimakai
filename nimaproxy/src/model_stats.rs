@@ -1141,7 +1141,7 @@ mod tests {
         store.record_with_circuit_breaker("model-a", 500.0, true, 15000, 2, true);
 
         let snap = &store.snapshot()[0];
-        assert_eq!(snap.degraded, false);
+        assert!(!snap.degraded);
     }
 
     #[test]
@@ -1818,7 +1818,7 @@ mod getter_tests {
 
     #[test]
     fn test_server_degraded_flag_initially_false() {
-        let mut entry = ModelEntry::new();
+        let entry = ModelEntry::new();
         assert!(!entry.server_degraded);
     }
 

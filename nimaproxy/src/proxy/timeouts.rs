@@ -1,6 +1,6 @@
+use crate::AppState;
 use bytes::Bytes;
 use serde_json::Value;
-use crate::AppState;
 pub(crate) fn timeout_for_model(state: &AppState, model_id: &str) -> u64 {
     state.model_stats.get_model_timeout_with_policy(
         model_id,

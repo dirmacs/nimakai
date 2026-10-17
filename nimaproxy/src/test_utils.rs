@@ -18,7 +18,7 @@
 //!     .build();
 //! ```
 
-use crate::{config, AppState, KeyEntry, ModelParams, ModelStatsStore};
+use crate::{config, AppState, AppStateParams, KeyEntry, ModelParams, ModelStatsStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -108,8 +108,16 @@ impl MockAppStateBuilder {
     ///
     /// let state = MockAppStateBuilder::new()
     ///     .with_custom_keys(vec![
-    ///         KeyEntry { key: "api-key-1".into(), label: Some("key-1".into()) },
-    ///         KeyEntry { key: "api-key-2".into(), label: Some("key-2".into()) },
+    ///         KeyEntry {
+    ///             key: "api-key-1".into(),
+    ///             label: Some("key-1".into()),
+    ///             disabled: false,
+    ///         },
+    ///         KeyEntry {
+    ///             key: "api-key-2".into(),
+    ///             label: Some("key-2".into()),
+    ///             disabled: false,
+    ///         },
     ///     ])
     ///     .build();
     /// ```
@@ -271,21 +279,20 @@ impl MockAppStateBuilder {
     /// let state = MockAppStateBuilder::new().build();
     /// ```
     pub fn build(self) -> Arc<AppState> {
-        AppState::new(
-            self.keys,
-            self.target,
-            None, // router
-            ModelStatsStore::new(5000.0),
-            self.racing_models,
-            self.racing_max_parallel,
-            self.racing_timeout_ms,
-            self.racing_strategy,
-            self.model_params,
-            self.model_compat,
-        )
+        AppState::new(AppStateParams {
+            keys: self.keys,
+            target: self.target,
+            router: None,
+            model_stats: ModelStatsStore::new(5000.0),
+            racing_models: self.racing_models,
+            racing_max_parallel: self.racing_max_parallel,
+            racing_timeout_ms: self.racing_timeout_ms,
+            racing_strategy: self.racing_strategy,
+            model_params: self.model_params,
+            model_compat: self.model_compat,
+        })
     }
 }
-
 impl Default for MockAppStateBuilder {
     fn default() -> Self {
         Self::new()
@@ -458,7 +465,10 @@ mod tests {
     #[test]
     fn test_create_test_state() {
         let state = create_test_state();
-        assert!(state.pool.len() >= 1);
+        assert!(
+            !state.pool.is_empty(),
+            "create_test_state should build a pool with at least one key"
+        );
     }
 
     #[test]

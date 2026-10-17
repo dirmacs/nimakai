@@ -35,18 +35,18 @@ fn make_live_state_with_circuit_breaker() -> Option<Arc<AppState>> {
 
     let model_stats = ModelStatsStore::with_circuit_breaker(3000.0, cb_config);
 
-    Some(AppState::new(
-        key_entries,
-        NVIDIA_API_BASE.to_string(),
-        None,
+    Some(AppState::new(nimaproxy::AppStateParams {
+        keys: key_entries,
+        target: NVIDIA_API_BASE.to_string(),
+        router: None,
         model_stats,
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    ))
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    }))
 }
 
 fn skip_if_no_api_key() -> bool {
@@ -155,7 +155,7 @@ async fn test_live_circuit_breaker_recovery() {
 
     // First, establish a baseline with successful requests
     let baseline_requests = 3;
-    let mut baseline_successes = 0;
+    let mut baseline_successes = 0; // logged after the loop, terminal output
 
     eprintln!(
         "[circuit-breaker] Establishing baseline with {} requests",
@@ -167,6 +167,7 @@ async fn test_live_circuit_breaker_recovery() {
         if status == 200 {
             baseline_successes += 1;
         }
+        let _ = &baseline_successes;
         eprintln!(
             "[circuit-breaker] Baseline request {}: status={}",
             i + 1,

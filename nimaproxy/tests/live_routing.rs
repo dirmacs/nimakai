@@ -26,18 +26,18 @@ fn make_live_state_with_routing(models: Vec<String>, _strategy: &str) -> Option<
         disabled: false,
     }];
 
-    Some(AppState::new(
-        key_entries,
-        NVIDIA_API_BASE.to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        models.clone(),
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    ))
+    Some(AppState::new(nimaproxy::AppStateParams {
+        keys: key_entries,
+        target: NVIDIA_API_BASE.to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: models.clone(),
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    }))
 }
 
 fn skip_if_no_api_key() -> bool {
@@ -212,7 +212,7 @@ async fn test_live_routing_latency_aware() {
 
     // At least one model should have been tested
     assert!(
-        latencies.len() > 0,
+        !latencies.is_empty(),
         "Expected at least one model to respond successfully"
     );
 }

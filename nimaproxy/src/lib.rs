@@ -308,20 +308,32 @@ impl Drop for UpstreamPermit {
     }
 }
 
+/// Parameters for constructing an [`AppState`].
+///
+/// Groups the shared constructor arguments so that [`AppState::new`] and
+/// [`AppState::new_with_controls`] share one parameter shape instead of a long
+/// positional argument list. The `RuntimeControls` are intentionally kept out of
+/// this struct: `new_with_controls` already accepts them separately and callers
+/// that need custom controls pass them alongside the shared params.
+pub struct AppStateParams {
+    pub keys: Vec<KeyEntry>,
+    pub target: String,
+    pub router: Option<ModelRouter>,
+    pub model_stats: ModelStatsStore,
+    pub racing_models: Vec<String>,
+    pub racing_max_parallel: usize,
+    pub racing_timeout_ms: u64,
+    pub racing_strategy: String,
+    pub model_params: HashMap<String, ModelParams>,
+    pub model_compat: config::ModelCompat,
+}
 impl AppState {
-    pub fn new(
-        keys: Vec<KeyEntry>,
-        target: String,
-        router: Option<ModelRouter>,
-        model_stats: ModelStatsStore,
-        racing_models: Vec<String>,
-        racing_max_parallel: usize,
-        racing_timeout_ms: u64,
-        racing_strategy: String,
-        model_params: HashMap<String, ModelParams>,
-        model_compat: config::ModelCompat,
-    ) -> Arc<Self> {
-        Self::new_with_controls(
+    pub fn new(params: AppStateParams) -> Arc<Self> {
+        Self::new_with_controls(params, RuntimeControls::default())
+    }
+
+    pub fn new_with_controls(params: AppStateParams, controls: RuntimeControls) -> Arc<Self> {
+        let AppStateParams {
             keys,
             target,
             router,
@@ -332,23 +344,8 @@ impl AppState {
             racing_strategy,
             model_params,
             model_compat,
-            RuntimeControls::default(),
-        )
-    }
+        } = params;
 
-    pub fn new_with_controls(
-        keys: Vec<KeyEntry>,
-        target: String,
-        router: Option<ModelRouter>,
-        model_stats: ModelStatsStore,
-        racing_models: Vec<String>,
-        racing_max_parallel: usize,
-        racing_timeout_ms: u64,
-        racing_strategy: String,
-        model_params: HashMap<String, ModelParams>,
-        model_compat: config::ModelCompat,
-        controls: RuntimeControls,
-    ) -> Arc<Self> {
         let client = Client::builder()
             .use_rustls_tls()
             .timeout(std::time::Duration::from_secs(120))
@@ -434,9 +431,10 @@ use std::fs;
 use std::path::PathBuf;
 
 thread_local! {
-    static TLS_PID_FILE: RefCell<Option<PathBuf>> = RefCell::new(None);
+    static TLS_PID_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
+#[allow(dead_code)]
 fn set_tls_pid_file(path: &str) {
     TLS_PID_FILE.with(|tls| {
         *tls.borrow_mut() = Some(PathBuf::from(path));
@@ -546,15 +544,25 @@ fn wait_for_proxy_ready(port: u16, timeout_ms: u64) -> bool {
     false
 }
 
+/// # Safety
+///
+/// `config_path` must be a valid, non-null, NUL-terminated C string, and the
+/// pointer must remain valid for the duration of the call.
 #[no_mangle]
-pub extern "C" fn proxy_start(config_path: *const c_char, port: u32) -> i32 {
+pub unsafe extern "C" fn proxy_start(config_path: *const c_char, port: u32) -> i32 {
     proxy_start_with_pid_file(config_path, port, std::ptr::null())
 }
 
 /// FFI: Start the proxy server with explicit PID file path (optional override).
 /// If pid_file is provided as a C string, it takes precedence over NIMAPROXY_PID_FILE env var.
+///
+/// # Safety
+///
+/// `config_path` must be a valid, non-null, NUL-terminated C string; `pid_file`
+/// must either be null or a valid NUL-terminated C string. All pointers must
+/// remain valid for the duration of the call.
 #[no_mangle]
-pub extern "C" fn proxy_start_with_pid_file(
+pub unsafe extern "C" fn proxy_start_with_pid_file(
     config_path: *const c_char,
     port: u32,
     pid_file: *const c_char,
@@ -619,7 +627,7 @@ pub extern "C" fn proxy_start_with_pid_file(
         libc::posix_spawn_file_actions_addopen(
             &mut file_actions,
             libc::STDIN_FILENO,
-            b"/dev/null\0".as_ptr() as *const c_char,
+            c"/dev/null".as_ptr(),
             libc::O_RDWR,
             0o644,
         );
@@ -664,7 +672,7 @@ pub extern "C" fn proxy_start_with_pid_file(
                 &mut child_pid,
                 bin_path.as_ptr(),
                 &file_actions,
-                &mut attrs,
+                &attrs,
                 argv.as_mut_ptr(),
                 envp.as_ptr(),
             )
@@ -673,7 +681,7 @@ pub extern "C" fn proxy_start_with_pid_file(
                 &mut child_pid,
                 bin_path.as_ptr(),
                 &file_actions,
-                &mut attrs,
+                &attrs,
                 argv.as_mut_ptr(),
                 envp.as_ptr(),
             )
@@ -826,15 +834,15 @@ fn proxy_stats_impl(pfile: &PathBuf) -> *mut c_char {
     }
 }
 
-/// FFI: Free a C string returned by proxy_health or proxy_stats.
-#[no_mangle]
-pub extern "C" fn proxy_free_string(s: *mut c_char) {
+/// # Safety
+///
+/// `s` must be a valid pointer to a heap-allocated C string obtained from
+/// `proxy_health` or `proxy_stats`; otherwise this is undefined behavior.
+pub unsafe extern "C" fn proxy_free_string(s: *mut c_char) {
     if s.is_null() {
         return;
     }
-    unsafe {
-        let _ = CString::from_raw(s);
-    }
+    let _ = CString::from_raw(s);
 }
 
 #[cfg(test)]
@@ -842,7 +850,6 @@ mod ffi_tests {
     use super::*;
     use std::ffi::CString;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use tempfile::TempDir;
 
     const NVIDIA_API_KEY: &str = "nvapi-YOUR_TEST_KEY_HERE";
 
@@ -899,7 +906,7 @@ label = "test"
                 "pid file should be written"
             );
 
-            unsafe { proxy_stop() };
+            proxy_stop();
         });
     }
 
@@ -915,14 +922,14 @@ label = "test"
 
             std::thread::sleep(std::time::Duration::from_millis(600));
 
-            let health = unsafe { proxy_health() };
+            let health = proxy_health();
             assert!(
                 !health.is_null(),
                 "health should return valid string when running"
             );
 
             unsafe { proxy_free_string(health) };
-            unsafe { proxy_stop() };
+            proxy_stop();
         });
     }
 
@@ -934,20 +941,20 @@ label = "test"
             unsafe { proxy_start_with_pid_file(config_path.as_ptr(), 0, pid_file_cstr.as_ptr()) };
             std::thread::sleep(std::time::Duration::from_millis(600));
 
-            let stats = unsafe { proxy_stats() };
+            let stats = proxy_stats();
             assert!(
                 !stats.is_null(),
                 "stats should return valid string when running"
             );
 
             unsafe { proxy_free_string(stats) };
-            unsafe { proxy_stop() };
+            proxy_stop();
         });
     }
 
     #[test]
     fn test_proxy_health_when_stopped() {
-        let health = unsafe { proxy_health() };
+        let health = proxy_health();
         assert!(
             health.is_null(),
             "health should return null when not running"
@@ -956,8 +963,8 @@ label = "test"
 
     #[test]
     fn test_proxy_stop_idempotent() {
-        let result1 = unsafe { proxy_stop() };
-        let result2 = unsafe { proxy_stop() };
+        let result1 = proxy_stop();
+        let result2 = proxy_stop();
 
         assert_eq!(result1, 0, "first stop should return 0");
         assert_eq!(result2, 0, "second stop should also return 0 (idempotent)");
@@ -980,7 +987,7 @@ label = "test"
             };
             assert_eq!(result2, -1, "second start should fail (already running)");
 
-            unsafe { proxy_stop() };
+            proxy_stop();
         });
     }
 
@@ -1012,7 +1019,7 @@ label = "test"
                 pid_content
             );
 
-            unsafe { proxy_stop() };
+            proxy_stop();
         });
     }
 
@@ -1027,18 +1034,18 @@ label = "test"
         let model_params = HashMap::new();
         let model_compat = config::ModelCompat::default();
 
-        let state = AppState::new(
+        let state = AppState::new(AppStateParams {
             keys,
-            "http://localhost:8080".to_string(),
-            None,
-            ModelStatsStore::new(100.0),
-            vec!["nvidia/nemotron-3b".to_string()],
-            3,
-            5000,
-            "round_robin".to_string(),
+            target: "http://localhost:8080".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec!["nvidia/nemotron-3b".to_string()],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 5000,
+            racing_strategy: "round_robin".to_string(),
             model_params,
             model_compat,
-        );
+        });
 
         assert_eq!(state.racing_models.len(), 1);
         assert_eq!(state.racing_max_parallel, 3);
@@ -1275,11 +1282,10 @@ label = "test"
             };
             assert_eq!(start_result, 0);
             std::thread::sleep(std::time::Duration::from_millis(600));
-            let stats = unsafe { proxy_stats() };
+            let stats = proxy_stats();
             assert!(!stats.is_null());
             unsafe { proxy_free_string(stats) };
-            unsafe { proxy_stop() };
-            assert!(true);
+            proxy_stop();
         });
     }
 }

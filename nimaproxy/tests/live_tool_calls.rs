@@ -50,22 +50,22 @@ fn make_state() -> Arc<AppState> {
         supports_developer_role: Some(vec!["all".to_string()]),
         supports_tool_messages: Some(vec!["all".to_string()]),
     };
-    AppState::new(
-        key_entries,
-        NVIDIA_API_BASE.to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![
+    AppState::new(nimaproxy::AppStateParams {
+        keys: key_entries,
+        target: NVIDIA_API_BASE.to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![
             "mistralai/mistral-medium-3.5-128b".to_string(),
             "z-ai/glm-5.1".to_string(),
             "qwen/qwen3.5-397b-a17b".to_string(),
         ],
-        5,
-        20000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
+        racing_max_parallel: 5,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
         model_compat,
-    )
+    })
 }
 
 /// Send a request and return status code and (if success) the parsed response.

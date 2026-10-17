@@ -1,11 +1,11 @@
+use crate::proxy::chat_helpers::{apply_model_params, count_repetitions};
+use crate::AppState;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use crate::proxy::chat_helpers::{apply_model_params, count_repetitions};
 use bytes::Bytes;
 use serde_json::Value;
-use crate::AppState;
 pub(crate) fn extract_response_metrics(text: &str) -> (u32, u32, bool) {
     let mut output_tokens = 0u32;
     let repetition_count = count_repetitions(text);
@@ -163,6 +163,7 @@ pub(crate) fn normalize_assistant_messages(json: &mut Value) {
             };
             obj.remove("tool_call_id");
             obj.remove("reasoning");
+            obj.remove("reasoning_content");
             let has_tool_calls = obj
                 .get("tool_calls")
                 .and_then(|tc| tc.as_array())
@@ -181,6 +182,244 @@ pub(crate) fn normalize_assistant_messages(json: &mut Value) {
             }
         }
     }
+}
+
+/// Convert XML tool-call syntax in assistant messages to structured `tool_calls`.
+///
+/// When a model's structured `tool_calls` response fails to reach the harness
+/// (e.g. because the proxy returned a 503 mid-stream), the harness records
+/// the model's attempt as literal text: `<invoke name="bash">…</tool_call>`.
+/// On the next turn that text goes back into the conversation history, and the
+/// model imitates it — emitting more XML instead of structured tool_calls.
+/// This is a self-reinforcing feedback loop.
+///
+/// We break it by converting the XML back into a proper `tool_calls` field on
+/// the assistant message. The model sees its previous calls as structured
+/// (reinforcing correct behavior) and the non-XML text content is preserved.
+///
+/// NVIDIA accepts `tool_calls` without a matching `tool` result, so no
+/// synthetic result message is needed.
+pub(crate) fn recover_xml_tool_calls(json: &mut Value) {
+    let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    let mut recovered_counter = 0u32;
+    for msg in messages.iter_mut() {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        // Already has structured tool_calls — nothing to recover.
+        if msg
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .is_some_and(|tc| !tc.is_empty())
+        {
+            continue;
+        }
+        let Some(content) = msg
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+        else {
+            continue;
+        };
+        if !content.contains("<invoke") {
+            continue;
+        }
+        let (cleaned_text, tool_calls) = extract_invoke_blocks(&content, &mut recovered_counter);
+        if tool_calls.is_empty() {
+            continue;
+        }
+        if let Some(obj) = msg.as_object_mut() {
+            let text = cleaned_text.trim();
+            if text.is_empty() {
+                obj.insert("content".to_string(), Value::Null);
+            } else {
+                obj.insert("content".to_string(), Value::String(text.to_string()));
+            }
+            obj.insert("tool_calls".to_string(), Value::Array(tool_calls));
+        }
+    }
+}
+
+/// Strip degenerate assistant messages that contain only rendering artifacts.
+///
+/// When the proxy returns a 503 or the model degrades, some models emit
+/// rendering artifacts as their entire text response instead of making tool
+/// calls. Example: `[Tool result omitted]` — a display placeholder from the
+/// omp harness that the model learned from its training data.
+///
+/// Once one such message enters conversation history, the model sees it as a
+/// pattern to imitate, creating a self-reinforcing loop (189 occurrences
+/// observed in one session). We break the loop by removing these degenerate
+/// messages from the request body before it reaches the model.
+///
+/// Only removes messages where the assistant's text content, after stripping
+/// whitespace, matches a known degenerate pattern AND the message has no
+/// tool_calls. Messages with real content alongside the artifact are left alone.
+pub(crate) fn strip_degenerate_assistant_messages(json: &mut Value) {
+    let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    messages.retain(|msg| {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            return true;
+        }
+        // Keep messages that have tool_calls — they're doing real work.
+        if msg
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .is_some_and(|tc| !tc.is_empty())
+        {
+            return true;
+        }
+        let text = extract_assistant_text(msg.get("content"));
+        !is_degenerate_content(&text)
+    });
+}
+
+/// Extract the effective text from an assistant message's content field.
+/// Handles both string content and array-of-content-parts (OpenAI format).
+fn extract_assistant_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.trim().to_string(),
+        Some(Value::Array(parts)) => {
+            // Concatenate all text-type parts, skip thinking blocks
+            let mut texts = Vec::new();
+            for part in parts {
+                let typ = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if typ == "thinking" {
+                    continue; // Skip reasoning blocks
+                }
+                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                    let trimmed = t.trim();
+                    if !trimmed.is_empty() {
+                        texts.push(trimmed.to_string());
+                    }
+                }
+            }
+            texts.join(" ")
+        }
+        _ => String::new(), // null or missing — will not match degenerate
+    }
+}
+
+/// Returns true if the text is a known degenerate rendering artifact.
+///
+/// Tolerates surrounding whitespace, brackets, pipes, and box-drawing
+/// characters that omp's display layer may inject.
+fn is_degenerate_content(text: &str) -> bool {
+    if text.is_empty() {
+        return false; // Empty/null content is not degenerate — may be tool_calls-only
+    }
+    // Strip junk characters that omp rendering or content-block joining may add:
+    // brackets, pipes, box-drawing (U+2500–U+257F), whitespace
+    let cleaned: String = text
+        .chars()
+        .filter(|c| {
+            !c.is_whitespace()
+                && *c != '['
+                && *c != ']'
+                && *c != '|'
+                && !('\u{2500}'..='\u{257F}').contains(c)
+        })
+        .collect();
+    let lower = cleaned.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "toolresultomitted"
+            | "toolresultsomitted"
+            | "tooloutputomitted"
+            | "toolcallresultomitted"
+            | "outputomitted"
+            | "resultomitted"
+            | "resultsomitted"
+    )
+}
+
+/// Parse `<invoke name="X"><parameter …>…</parameter>…</tool_call|function>`
+/// blocks out of `text`. Returns (remaining_text, Vec<tool_call JSON values>).
+fn extract_invoke_blocks(text: &str, counter: &mut u32) -> (String, Vec<Value>) {
+    let mut remaining = text.to_string();
+    let mut tool_calls = Vec::new();
+    for end_marker in ["</tool_call>", "</function>", "</invoke>"] {
+        while let Some(start) = remaining.find("<invoke") {
+            let Some(rel_end) = remaining[start..].find(end_marker) else {
+                break;
+            };
+            let end = start + rel_end + end_marker.len();
+            let block = remaining[start..end].to_string();
+            remaining = format!("{}{}", &remaining[..start], &remaining[end..]);
+
+            if let Some(tc) = parse_invoke_block(&block, counter) {
+                tool_calls.push(tc);
+            }
+        }
+    }
+    (remaining, tool_calls)
+}
+
+/// Parse a single `<invoke name="…">…` block into an OpenAI `tool_calls` entry.
+fn parse_invoke_block(block: &str, counter: &mut u32) -> Option<Value> {
+    // Extract function name from <invoke name="…">
+    let name = block.find("name=\"").and_then(|i| {
+        let rest = &block[i + 6..];
+        rest.find('"').map(|j| rest[..j].to_string())
+    })?;
+
+    // Extract parameters into a JSON object for the arguments field.
+    let mut args = serde_json::Map::new();
+    let mut search = block;
+    while let Some(idx) = search.find("<parameter") {
+        let tag_rest = &search[idx..];
+
+        // Two forms: <parameter name="key"> and <parameter=key>
+        let (key, after_tag) = if let Some(nq) = tag_rest.find("name=\"") {
+            let ks = nq + 6;
+            let ke = tag_rest[ks..].find('"').unwrap_or(0) + ks;
+            let k = tag_rest[ks..ke].to_string();
+            let gt = tag_rest.find('>').unwrap_or(tag_rest.len() - 1) + 1;
+            (k, &tag_rest[gt..])
+        } else if let Some(eq) = tag_rest.find("parameter=") {
+            let ks = eq + 10;
+            let ke = tag_rest[ks..].find('>').unwrap_or(0) + ks;
+            let k = tag_rest[ks..ke].to_string();
+            (k, &tag_rest[ke + 1..])
+        } else {
+            search = &search[idx + 10..];
+            continue;
+        };
+
+        let value = if let Some(ei) = after_tag.find("</parameter>") {
+            after_tag[..ei].trim().to_string()
+        } else {
+            after_tag.lines().next().unwrap_or("").trim().to_string()
+        };
+        args.insert(key, Value::String(value));
+
+        let consumed = if let Some(ei) = after_tag.find("</parameter>") {
+            idx + (after_tag.as_ptr() as usize - tag_rest.as_ptr() as usize)
+                + ei
+                + "</parameter>".len()
+        } else {
+            idx + 10
+        };
+        if consumed < search.len() {
+            search = &search[consumed..];
+        } else {
+            break;
+        }
+    }
+
+    *counter += 1;
+    Some(serde_json::json!({
+        "id": format!("recovered_{}", counter),
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": serde_json::to_string(&args).unwrap_or_default()
+        }
+    }))
 }
 /// Validate tool call IDs for Mistral models.
 /// Mistral requires tool call IDs to be exactly 9 alphanumeric characters.
@@ -371,8 +610,9 @@ pub(crate) fn is_last_message_from_assistant(json: &Value) -> bool {
 }
 /// Inject parameters for tool calling and conversation continuation.
 /// When the last message is from the assistant, we must set:
-/// - add_generation_prompt=false (tells API we're continuing, not starting new)
-/// - continue_final_message=true (tells API to continue from assistant's partial response)
+///   - add_generation_prompt=false (tells API we're continuing, not starting new)
+///   - continue_final_message=true (tells API to continue from assistant's partial response)
+///
 /// This applies to ALL models on NVIDIA NIM, not just Mistral.
 pub(crate) fn inject_mistral_tool_params(json: &mut Value, model_id: &str) {
     let is_mistral = is_mistral_model(model_id);
@@ -420,6 +660,17 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     transform_message_roles(&mut json, &model_id, state);
     fix_message_ordering(&mut json);
     normalize_assistant_messages(&mut json);
+    // Recover XML tool-call syntax (<invoke>…</tool_call>) into structured
+    // tool_calls. Models that failed mid-tool-call emit XML as text; when
+    // that text goes back in the conversation, the model imitates it instead
+    // of using structured tool_calls. Converting it back to tool_calls breaks
+    // the feedback loop while preserving what the model intended to do.
+    recover_xml_tool_calls(&mut json);
+    // Strip degenerate assistant messages ("[Tool result omitted]" etc.) that
+    // are rendering artifacts the model learned to imitate. Must run AFTER
+    // recover_xml_tool_calls so we don't strip messages that had recoverable
+    // XML tool calls in them.
+    strip_degenerate_assistant_messages(&mut json);
     if let Some(params) = state.model_params.get(&model_id) {
         apply_model_params(&mut json, params);
     }

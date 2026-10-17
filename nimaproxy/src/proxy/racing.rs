@@ -1,31 +1,40 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use crate::key_pool::KeyAcquireError;
+use crate::proxy::admission::{gateway_overloaded_response, no_key_response};
+use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params};
+use crate::proxy::fallback::solo_model_fallback;
+use crate::proxy::http::log_turn_request;
+use crate::proxy::messages::{
+    fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params,
+    normalize_assistant_messages, sanitize_tool_calls, transform_message_roles,
+};
+use crate::proxy::timeouts::{
+    prompt_chars, record_model_timeout, request_turn_summary, timeout_for_model,
+};
+use crate::proxy::upstream_errors::{is_hard_model_error, is_transient_race_error, sse_body_error};
+use crate::turn_log::TurnRecord;
+use crate::AppState;
 use axum::{
     body::Body,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use crate::proxy::admission::{gateway_overloaded_response, no_key_response};
-use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params};
-use crate::proxy::fallback::{solo_model_fallback};
-use crate::proxy::http::{log_turn_request};
-use crate::proxy::messages::{fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params, normalize_assistant_messages, sanitize_tool_calls, transform_message_roles};
-use crate::proxy::timeouts::{prompt_chars, record_model_timeout, request_turn_summary, timeout_for_model};
-use crate::proxy::upstream_errors::{is_hard_model_error, is_transient_race_error, sse_body_error};
 use bytes::Bytes;
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::warn;
-use crate::key_pool::KeyAcquireError;
-use crate::AppState;
 pub(crate) fn racing_deadline(state: &AppState) -> Option<Instant> {
     if state.racing_max_total_request_ms == 0 {
         return None;
     }
     Instant::now().checked_add(Duration::from_millis(state.racing_max_total_request_ms))
 }
-pub(crate) fn timeout_before_deadline(deadline: Option<Instant>, per_attempt_ms: u64) -> Option<u64> {
+pub(crate) fn timeout_before_deadline(
+    deadline: Option<Instant>,
+    per_attempt_ms: u64,
+) -> Option<u64> {
     let Some(deadline) = deadline else {
         return Some(per_attempt_ms);
     };
@@ -90,7 +99,11 @@ pub(crate) fn rotated_models(models: &[String], cursor: usize) -> Vec<String> {
     let n = models.len();
     (0..n).map(|i| models[(cursor + i) % n].clone()).collect()
 }
-pub(crate) fn tiered_candidates(state: &AppState, rotated: &[String], max_parallel: usize) -> Vec<String> {
+pub(crate) fn tiered_candidates(
+    state: &AppState,
+    rotated: &[String],
+    max_parallel: usize,
+) -> Vec<String> {
     if !state.racing_adaptive || state.racing_fast_models.is_empty() {
         return state.model_stats.racing_candidates(rotated, max_parallel);
     }
@@ -328,19 +341,22 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                     .record_hard_error(&model_id_clone, &err);
                             }
                         }
-                        log_turn_request(
-                            "auto",
-                            &model_id_clone,
-                            latency as u128,
-                            false,
-                            status.as_u16(),
-                            message_count,
+                        log_turn_request(TurnRecord {
+                            requested_model: "auto".to_string(),
+                            responding_model: model_id_clone.clone(),
+                            latency_ms: latency as u128 as u64,
+                            success: false,
+                            status_code: status.as_u16(),
+                            request_message_count: message_count,
+                            response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
-                            key_label.as_deref(),
-                            true,
-                            Some(body_str[..body_str.len().min(400)].to_string()),
-                        );
+                            key_label: key_label.as_deref().map(|s| s.to_string()),
+                            is_racing: true,
+                            error: Some(body_str[..body_str.len().min(400)].to_string()),
+                            request_tokens: None,
+                            response_tokens: None,
+                        });
                         return (
                             model_id_for_task,
                             Err(format!(
@@ -378,19 +394,22 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                     key_label.as_deref(),
                                     timeout_ms_for_model,
                                 );
-                                log_turn_request(
-                                    "auto",
-                                    &model_id_clone,
-                                    t0.elapsed().as_millis(),
-                                    false,
-                                    StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                                    message_count,
+                                log_turn_request(TurnRecord {
+                                    requested_model: "auto".to_string(),
+                                    responding_model: model_id_clone.clone(),
+                                    latency_ms: t0.elapsed().as_millis() as u64,
+                                    success: false,
+                                    status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                                    request_message_count: message_count,
+                                    response_message_count: 1,
                                     has_tool_calls,
                                     tool_call_count,
-                                    key_label.as_deref(),
-                                    true,
-                                    Some(msg.clone()),
-                                );
+                                    key_label: key_label.as_deref().map(|s| s.to_string()),
+                                    is_racing: true,
+                                    error: Some(msg.clone()),
+                                    request_tokens: None,
+                                    response_tokens: None,
+                                });
                                 return (model_id_for_task, Err(msg));
                             }
                         };
@@ -402,19 +421,22 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                     {
                         Ok(Ok(bytes)) => bytes,
                         Ok(Err(e)) => {
-                            log_turn_request(
-                                "auto",
-                                &model_id_clone,
-                                t0.elapsed().as_millis(),
-                                false,
-                                StatusCode::BAD_GATEWAY.as_u16(),
-                                message_count,
+                            log_turn_request(TurnRecord {
+                                requested_model: "auto".to_string(),
+                                responding_model: model_id_clone.clone(),
+                                latency_ms: t0.elapsed().as_millis() as u64,
+                                success: false,
+                                status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                                request_message_count: message_count,
+                                response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
-                                key_label.as_deref(),
-                                true,
-                                Some(e.to_string()),
-                            );
+                                key_label: key_label.as_deref().map(|s| s.to_string()),
+                                is_racing: true,
+                                error: Some(e.to_string()),
+                                request_tokens: None,
+                                response_tokens: None,
+                            });
                             return (model_id_for_task, Err(format!("body error: {}", e)));
                         }
                         Err(_) => {
@@ -433,19 +455,22 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 key_label.as_deref(),
                                 body_timeout_ms,
                             );
-                            log_turn_request(
-                                "auto",
-                                &model_id_clone,
-                                body_timeout_ms as u128,
-                                false,
-                                StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                                message_count,
+                            log_turn_request(TurnRecord {
+                                requested_model: "auto".to_string(),
+                                responding_model: model_id_clone.clone(),
+                                latency_ms: body_timeout_ms as u128 as u64,
+                                success: false,
+                                status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                                request_message_count: message_count,
+                                response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
-                                key_label.as_deref(),
-                                true,
-                                Some(timeout_error.clone()),
-                            );
+                                key_label: key_label.as_deref().map(|s| s.to_string()),
+                                is_racing: true,
+                                error: Some(timeout_error.clone()),
+                                request_tokens: None,
+                                response_tokens: None,
+                            });
                             return (model_id_for_task, Err(timeout_error));
                         }
                     };
@@ -457,19 +482,22 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         if let Some((embedded_code, embedded_msg)) =
                             sse_body_error(&body_bytes, Some(&content_type))
                         {
-                            log_turn_request(
-                                "auto",
-                                &model_id_clone,
-                                t0.elapsed().as_millis(),
-                                false,
-                                embedded_code,
-                                message_count,
+                            log_turn_request(TurnRecord {
+                                requested_model: "auto".to_string(),
+                                responding_model: model_id_clone.clone(),
+                                latency_ms: t0.elapsed().as_millis() as u64,
+                                success: false,
+                                status_code: embedded_code,
+                                request_message_count: message_count,
+                                response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
-                                key_label.as_deref(),
-                                true,
-                                Some(embedded_msg.clone()),
-                            );
+                                key_label: key_label.as_deref().map(|s| s.to_string()),
+                                is_racing: true,
+                                error: Some(embedded_msg.clone()),
+                                request_tokens: None,
+                                response_tokens: None,
+                            });
                             return (
                                 model_id_for_task,
                                 Err(format!(
@@ -495,23 +523,26 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                         );
                     }
-                    log_turn_request(
-                        "auto",
-                        &model_id_clone,
-                        latency as u128,
-                        status.is_success(),
-                        status.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: "auto".to_string(),
+                        responding_model: model_id_clone.clone(),
+                        latency_ms: latency as u128 as u64,
+                        success: status.is_success(),
+                        status_code: status.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        true,
-                        if status.is_success() {
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: true,
+                        error: if status.is_success() {
                             None
                         } else {
                             Some(format!("HTTP {}", status.as_u16()))
                         },
-                    );
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     Ok::<(Response, u16, usize, u64), String>((
                         response,
                         status.as_u16(),
@@ -534,19 +565,22 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                             false,
                         );
                     }
-                    log_turn_request(
-                        "auto",
-                        &model_id_clone,
-                        t0.elapsed().as_millis(),
-                        false,
-                        StatusCode::BAD_GATEWAY.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: "auto".to_string(),
+                        responding_model: model_id_clone.clone(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        true,
-                        Some(e.to_string()),
-                    );
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: true,
+                        error: Some(e.to_string()),
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     Err(format!("request error: {}", e))
                 }
                 Err(_) => {
@@ -565,19 +599,22 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         key_label.as_deref(),
                         send_timeout_ms_for_model,
                     );
-                    log_turn_request(
-                        "auto",
-                        &model_id_clone,
-                        timeout_ms_for_model as u128,
-                        false,
-                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: "auto".to_string(),
+                        responding_model: model_id_clone.clone(),
+                        latency_ms: timeout_ms_for_model as u128 as u64,
+                        success: false,
+                        status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        true,
-                        Some(timeout_error.clone()),
-                    );
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: true,
+                        error: Some(timeout_error.clone()),
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     Err(timeout_error)
                 }
             };

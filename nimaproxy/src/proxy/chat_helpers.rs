@@ -113,3 +113,55 @@ pub(crate) fn accept_header_for_body(body: &Bytes) -> &'static str {
         .map(|json| accept_header_for_json(&json))
         .unwrap_or("application/json")
 }
+
+/// Read usage tokens out of an assembled non-streaming completion body.
+///
+/// A non-streaming response is a single OpenAI JSON object, so the usage the
+/// upstream reported lives in its `usage.prompt_tokens` /
+/// `usage.completion_tokens`. Returns `(None, None)` when the body carries no
+/// usage object: the upstream did not report usage, which is NOT the same fact
+/// as "0 tokens" and must never be recorded as one.
+pub(crate) fn non_streaming_usage(body: &[u8]) -> (Option<u32>, Option<u32>) {
+    let Ok(json) = serde_json::from_slice::<Value>(body) else {
+        return (None, None);
+    };
+    let prompt = json
+        .get("usage")
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|t| u32::try_from(t).ok());
+    let completion = json
+        .get("usage")
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|t| u32::try_from(t).ok());
+    (prompt, completion)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_object_populates_both_token_counts() {
+        let body = br#"{"id":"x","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":11,"total_tokens":16}}"#;
+        assert_eq!(non_streaming_usage(body), (Some(5), Some(11)));
+    }
+
+    #[test]
+    fn absent_usage_is_none_not_zero() {
+        let body = br#"{"id":"x","choices":[{"message":{"content":"hi"}}]}"#;
+        assert_eq!(non_streaming_usage(body), (None, None));
+    }
+
+    #[test]
+    fn unparsable_body_is_none() {
+        assert_eq!(non_streaming_usage(b"not json"), (None, None));
+    }
+
+    #[test]
+    fn partial_usage_keeps_only_what_was_reported() {
+        let body = br#"{"usage":{"prompt_tokens":7}}"#;
+        assert_eq!(non_streaming_usage(body), (Some(7), None));
+    }
+}
