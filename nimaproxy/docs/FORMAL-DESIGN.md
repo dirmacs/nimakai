@@ -114,7 +114,7 @@ concurrent `mark_rate_limited` between them yields a snapshot that never
 existed. The report is a *plausible* wrong value rather than a
 fail-loud error — the worst failure mode for an observability surface.
 
-### 2.3 Machine C — Request lifecycle (two parallel implementations)
+### 2.3 Machine C — Request lifecycle
 
 The request FSM is implemented twice. `chat_completions`
 (`src/proxy.rs:845`) implements the full sequence with a retry decision on
@@ -140,12 +140,13 @@ stateDiagram-v2
     AwaitKeyLease --> Sending
     Sending --> CollectingBody : headers OK
     Sending --> SendTimeout : Err
-    CollectingBody --> BodyTimeout : body > window
+    CollectingBody --> BodyTimeout : inter-chunk gap > window
     CollectingBody --> InspectBody : Ok
     InspectBody --> TerminalOk : 2xx
     InspectBody --> Retry : 429 / 401 / 403 / DEGRADED
     SendTimeout --> Retry : attempt+1 < n AND within budget
-    BodyTimeout --> Retry : attempt+1 < n AND within budget
+    BodyTimeout --> Retry : nothing sent yet AND attempt+1 < n AND within budget
+    BodyTimeout --> Terminal : bytes already on the wire
     Retry --> AwaitKeyLease
     Retry --> Terminal : budget or attempts exhausted
     TerminalOk --> [*]
@@ -155,10 +156,12 @@ stateDiagram-v2
     Terminal --> [*]
 ```
 
-The `Retry` transition carries both guards, and both must hold:
+The `Retry` transition carries the guards above, and all of them must
+hold:
 
 ```
-attempt + 1 < n                          AND
+nothing has reached the client            AND
+attempt + 1 < n                           AND
 started.elapsed() + window <= attempt_budget
 ```
 
@@ -166,9 +169,19 @@ where `attempt_budget = window*2 + admission_wait_ms + slack_ms`
 (`src/proxy.rs:902`). The second guard encodes a **liveness** property:
 "a retry will be attempted whenever one more window fits" — and its first
 formulation violated exactly that, silently, because `elapsed` includes
-the admission wait. A silent guard failure is worse than a compile error,
-which is the argument for modelling the guard as data rather than as an
-inline expression.
+the admission wait.
+
+The first guard is the one this session had wrong in both directions.
+"Nothing has reached the client" is a property of the response mode, not
+of the elapsed time: a streaming response has bytes on the wire the
+moment its first chunk is forwarded, while a non-streaming response is
+assembled in memory and the caller sees nothing until it completes. That
+distinction is now modelled explicitly as `ResponseMode` on the
+`on_first_byte` transition (`src/proxy/request_state.rs`), which lands
+the request in `Committed` (streaming, never retryable) or `Assembling`
+(buffered, still retryable). Before it was modelled, `Committed` was
+reached for both, so a stalled non-streaming body was terminal — S3
+refusing a retry that could not have double-sent anything.
 
 ### 2.4 Machine D — Racing (orthogonal regions)
 

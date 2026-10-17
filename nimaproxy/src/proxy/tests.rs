@@ -25,18 +25,18 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 fn create_test_app_state() -> AppState {
-    let state = AppState::new(
-        vec![],
-        "https://test.api.nvidia.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        8000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+    let state = AppState::new(crate::AppStateParams {
+        keys: vec![],
+        target: "https://test.api.nvidia.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
     match Arc::try_unwrap(state) {
         Ok(state) => state,
         Err(_) => panic!("test state should have a single owner"),
@@ -44,31 +44,33 @@ fn create_test_app_state() -> AppState {
 }
 fn create_adaptive_test_state() -> Arc<AppState> {
     AppState::new_with_controls(
-        vec![
-            crate::KeyEntry {
-                key: "key-a".to_string(),
-                label: Some("key-a".to_string()),
-                disabled: false,
-            },
-            crate::KeyEntry {
-                key: "key-b".to_string(),
-                label: Some("key-b".to_string()),
-                disabled: false,
-            },
-        ],
-        "https://test.api.nvidia.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![
-            "fast-a".to_string(),
-            "fast-b".to_string(),
-            "fallback-a".to_string(),
-        ],
-        10,
-        15000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        crate::AppStateParams {
+            keys: vec![
+                crate::KeyEntry {
+                    key: "key-a".to_string(),
+                    label: Some("key-a".to_string()),
+                    disabled: false,
+                },
+                crate::KeyEntry {
+                    key: "key-b".to_string(),
+                    label: Some("key-b".to_string()),
+                    disabled: false,
+                },
+            ],
+            target: "https://test.api.nvidia.com".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec![
+                "fast-a".to_string(),
+                "fast-b".to_string(),
+                "fallback-a".to_string(),
+            ],
+            racing_max_parallel: 10,
+            racing_timeout_ms: 15000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             racing_adaptive: true,
             racing_min_parallel: 2,
@@ -870,20 +872,22 @@ fn test_successful_admission_counts_exactly_one_attempt() {
 /// constraint on admission. `max_in_flight_per_key` is passed in full.
 fn saturated_single_key_state(max_in_flight_per_key: usize) -> Arc<AppState> {
     AppState::new_with_controls(
-        vec![crate::KeyEntry {
-            key: "key-a".to_string(),
-            label: Some("key-a".to_string()),
-            disabled: false,
-        }],
-        "https://test.api.nvidia.com".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        8,
-        8000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        crate::AppStateParams {
+            keys: vec![crate::KeyEntry {
+                key: "key-a".to_string(),
+                label: Some("key-a".to_string()),
+                disabled: false,
+            }],
+            target: "https://test.api.nvidia.com".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec![],
+            racing_max_parallel: 8,
+            racing_timeout_ms: 8000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             racing_adaptive: false,
             racing_min_parallel: 2,

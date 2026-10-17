@@ -37,18 +37,18 @@ fn make_state() -> Arc<AppState> {
             disabled: false,
         })
         .collect();
-    AppState::new(
-        key_entries,
-        NVIDIA_API_BASE.to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![LIVE_MODEL_A.to_string(), LIVE_MODEL_B.to_string()],
-        5,
-        20000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    )
+    AppState::new(nimaproxy::AppStateParams {
+        keys: key_entries,
+        target: NVIDIA_API_BASE.to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![LIVE_MODEL_A.to_string(), LIVE_MODEL_B.to_string()],
+        racing_max_parallel: 5,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    })
 }
 
 fn make_state_no_racing() -> Arc<AppState> {
@@ -61,18 +61,18 @@ fn make_state_no_racing() -> Arc<AppState> {
             disabled: false,
         })
         .collect();
-    AppState::new(
-        key_entries,
-        NVIDIA_API_BASE.to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        5000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    )
+    AppState::new(nimaproxy::AppStateParams {
+        keys: key_entries,
+        target: NVIDIA_API_BASE.to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 5000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    })
 }
 
 #[tokio::test]

@@ -9,7 +9,7 @@ use nimaproxy::config::{KeyEntry, ModelCompat, ModelParams};
 use nimaproxy::model_router::{ModelRouter, Strategy};
 use nimaproxy::model_stats::ModelStatsStore;
 use nimaproxy::proxy::chat::chat_completions;
-use nimaproxy::{AppState, RuntimeControls};
+use nimaproxy::{AppState, AppStateParams, RuntimeControls};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,18 +20,18 @@ fn make_test_state(api_url: String) -> Arc<AppState> {
         label: Some("test".to_string()),
         disabled: false,
     }];
-    AppState::new(
-        key_entries,
-        api_url,
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    )
+    AppState::new(AppStateParams {
+        keys: key_entries,
+        target: api_url,
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    })
 }
 
 /// Create test state with TWO API keys, no racing (for auth-failure retry-with-next-key tests).
@@ -48,18 +48,18 @@ fn make_two_key_test_state(api_url: String) -> Arc<AppState> {
             disabled: false,
         },
     ];
-    AppState::new(
-        key_entries,
-        api_url,
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    )
+    AppState::new(AppStateParams {
+        keys: key_entries,
+        target: api_url,
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    })
 }
 
 /// Create test state with racing models
@@ -69,18 +69,18 @@ fn make_racing_state(api_url: String) -> Arc<AppState> {
         label: Some("test".to_string()),
         disabled: false,
     }];
-    AppState::new(
-        key_entries,
-        api_url,
-        None,
-        ModelStatsStore::new(100.0),
-        vec!["model-a".to_string(), "model-b".to_string()],
-        2,
-        5000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    )
+    AppState::new(AppStateParams {
+        keys: key_entries,
+        target: api_url,
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+        racing_max_parallel: 2,
+        racing_timeout_ms: 5000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    })
 }
 
 /// Create racing state that is forced into solo fallback by large prompt policy.
@@ -98,16 +98,18 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
         },
     ];
     AppState::new_with_controls(
-        key_entries,
-        api_url,
-        None,
-        ModelStatsStore::new(3000.0),
-        vec!["model-a".to_string(), "model-b".to_string()],
-        2,
-        5000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        AppStateParams {
+            keys: key_entries,
+            target: api_url,
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_max_parallel: 2,
+            racing_timeout_ms: 5000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             racing_adaptive: true,
             racing_min_parallel: 2,
@@ -136,16 +138,18 @@ fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
         disabled: false,
     }];
     AppState::new_with_controls(
-        key_entries,
-        api_url,
-        None,
-        ModelStatsStore::new(3000.0),
-        vec!["model-a".to_string(), "model-b".to_string()],
-        2,
-        5000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        AppStateParams {
+            keys: key_entries,
+            target: api_url,
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_max_parallel: 2,
+            racing_timeout_ms: 5000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             racing_adaptive: true,
             racing_min_parallel: 2,
@@ -187,20 +191,22 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
         },
     ];
     AppState::new_with_controls(
-        key_entries,
-        api_url,
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![
-            "model-a".to_string(),
-            "model-b".to_string(),
-            "model-c".to_string(),
-        ],
-        2,
-        5000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        AppStateParams {
+            keys: key_entries,
+            target: api_url,
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec![
+                "model-a".to_string(),
+                "model-b".to_string(),
+                "model-c".to_string(),
+            ],
+            racing_max_parallel: 2,
+            racing_timeout_ms: 5000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             racing_adaptive: true,
             racing_min_parallel: 2,
@@ -743,18 +749,18 @@ async fn test_proxy_with_model_params() {
         },
     );
 
-    let state = AppState::new(
-        key_entries,
-        server.url(),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
+    let state = AppState::new(AppStateParams {
+        keys: key_entries,
+        target: server.url(),
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
         model_params,
-        ModelCompat::default(),
-    );
+        model_compat: ModelCompat::default(),
+    });
 
     let body = serde_json::json!({
         "model": "test-model",
@@ -806,18 +812,18 @@ async fn test_proxy_model_params_do_not_enable_stream_when_omitted() {
         },
     );
 
-    let state = AppState::new(
-        key_entries,
-        server.url(),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
+    let state = AppState::new(AppStateParams {
+        keys: key_entries,
+        target: server.url(),
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
         model_params,
-        ModelCompat::default(),
-    );
+        model_compat: ModelCompat::default(),
+    });
 
     let body = serde_json::json!({
         "model": "test-model",
@@ -852,18 +858,18 @@ async fn test_direct_chat_request_uses_configured_timeout() {
         label: Some("test".to_string()),
         disabled: false,
     }];
-    let state = AppState::new(
-        key_entries,
-        format!("http://{}", addr),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        50,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+    let state = AppState::new(AppStateParams {
+        keys: key_entries,
+        target: format!("http://{}", addr),
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 50,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let body = serde_json::json!({
         "model": "slow-model",
@@ -938,27 +944,29 @@ async fn test_timeout_retries_on_another_key_within_budget() {
     });
 
     let state = AppState::new_with_controls(
-        vec![
-            KeyEntry {
-                key: "k1".to_string(),
-                label: Some("k1".to_string()),
-                disabled: false,
-            },
-            KeyEntry {
-                key: "k2".to_string(),
-                label: Some("k2".to_string()),
-                disabled: false,
-            },
-        ],
-        format!("http://{}", dead_addr),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        300, // timeout window
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        AppStateParams {
+            keys: vec![
+                KeyEntry {
+                    key: "k1".to_string(),
+                    label: Some("k1".to_string()),
+                    disabled: false,
+                },
+                KeyEntry {
+                    key: "k2".to_string(),
+                    label: Some("k2".to_string()),
+                    disabled: false,
+                },
+            ],
+            target: format!("http://{}", dead_addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 300,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             max_upstream_in_flight: 8,
             max_in_flight_per_key: 2,
@@ -1049,27 +1057,29 @@ async fn test_body_timeout_retries_on_another_key_within_budget() {
         .create();
 
     let state = AppState::new_with_controls(
-        vec![
-            KeyEntry {
-                key: "k1".to_string(),
-                label: Some("k1".to_string()),
-                disabled: false,
-            },
-            KeyEntry {
-                key: "k2".to_string(),
-                label: Some("k2".to_string()),
-                disabled: false,
-            },
-        ],
-        server.url(),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        250, // timeout window, so the 700 ms body stalls past it
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        AppStateParams {
+            keys: vec![
+                KeyEntry {
+                    key: "k1".to_string(),
+                    label: Some("k1".to_string()),
+                    disabled: false,
+                },
+                KeyEntry {
+                    key: "k2".to_string(),
+                    label: Some("k2".to_string()),
+                    disabled: false,
+                },
+            ],
+            target: server.url(),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             max_upstream_in_flight: 8,
             max_in_flight_per_key: 2,
@@ -1116,6 +1126,94 @@ async fn test_body_timeout_retries_on_another_key_within_budget() {
     slow_body.assert();
 }
 
+/// The companion to the test above, and the reason the fix is not simply
+/// "map every mid-body error to a stall".
+///
+/// A genuine upstream I/O failure (the connection resets mid-body) must still
+/// be a 502 and must NOT be retried, because the request already consumed a
+/// key's quota and a broken connection is not a silent upstream. Without this
+/// arm, a fix that classified every mid-body error as a stall would pass the
+/// test above while making the proxy retry on hard connection failures.
+#[tokio::test]
+async fn test_upstream_io_failure_is_not_treated_as_a_stall() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    // A body that starts, then resets the connection mid-stream. The response
+    // is deliberately truncated so the client sees a broken read rather than a
+    // clean end of body.
+    let broken = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_chunked_body(|w| {
+            std::io::Write::write_all(w, br#"{"id":"test","#)?;
+            w.flush()?;
+            Err(std::io::Error::other("simulated mid-body connection reset"))
+        })
+        .expect_at_least(1)
+        .create();
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            }],
+            target: server.url(),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "broken-model",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::BAD_GATEWAY,
+        "a broken upstream connection is a 502, not a timeout, and must not be laundered into a retryable stall"
+    );
+
+    // The decisive arm: the request must NOT have been retried. A stall gets
+    // retried; a connection reset does not.
+    let snapshot = state.model_stats.snapshot();
+    let broken_model = snapshot.iter().find(|s| s.id == "broken-model").unwrap();
+    assert_eq!(
+        broken_model.total, 1,
+        "a mid-body I/O failure must not be retried; observed {} attempts",
+        broken_model.total
+    );
+
+    broken.assert();
+}
+
 /// Test with ModelRouter for model selection
 #[tokio::test]
 async fn test_proxy_with_router() {
@@ -1139,18 +1237,18 @@ async fn test_proxy_with_router() {
 
     let router = ModelRouter::new(vec!["test-model".to_string()], Strategy::RoundRobin);
 
-    let state = AppState::new(
-        key_entries,
-        server.url(),
-        Some(router),
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+    let state = AppState::new(AppStateParams {
+        keys: key_entries,
+        target: server.url(),
+        router: Some(router),
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let body = serde_json::json!({
         "model": "auto",
@@ -1214,18 +1312,18 @@ async fn test_models_endpoint_success() {
 async fn test_models_endpoint_returns_configured_racing_models_without_upstream() {
     use nimaproxy::proxy::http::models;
 
-    let state = AppState::new(
-        vec![],
-        "http://example.invalid".to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec!["model-a".to_string(), "model-b".to_string()],
-        2,
-        5000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+    let state = AppState::new(AppStateParams {
+        keys: vec![],
+        target: "http://example.invalid".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+        racing_max_parallel: 2,
+        racing_timeout_ms: 5000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let resp = models(axum::extract::State(state)).await.into_response();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
@@ -1248,18 +1346,18 @@ async fn test_models_endpoint_includes_router_models() {
         vec!["router-a".to_string(), "router-b".to_string()],
         Strategy::RoundRobin,
     );
-    let state = AppState::new(
-        vec![],
-        "http://example.invalid".to_string(),
-        Some(router),
-        ModelStatsStore::new(3000.0),
-        vec![],
-        2,
-        5000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+    let state = AppState::new(AppStateParams {
+        keys: vec![],
+        target: "http://example.invalid".to_string(),
+        router: Some(router),
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 2,
+        racing_timeout_ms: 5000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let resp = models(axum::extract::State(state)).await.into_response();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
@@ -1279,22 +1377,22 @@ async fn test_health_exposes_routing_and_racing_metadata() {
     use nimaproxy::proxy::http::health;
 
     let router = ModelRouter::new(vec!["router-a".to_string()], Strategy::RoundRobin);
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(AppStateParams {
+        keys: vec![KeyEntry {
             key: "test-key".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        "http://example.invalid".to_string(),
-        Some(router),
-        ModelStatsStore::new(3000.0),
-        vec!["race-a".to_string(), "race-b".to_string()],
-        2,
-        5000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: "http://example.invalid".to_string(),
+        router: Some(router),
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec!["race-a".to_string(), "race-b".to_string()],
+        racing_max_parallel: 2,
+        racing_timeout_ms: 5000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let resp = health(axum::extract::State(state)).await.into_response();
     let json = response_json(resp).await;
@@ -1355,18 +1453,18 @@ async fn test_stats_exposes_gateway_metrics_and_limits() {
 async fn test_models_endpoint_no_keys() {
     use nimaproxy::proxy::http::models;
 
-    let state = AppState::new(
-        vec![],
-        "http://example.com".to_string(),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+    let state = AppState::new(AppStateParams {
+        keys: vec![],
+        target: "http://example.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let resp = models(axum::extract::State(state)).await;
     let response = resp.into_response();
@@ -1442,8 +1540,8 @@ async fn test_auto_degraded_retry_reroutes_to_next_model() {
         vec!["model-a".to_string(), "model-b".to_string()],
         Strategy::RoundRobin,
     );
-    let state = AppState::new(
-        vec![
+    let state = AppState::new(AppStateParams {
+        keys: vec![
             KeyEntry {
                 key: "test-key-a".to_string(),
                 label: Some("key-a".to_string()),
@@ -1455,16 +1553,16 @@ async fn test_auto_degraded_retry_reroutes_to_next_model() {
                 disabled: false,
             },
         ],
-        server.url(),
-        Some(router),
-        ModelStatsStore::new(3000.0),
-        vec![],
-        2,
-        5000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: server.url(),
+        router: Some(router),
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 2,
+        racing_timeout_ms: 5000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
     let body = serde_json::json!({
         "model": "auto",
         "messages": [{"role": "user", "content": "test"}]
@@ -1552,22 +1650,22 @@ async fn test_key_pool_exhaustion() {
         .expect_at_least(1)
         .create();
 
-    let state = AppState::new(
-        vec![KeyEntry {
+    let state = AppState::new(AppStateParams {
+        keys: vec![KeyEntry {
             key: "test-key".to_string(),
             label: Some("test".to_string()),
             disabled: false,
         }],
-        server.url(),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: server.url(),
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let body = serde_json::json!({
         "model": "test-model",
@@ -1701,18 +1799,18 @@ fn make_racing_state_two_keys(api_url: String) -> Arc<AppState> {
             disabled: false,
         },
     ];
-    AppState::new(
-        key_entries,
-        api_url,
-        None,
-        ModelStatsStore::new(100.0),
-        vec!["model-a".to_string(), "model-b".to_string()],
-        2,
-        8000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    )
+    AppState::new(AppStateParams {
+        keys: key_entries,
+        target: api_url,
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+        racing_max_parallel: 2,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    })
 }
 
 #[tokio::test]
@@ -1962,16 +2060,18 @@ fn make_racing_state_two_keys_fast(api_url: String) -> Arc<AppState> {
         },
     ];
     AppState::new_with_controls(
-        key_entries,
-        api_url,
-        None,
-        ModelStatsStore::new(100.0),
-        vec!["model-a".to_string(), "model-b".to_string()],
-        2,
-        8000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        AppStateParams {
+            keys: key_entries,
+            target: api_url,
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_max_parallel: 2,
+            racing_timeout_ms: 8000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             racing_adaptive: false,
             racing_min_parallel: 2,
@@ -2360,20 +2460,22 @@ async fn test_slow_but_healthy_stream_is_not_a_timeout() {
         .create();
 
     let state = AppState::new_with_controls(
-        vec![KeyEntry {
-            key: "k1".to_string(),
-            label: Some("k1".to_string()),
-            disabled: false,
-        }],
-        server.url(),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        1,
-        250, // window SHORTER than the total generation time
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            }],
+            target: server.url(),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 1,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             max_upstream_in_flight: 8,
             max_in_flight_per_key: 2,
@@ -2466,20 +2568,22 @@ async fn test_stalled_stream_still_times_out() {
     });
 
     let state = AppState::new_with_controls(
-        vec![KeyEntry {
-            key: "k1".to_string(),
-            label: Some("k1".to_string()),
-            disabled: false,
-        }],
-        format!("http://{}", addr),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        1,
-        250, // window
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 1,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+        },
         RuntimeControls {
             max_upstream_in_flight: 8,
             max_in_flight_per_key: 2,

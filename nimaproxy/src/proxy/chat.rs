@@ -1,6 +1,7 @@
 use crate::proxy::admission::acquire_gateway_permits;
 use crate::proxy::chat_helpers::{accept_header_for_body, non_streaming_usage};
 use crate::proxy::http::log_turn_request;
+use crate::turn_log::TurnRecord;
 use crate::proxy::messages::{
     mistral_validation_error, normalize_requested_model, resolve_model, validate_model_exists,
 };
@@ -139,39 +140,43 @@ pub async fn chat_completions(
                 );
                 if may_retry {
                     state.pool.note_upstream_stall(idx);
-                    log_turn_request(
-                        &original_model,
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: original_model.to_string(),
+                        responding_model: model_id.to_string(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        false,
-                        Some(format!(
+                        key_label: key_label.as_deref().map(str::to_string),
+                        is_racing: false,
+                        error: Some(format!(
                             "upstream timeout after {}ms; retrying on another key",
                             request_timeout_ms
                         )),
-                        (None, None),
-                    );
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     continue;
                 }
-                log_turn_request(
-                    &original_model,
-                    &model_id,
-                    request_timeout_ms as u128,
-                    false,
-                    StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                    message_count,
+                log_turn_request(TurnRecord {
+                    requested_model: original_model.to_string(),
+                    responding_model: model_id.to_string(),
+                    latency_ms: request_timeout_ms as u128 as u64,
+                    success: false,
+                    status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                    request_message_count: message_count,
+                    response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
-                    key_label.as_deref(),
-                    false,
-                    Some(format!("upstream timeout after {}ms", request_timeout_ms)),
-                    (None, None),
-                );
+                    key_label: key_label.as_deref().map(str::to_string),
+                    is_racing: false,
+                    error: Some(format!("upstream timeout after {}ms", request_timeout_ms)),
+                    request_tokens: None,
+                    response_tokens: None,
+                });
                 return (
                     StatusCode::GATEWAY_TIMEOUT,
                     format!("upstream timeout after {}ms", request_timeout_ms),
@@ -191,20 +196,22 @@ pub async fn chat_completions(
                         .model_stats
                         .record(&model_id, t0.elapsed().as_millis() as f64, false);
                 }
-                log_turn_request(
-                    &original_model,
-                    &model_id,
-                    t0.elapsed().as_millis(),
-                    false,
-                    StatusCode::BAD_GATEWAY.as_u16(),
-                    message_count,
+                log_turn_request(TurnRecord {
+                    requested_model: original_model.to_string(),
+                    responding_model: model_id.to_string(),
+                    latency_ms: t0.elapsed().as_millis() as u64,
+                    success: false,
+                    status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                    request_message_count: message_count,
+                    response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
-                    key_label.as_deref(),
-                    false,
-                    Some(e.to_string()),
-                    (None, None),
-                );
+                    key_label: key_label.as_deref().map(str::to_string),
+                    is_racing: false,
+                    error: Some(e.to_string()),
+                    request_tokens: None,
+                    response_tokens: None,
+                });
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
             Ok(Ok(resp)) => {
@@ -257,23 +264,25 @@ pub async fn chat_completions(
                     // A quarantined key IS a turn outcome: without this record the
                     // auth-failure path was the only failure mode with no line in
                     // turns.jsonl, so "check the logs" could not see it at all.
-                    log_turn_request(
-                        &original_model,
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        status.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: original_model.to_string(),
+                        responding_model: model_id.to_string(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: status.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        false,
-                        Some(format!(
+                        key_label: key_label.as_deref().map(str::to_string),
+                        is_racing: false,
+                        error: Some(format!(
                             "upstream auth failure ({}); key quarantined",
                             status.as_u16()
                         )),
-                        (None, None),
-                    );
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     continue;
                 }
                 // Non-2xx bodies must be inspected BEFORE the response is
@@ -321,20 +330,22 @@ pub async fn chat_completions(
                     {
                         eprintln!("[nimaproxy] INVALID-ASSISTANT: model '{}' rejected message structure (400): {} — retrying with next key", model_id, &body_str[..body_str.len().min(200)]);
                         state.model_stats.record_hard_error(&model_id, body_str);
-                        log_turn_request(
-                            &original_model,
-                            &model_id,
-                            t0.elapsed().as_millis(),
-                            false,
-                            status.as_u16(),
-                            message_count,
+                        log_turn_request(TurnRecord {
+                            requested_model: original_model.to_string(),
+                            responding_model: model_id.to_string(),
+                            latency_ms: t0.elapsed().as_millis() as u64,
+                            success: false,
+                            status_code: status.as_u16(),
+                            request_message_count: message_count,
+                            response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
-                            key_label.as_deref(),
-                            false,
-                            Some(error_excerpt),
-                            (None, None),
-                        );
+                            key_label: key_label.as_deref().map(str::to_string),
+                            is_racing: false,
+                            error: Some(error_excerpt),
+                            request_tokens: None,
+                            response_tokens: None,
+                        });
                         continue;
                     }
                     // An unrecognised 400 is forwarded verbatim so the caller
@@ -423,42 +434,46 @@ pub async fn chat_completions(
                         retry_policy.budget(),
                     );
                     if may_retry {
-                        log_turn_request(
-                            &original_model,
-                            &model_id,
-                            t0.elapsed().as_millis(),
-                            false,
-                            StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                            message_count,
+                        log_turn_request(TurnRecord {
+                            requested_model: original_model.to_string(),
+                            responding_model: model_id.to_string(),
+                            latency_ms: t0.elapsed().as_millis() as u64,
+                            success: false,
+                            status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                            request_message_count: message_count,
+                            response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
-                            key_label.as_deref(),
-                            false,
-                            Some(format!(
+                            key_label: key_label.as_deref().map(str::to_string),
+                            is_racing: false,
+                            error: Some(format!(
                                 "upstream sent no bytes within {}ms; retrying on another key",
                                 request_timeout_ms
                             )),
-                            (None, None),
-                        );
+                            request_tokens: None,
+                            response_tokens: None,
+                        });
                         continue;
                     }
-                    log_turn_request(
-                        &original_model,
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                        message_count,
+                    log_turn_request(TurnRecord {
+                        requested_model: original_model.to_string(),
+                        responding_model: model_id.to_string(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        request_message_count: message_count,
+                        response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
-                        key_label.as_deref(),
-                        false,
-                        Some(format!(
+                        key_label: key_label.as_deref().map(str::to_string),
+                        is_racing: false,
+                        error: Some(format!(
                             "upstream sent no bytes within {}ms",
                             request_timeout_ms
                         )),
-                        (None, None),
-                    );
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     return (
                         StatusCode::GATEWAY_TIMEOUT,
                         format!("upstream sent no bytes within {}ms", request_timeout_ms),
@@ -466,12 +481,18 @@ pub async fn chat_completions(
                         .into_response();
                 };
 
-                // Headers and the first chunk are already in hand, so commit
-                // to this key: the response is now on the wire and cannot be
-                // retried. The state machine asserts the invariant that only
-                // Admitted/InFlight may commit — a retry from here would
-                // double-send the response body (S3).
-                request_state = request_state.on_first_byte();
+                // Headers and the first chunk are already in hand. Which state
+                // that puts the request in depends on the response mode, because
+                // only a stream actually hands those bytes to the client: a
+                // non-streaming response is assembled below and the caller sees
+                // nothing until it is complete, so a later failure there is
+                // still retryable. The state machine asserts the invariant that
+                // only Admitted/InFlight/Assembling may receive a first byte.
+                request_state = request_state.on_first_byte(if is_stream {
+                    crate::proxy::request_state::ResponseMode::Streaming
+                } else {
+                    crate::proxy::request_state::ResponseMode::Buffered
+                });
                 let ttfc_ms = t0.elapsed().as_millis() as f64;
                 if ok {
                     state.pool.record_success(idx);
@@ -530,15 +551,37 @@ pub async fn chat_completions(
                 let body = if is_stream {
                     Body::from_stream(tapped)
                 } else {
-                    // Assemble the body. A timeout here means the upstream went
-                    // quiet mid-body, which is retryable because the caller has
-                    // received nothing yet.
+                    // Assemble the body. A stall here is retryable for this
+                    // branch and only this branch: nothing has been written to
+                    // the caller, so a retry cannot double-send. The streaming
+                    // branch above is Committed once its first byte is seen, so
+                    // its mid-stream stalls stay terminal.
+                    //
+                    // Either way the failure must be classified as a stall
+                    // rather than an I/O error, because that is what produces
+                    // the 504 and the stall metrics the retry and the circuit
+                    // breaker read. Reading a stall as a plain upstream error
+                    // is what used to return a 502 here and silently drop both.
                     let mut collected = Vec::new();
                     let mut stalled = false;
                     futures::pin_mut!(tapped);
                     loop {
                         match timeout(window, tapped.next()).await {
                             Ok(Some(Ok(chunk))) => collected.push(chunk),
+                            // The idle guard reports a stall as an error on the
+                            // stream, so a silent upstream arrives here and not
+                            // on the `Err(_)` arm below. Classify it by its typed
+                            // payload rather than by the message: a stall is
+                            // retryable (nothing has reached the client yet),
+                            // while a genuine upstream I/O failure is not.
+                            // Reading both as a 502 is what silently disabled
+                            // the mid-body retry and the 504.
+                            Ok(Some(Err(e)))
+                                if crate::proxy::streaming::is_stall(&e) =>
+                            {
+                                stalled = true;
+                                break;
+                            }
                             Ok(Some(Err(e))) => {
                                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
                             }
@@ -568,42 +611,46 @@ pub async fn chat_completions(
                             retry_policy.budget(),
                         );
                         if may_retry {
-                            log_turn_request(
-                                &original_model,
-                                &model_id,
-                                t0.elapsed().as_millis(),
-                                false,
-                                StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                                message_count,
+                            log_turn_request(TurnRecord {
+                                requested_model: original_model.to_string(),
+                                responding_model: model_id.to_string(),
+                                latency_ms: t0.elapsed().as_millis() as u64,
+                                success: false,
+                                status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                                request_message_count: message_count,
+                                response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
-                                key_label.as_deref(),
-                                false,
-                                Some(format!(
+                                key_label: key_label.as_deref().map(str::to_string),
+                                is_racing: false,
+                                error: Some(format!(
                                     "upstream body stalled after {}ms; retrying on another key",
                                     request_timeout_ms
                                 )),
-                                (None, None),
-                            );
+                                request_tokens: None,
+                                response_tokens: None,
+                            });
                             continue;
                         }
-                        log_turn_request(
-                            &original_model,
-                            &model_id,
-                            t0.elapsed().as_millis(),
-                            false,
-                            StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                            message_count,
+                        log_turn_request(TurnRecord {
+                            requested_model: original_model.to_string(),
+                            responding_model: model_id.to_string(),
+                            latency_ms: t0.elapsed().as_millis() as u64,
+                            success: false,
+                            status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                            request_message_count: message_count,
+                            response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
-                            key_label.as_deref(),
-                            false,
-                            Some(format!(
+                            key_label: key_label.as_deref().map(str::to_string),
+                            is_racing: false,
+                            error: Some(format!(
                                 "upstream body stalled after {}ms",
                                 request_timeout_ms
                             )),
-                            (None, None),
-                        );
+                            request_tokens: None,
+                            response_tokens: None,
+                        });
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
                             format!("upstream body stalled after {}ms", request_timeout_ms),
@@ -653,20 +700,22 @@ pub async fn chat_completions(
                 // Reading it first returns the previous request's id (or
                 // `None` on a fresh logger), which would silently join this
                 // turn's completion record to the wrong turn — or to nothing.
-                log_turn_request(
-                    &original_model,
-                    &model_id,
-                    ttfc_ms as u128,
-                    ok,
-                    status.as_u16(),
-                    message_count,
+                log_turn_request(TurnRecord {
+                    requested_model: original_model.to_string(),
+                    responding_model: model_id.to_string(),
+                    latency_ms: ttfc_ms as u128 as u64,
+                    success: ok,
+                    status_code: status.as_u16(),
+                    request_message_count: message_count,
+                    response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
-                    key_label.as_deref(),
-                    false,
-                    None,
-                    usage_tokens,
-                );
+                    key_label: key_label.as_deref().map(str::to_string),
+                    is_racing: false,
+                    error: None,
+                    request_tokens: usage_tokens.0,
+                    response_tokens: usage_tokens.1,
+                });
                 let request_id =
                     crate::turn_log::with_logger(|logger| logger.last_request_id()).flatten();
                 let tap_for_completion = tap.clone();

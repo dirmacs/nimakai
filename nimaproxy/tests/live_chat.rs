@@ -29,18 +29,18 @@ fn make_live_state() -> Option<Arc<AppState>> {
         disabled: false,
     }];
 
-    Some(AppState::new(
-        key_entries,
-        NVIDIA_API_BASE.to_string(),
-        None,
-        ModelStatsStore::new(3000.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        std::collections::HashMap::new(),
-        ModelCompat::default(),
-    ))
+    Some(AppState::new(nimaproxy::AppStateParams {
+        keys: key_entries,
+        target: NVIDIA_API_BASE.to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: std::collections::HashMap::new(),
+        model_compat: ModelCompat::default(),
+    }))
 }
 
 /// Helper to check if test should be skipped

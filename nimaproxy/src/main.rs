@@ -1,7 +1,8 @@
 use axum::{http::StatusCode, response::IntoResponse, routing::get, routing::post, Router};
 use nimaproxy::turn_log;
 use nimaproxy::{
-    config, model_refresh, AppState, ModelRouter, ModelStatsStore, RuntimeControls, Strategy,
+    config, model_refresh, AppState, AppStateParams, ModelRouter, ModelStatsStore, RuntimeControls,
+    Strategy,
 };
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -258,16 +259,18 @@ async fn main() {
         model_compat.supports_developer_role, model_compat.supports_tool_messages);
 
     let state = AppState::new_with_controls(
-        keys,
-        target.clone(),
-        router,
-        model_stats,
-        racing_models,
-        racing_max_parallel,
-        racing_timeout_ms,
-        racing_strategy,
-        model_params,
-        model_compat,
+        AppStateParams {
+            keys,
+            target: target.clone(),
+            router,
+            model_stats,
+            racing_models,
+            racing_max_parallel,
+            racing_timeout_ms,
+            racing_strategy,
+            model_params,
+            model_compat,
+        },
         runtime_controls,
     );
 

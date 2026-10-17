@@ -308,21 +308,32 @@ impl Drop for UpstreamPermit {
     }
 }
 
+/// Parameters for constructing an [`AppState`].
+///
+/// Groups the shared constructor arguments so that [`AppState::new`] and
+/// [`AppState::new_with_controls`] share one parameter shape instead of a long
+/// positional argument list. The `RuntimeControls` are intentionally kept out of
+/// this struct: `new_with_controls` already accepts them separately and callers
+/// that need custom controls pass them alongside the shared params.
+pub struct AppStateParams {
+    pub keys: Vec<KeyEntry>,
+    pub target: String,
+    pub router: Option<ModelRouter>,
+    pub model_stats: ModelStatsStore,
+    pub racing_models: Vec<String>,
+    pub racing_max_parallel: usize,
+    pub racing_timeout_ms: u64,
+    pub racing_strategy: String,
+    pub model_params: HashMap<String, ModelParams>,
+    pub model_compat: config::ModelCompat,
+}
 impl AppState {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        keys: Vec<KeyEntry>,
-        target: String,
-        router: Option<ModelRouter>,
-        model_stats: ModelStatsStore,
-        racing_models: Vec<String>,
-        racing_max_parallel: usize,
-        racing_timeout_ms: u64,
-        racing_strategy: String,
-        model_params: HashMap<String, ModelParams>,
-        model_compat: config::ModelCompat,
-    ) -> Arc<Self> {
-        Self::new_with_controls(
+    pub fn new(params: AppStateParams) -> Arc<Self> {
+        Self::new_with_controls(params, RuntimeControls::default())
+    }
+
+    pub fn new_with_controls(params: AppStateParams, controls: RuntimeControls) -> Arc<Self> {
+        let AppStateParams {
             keys,
             target,
             router,
@@ -333,24 +344,8 @@ impl AppState {
             racing_strategy,
             model_params,
             model_compat,
-            RuntimeControls::default(),
-        )
-    }
+        } = params;
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_controls(
-        keys: Vec<KeyEntry>,
-        target: String,
-        router: Option<ModelRouter>,
-        model_stats: ModelStatsStore,
-        racing_models: Vec<String>,
-        racing_max_parallel: usize,
-        racing_timeout_ms: u64,
-        racing_strategy: String,
-        model_params: HashMap<String, ModelParams>,
-        model_compat: config::ModelCompat,
-        controls: RuntimeControls,
-    ) -> Arc<Self> {
         let client = Client::builder()
             .use_rustls_tls()
             .timeout(std::time::Duration::from_secs(120))
@@ -1039,18 +1034,18 @@ label = "test"
         let model_params = HashMap::new();
         let model_compat = config::ModelCompat::default();
 
-        let state = AppState::new(
+        let state = AppState::new(AppStateParams {
             keys,
-            "http://localhost:8080".to_string(),
-            None,
-            ModelStatsStore::new(100.0),
-            vec!["nvidia/nemotron-3b".to_string()],
-            3,
-            5000,
-            "round_robin".to_string(),
+            target: "http://localhost:8080".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec!["nvidia/nemotron-3b".to_string()],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 5000,
+            racing_strategy: "round_robin".to_string(),
             model_params,
             model_compat,
-        );
+        });
 
         assert_eq!(state.racing_models.len(), 1);
         assert_eq!(state.racing_max_parallel, 3);

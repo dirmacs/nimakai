@@ -1,6 +1,7 @@
 use crate::proxy::admission::acquire_gateway_permits;
 use crate::proxy::chat::MAX_RETRIES;
 use crate::proxy::messages::extract_response_metrics;
+use crate::turn_log::TurnRecord;
 use crate::AppState;
 use axum::{
     body::Body,
@@ -327,23 +328,25 @@ pub async fn completions(
                             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                     );
                     last_auth_failure_response = Some(auth_response);
-                    log_turn_request(
-                        &model_id,
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        status.as_u16(),
-                        1,
-                        false,
-                        0,
-                        key_label.as_deref(),
-                        false,
-                        Some(format!(
+                    log_turn_request(TurnRecord {
+                        requested_model: model_id.clone(),
+                        responding_model: model_id.clone(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: status.as_u16(),
+                        request_message_count: 1,
+                        response_message_count: 1,
+                        has_tool_calls: false,
+                        tool_call_count: 0,
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: false,
+                        error: Some(format!(
                             "upstream auth failure ({}); key quarantined",
                             status.as_u16()
                         )),
-                        (None, None),
-                    );
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     continue;
                 }
                 if ok {
@@ -506,23 +509,25 @@ pub async fn embeddings(
                             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
                     );
                     last_auth_failure_response = Some(auth_response);
-                    log_turn_request(
-                        &model_id,
-                        &model_id,
-                        t0.elapsed().as_millis(),
-                        false,
-                        status.as_u16(),
-                        1,
-                        false,
-                        0,
-                        key_label.as_deref(),
-                        false,
-                        Some(format!(
+                    log_turn_request(TurnRecord {
+                        requested_model: model_id.clone(),
+                        responding_model: model_id.clone(),
+                        latency_ms: t0.elapsed().as_millis() as u64,
+                        success: false,
+                        status_code: status.as_u16(),
+                        request_message_count: 1,
+                        response_message_count: 1,
+                        has_tool_calls: false,
+                        tool_call_count: 0,
+                        key_label: key_label.as_deref().map(|s| s.to_string()),
+                        is_racing: false,
+                        error: Some(format!(
                             "upstream auth failure ({}); key quarantined",
                             status.as_u16()
                         )),
-                        (None, None),
-                    );
+                        request_tokens: None,
+                        response_tokens: None,
+                    });
                     continue;
                 }
                 if ok {
@@ -582,42 +587,9 @@ pub async fn embeddings(
         .into_response()
 }
 /// Log a completed turn
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn log_turn_request(
-    requested_model: &str,
-    responding_model: &str,
-    latency_ms: u128,
-    success: bool,
-    status_code: u16,
-    message_count: usize,
-    has_tool_calls: bool,
-    tool_call_count: usize,
-    key_label: Option<&str>,
-    is_racing: bool,
-    error: Option<String>,
-    // (prompt_tokens, completion_tokens) as the upstream reported them. Each
-    // half is independent: an upstream that reports only prompt tokens must
-    // not have its completion count recorded as 0.
-    usage: (Option<u32>, Option<u32>),
-) {
+pub(crate) fn log_turn_request(record: TurnRecord) {
     use crate::turn_log::{log_turn as log_turn_event, TurnLog};
-    let mut turn = TurnLog::new(
-        requested_model.to_string(),
-        responding_model.to_string(),
-        latency_ms as u64,
-        success,
-        status_code,
-        message_count,
-        1, // response_message_count
-        has_tool_calls,
-        tool_call_count,
-        key_label.map(String::from),
-        is_racing,
-    );
-    turn.error = error;
-    turn.request_tokens = usage.0;
-    turn.response_tokens = usage.1;
-    log_turn_event(&turn);
+    log_turn_event(&TurnLog::new(record));
 }
 
 /// Identity of the turn a completion record belongs to.
@@ -673,21 +645,24 @@ pub struct StreamCompletion {
 /// one turn can be read together.
 pub(crate) fn log_turn_completion(turn: &TurnContext, completion: &StreamCompletion) {
     use crate::turn_log::{classify, log_turn as log_turn_event, TurnLog};
-    let mut record = TurnLog::new(
-        turn.requested_model.clone(),
-        turn.responding_model.clone(),
-        completion.duration_ms as u64,
+    let mut record = TurnLog::new(TurnRecord {
+        requested_model: turn.requested_model.clone(),
+        responding_model: turn.responding_model.clone(),
+        latency_ms: completion.duration_ms as u64,
         // A truncated stream is not a success: the client was promised a
         // completion and did not get one.
-        completion.stream_ended_cleanly,
-        200,
-        turn.message_count,
-        1, // response_message_count
-        turn.has_tool_calls,
-        turn.tool_call_count,
-        turn.key_label.clone(),
-        turn.is_racing,
-    );
+        success: completion.stream_ended_cleanly,
+        status_code: 200,
+        request_message_count: turn.message_count,
+        response_message_count: 1,
+        has_tool_calls: turn.has_tool_calls,
+        tool_call_count: turn.tool_call_count,
+        key_label: turn.key_label.clone(),
+        is_racing: turn.is_racing,
+        error: completion.abort_reason.clone(),
+        request_tokens: completion.prompt_tokens,
+        response_tokens: completion.completion_tokens,
+    });
     record.record_kind = TurnLog::RECORD_KIND_COMPLETION.to_string();
     record.request_id = completion.request_id.clone();
     record.finish_reason = completion.finish_reason.clone();

@@ -150,9 +150,32 @@ fn default_record_kind() -> String {
     "ttfb".to_string()
 }
 
+/// Structural input for building a `TurnLog` record: the fields the proxy
+/// path already knows at first-byte time, passed as named fields instead of
+/// an 11-positional-argument list.
+///
+/// `TurnLog::new` and `log_turn_request` both take this, so the shape is
+/// fixed once and every call site reads the same way.
+#[derive(Debug, Clone)]
+pub struct TurnRecord {
+    pub requested_model: String,
+    pub responding_model: String,
+    pub latency_ms: u64,
+    pub success: bool,
+    pub status_code: u16,
+    pub request_message_count: usize,
+    pub response_message_count: usize,
+    pub has_tool_calls: bool,
+    pub tool_call_count: usize,
+    pub key_label: Option<String>,
+    pub is_racing: bool,
+    pub error: Option<String>,
+    pub request_tokens: Option<u32>,
+    pub response_tokens: Option<u32>,
+}
+
 impl TurnLog {
     /// Which phase of a request a record describes.
-    ///
     /// A streamed turn now produces two records: `ttfb` when the first byte
     /// arrives (what the proxy knew at that instant) and `completion` when the
     /// stream ends (what the stream actually turned out to be). They share a
@@ -161,20 +184,7 @@ impl TurnLog {
     pub const RECORD_KIND_TTFB: &'static str = "ttfb";
     pub const RECORD_KIND_COMPLETION: &'static str = "completion";
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        requested_model: String,
-        responding_model: String,
-        latency_ms: u64,
-        success: bool,
-        status_code: u16,
-        request_message_count: usize,
-        response_message_count: usize,
-        has_tool_calls: bool,
-        tool_call_count: usize,
-        key_label: Option<String>,
-        is_racing: bool,
-    ) -> Self {
+    pub fn new(record: TurnRecord) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         // A stable identifier for this request, so the turn log can be
         // replayed and a request followed across a retry. Before this the
@@ -193,20 +203,20 @@ impl TurnLog {
         Self {
             timestamp: Utc::now(),
             request_id,
-            requested_model,
-            responding_model,
-            latency_ms,
-            success,
-            status_code,
-            request_message_count,
-            response_message_count,
-            request_tokens: None,
-            response_tokens: None,
-            has_tool_calls,
-            tool_call_count,
-            error: None,
-            key_label,
-            is_racing,
+            requested_model: record.requested_model,
+            responding_model: record.responding_model,
+            latency_ms: record.latency_ms,
+            success: record.success,
+            status_code: record.status_code,
+            request_message_count: record.request_message_count,
+            response_message_count: record.response_message_count,
+            request_tokens: record.request_tokens,
+            response_tokens: record.response_tokens,
+            has_tool_calls: record.has_tool_calls,
+            tool_call_count: record.tool_call_count,
+            error: record.error,
+            key_label: record.key_label,
+            is_racing: record.is_racing,
             racing_models_count: None,
             racing_winner: None,
             request_messages: Vec::new(),
@@ -507,19 +517,22 @@ mod tests {
     use super::*;
     #[test]
     fn test_turn_log_creation() {
-        let turn = TurnLog::new(
-            "auto".to_string(),
-            "mistralai/mistral-medium-3.5-128b".to_string(),
-            742,
-            true,
-            200,
-            5,
-            1,
-            false,
-            0,
-            Some("test".to_string()),
-            true,
-        );
+        let turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "mistralai/mistral-medium-3.5-128b".to_string(),
+            latency_ms: 742,
+            success: true,
+            status_code: 200,
+            request_message_count: 5,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: Some("test".to_string()),
+            is_racing: true,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
 
         assert_eq!(turn.requested_model, "auto");
         assert_eq!(turn.responding_model, "mistralai/mistral-medium-3.5-128b");
@@ -533,32 +546,38 @@ mod tests {
     /// change the field was always None.
     #[test]
     fn test_request_id_is_populated_and_unique() {
-        let a = TurnLog::new(
-            "auto".to_string(),
-            "m".to_string(),
-            1,
-            true,
-            200,
-            1,
-            1,
-            false,
-            0,
-            None,
-            false,
-        );
-        let b = TurnLog::new(
-            "auto".to_string(),
-            "m".to_string(),
-            1,
-            true,
-            200,
-            1,
-            1,
-            false,
-            0,
-            None,
-            false,
-        );
+        let a = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "m".to_string(),
+            latency_ms: 1,
+            success: true,
+            status_code: 200,
+            request_message_count: 1,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
+        let b = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "m".to_string(),
+            latency_ms: 1,
+            success: true,
+            status_code: 200,
+            request_message_count: 1,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
         assert!(a.request_id.is_some(), "request_id must be populated");
         assert!(b.request_id.is_some(), "request_id must be populated");
         assert_ne!(
@@ -569,19 +588,22 @@ mod tests {
 
     #[test]
     fn test_turn_log_with_messages() {
-        let mut turn = TurnLog::new(
-            "auto".to_string(),
-            "qwen/qwen3.5".to_string(),
-            891,
-            true,
-            200,
-            3,
-            1,
-            true,
-            2,
-            None,
-            false,
-        );
+        let mut turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "qwen/qwen3.5".to_string(),
+            latency_ms: 891,
+            success: true,
+            status_code: 200,
+            request_message_count: 3,
+            response_message_count: 1,
+            has_tool_calls: true,
+            tool_call_count: 2,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
 
         turn.request_messages = vec![
             MessageLog {
@@ -618,19 +640,22 @@ mod tests {
 
     #[test]
     fn test_turn_log_serialization() {
-        let turn = TurnLog::new(
-            "auto".to_string(),
-            "test-model".to_string(),
-            100,
-            true,
-            200,
-            2,
-            1,
-            false,
-            0,
-            Some("key1".to_string()),
-            false,
-        );
+        let turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "test-model".to_string(),
+            latency_ms: 100,
+            success: true,
+            status_code: 200,
+            request_message_count: 2,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: Some("key1".to_string()),
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        });
 
         let json = serde_json::to_string(&turn).unwrap();
         assert!(json.contains("test-model"));
@@ -645,19 +670,22 @@ mod tests {
     /// writes a complete JSON line, a disabled logger writes nothing at all,
     /// and a logger whose writer was rotated away reopens and continues.
     fn sample_turn() -> TurnLog {
-        TurnLog::new(
-            "auto".to_string(),
-            "test/model".to_string(),
-            1234,
-            true,
-            200,
-            3,
-            1,
-            false,
-            0,
-            Some("key-a".to_string()),
-            false,
-        )
+        TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "test/model".to_string(),
+            latency_ms: 1234,
+            success: true,
+            status_code: 200,
+            request_message_count: 3,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: Some("key-a".to_string()),
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+        })
     }
 
     #[test]

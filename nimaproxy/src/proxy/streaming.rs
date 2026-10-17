@@ -17,7 +17,53 @@
 use axum::body::Body;
 use bytes::Bytes;
 use futures::StreamExt;
+use std::error::Error;
+use std::fmt;
 use std::time::Duration;
+
+/// The payload carried by an idle-guard stall error.
+///
+/// A stall and an upstream I/O failure are different events and callers must
+/// be able to tell them apart without pattern-matching on a message string:
+/// a stall is a *silent* upstream and is retryable (nothing has reached the
+/// client yet), while an I/O error usually means the connection broke and is
+/// not. Conveying that only through [`std::io::ErrorKind::TimedOut`] left every
+/// caller guessing — and at least one caller read a stall as a 502 instead of
+/// a 504.
+///
+/// This type is attached as the `io::Error` payload, so the signal is
+/// discoverable by downcast (see [`is_stall`]) rather than by sniffing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamStalled {
+    /// The inter-chunk window that elapsed with no bytes.
+    pub window: Duration,
+}
+
+impl fmt::Display for StreamStalled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "upstream stalled mid-stream")
+    }
+}
+
+impl Error for StreamStalled {}
+
+/// Build the `io::Error` the idle guard yields when the window elapses.
+///
+/// The kind stays [`std::io::ErrorKind::TimedOut`] so axum still aborts the
+/// response, and existing consumers that key on the kind keep working; the
+/// typed payload is what makes the stall *identifiable*.
+pub fn stalled_error(window: Duration) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, StreamStalled { window })
+}
+
+/// Report whether `e` is an idle-guard stall rather than an upstream failure.
+///
+/// Prefer this over matching `ErrorKind::TimedOut`: the kind is necessary but
+/// not sufficient, because an upstream may legitimately time out on its own.
+/// Only a [`StreamStalled`] payload proves the *guard* fired.
+pub fn is_stall(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|payload| payload.is::<StreamStalled>())
+}
 
 /// Wrap a response body stream so a gap longer than `window` between chunks
 /// fails the stream instead of hanging the connection.
@@ -52,10 +98,7 @@ where
                 Ok(None) => break,
                 // No chunk within the window: the upstream stalled mid-stream.
                 Err(_) => {
-                    yield Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "upstream stalled mid-stream",
-                    ));
+                    yield Err(stalled_error(window));
                     break;
                 }
             }
@@ -108,10 +151,7 @@ pub async fn assemble_with_idle_bound(
             Ok(Some(Err(e))) => return Err(e),
             Ok(None) => return Ok(collected.concat()),
             Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "upstream stalled mid-stream",
-                ));
+                return Err(stalled_error(window));
             }
         }
     }
@@ -177,9 +217,50 @@ mod tests {
             result.is_err(),
             "a stalled upstream must be an error, not a hang"
         );
+        let err = result.unwrap_err();
         assert!(
-            matches!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut),
-            "the failure must be a timeout, which is what the caller maps to a 504"
+            matches!(err.kind(), std::io::ErrorKind::TimedOut),
+            "the kind must stay TimedOut so axum still aborts the response"
+        );
+        assert!(
+            is_stall(&err),
+            "and it must carry the typed payload, which is what distinguishes a silent upstream from a broken connection"
+        );
+    }
+
+    /// The payload must survive the guard's `io::Error` round trip, because
+    /// that is the only way a caller can tell a stall from an I/O error without
+    /// sniffing the message string.
+    #[test]
+    fn test_stall_payload_is_discoverable_and_exclusive() {
+        let stall = stalled_error(Duration::from_millis(250));
+        assert!(
+            is_stall(&stall),
+            "a guard stall must be identifiable as a stall"
+        );
+        assert_eq!(
+            stall
+                .get_ref()
+                .and_then(|p| p.downcast_ref::<StreamStalled>())
+                .map(|s| s.window),
+            Some(Duration::from_millis(250)),
+            "the payload must carry the window that elapsed"
+        );
+
+        // The negative arm: an ordinary upstream I/O error is NOT a stall. If
+        // this arm were missing, the test above would pass by always matching.
+        let upstream_broke = std::io::Error::other("connection reset by peer");
+        assert!(
+            !is_stall(&upstream_broke),
+            "an upstream I/O error must not be classified as a stall"
+        );
+        let upstream_timed_out = std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "upstream timed out on its own",
+        );
+        assert!(
+            !is_stall(&upstream_timed_out),
+            "an upstream-sourced timeout shares the kind but is not a guard stall; only the payload proves it"
         );
     }
 

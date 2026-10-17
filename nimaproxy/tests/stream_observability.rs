@@ -50,18 +50,18 @@ fn make_state(api_url: String) -> Arc<AppState> {
         label: Some("test".to_string()),
         disabled: false,
     }];
-    AppState::new(
+    AppState::new(nimaproxy::AppStateParams {
         keys,
-        api_url,
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        20000,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    )
+        target: api_url,
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    })
 }
 
 /// A turn-log file the proxy can be pointed at.
@@ -537,18 +537,18 @@ async fn stalled_stream_still_produces_a_completion_record() {
         disabled: false,
     }];
     // A short inter-chunk window so the guard fires inside the test.
-    let state = AppState::new(
+    let state = AppState::new(nimaproxy::AppStateParams {
         keys,
-        server.url(),
-        None,
-        ModelStatsStore::new(100.0),
-        vec![],
-        3,
-        150,
-        "complete".to_string(),
-        HashMap::new(),
-        ModelCompat::default(),
-    );
+        target: server.url(),
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 150,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+    });
 
     let (response, request_id) = log.turn_response(state, turn_body()).await;
     assert_eq!(response.status(), 200);

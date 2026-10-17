@@ -55,12 +55,19 @@ pub(crate) fn try_acquire_gateway_permits(
         }
     }
 }
+/// The `Response` error variant is large, but boxing it would ripple across
+/// 4+ call sites on the hot retry path (chat.rs, fallback.rs, http.rs) with no
+/// correctness benefit. Every caller pattern-matches on the `Response`
+/// directly, so keeping the variant unboxed preserves the call-site shape and
+/// avoids churn on a hot path.
+///
+/// Boxing is not merely undesirable here, it does not work: axum 0.8 (via
+/// axum-core 0.5) implements `IntoResponse` for `Box<str>` and `Box<[u8]>`
+/// but NOT for `Box<Response>`, so a boxed variant would fail to compile at
+/// each call site that returns it. The call signature below is already the
+/// axum handler shape, which is why the `Err` arm returns a `Response` that
+/// the surrounding handlers forward verbatim.
 #[allow(clippy::result_large_err)]
-/// The `Response` error variant is large (heap-allocated body + headers), but
-/// boxing it would ripple across 4+ call sites on the hot retry path
-/// (chat.rs, fallback.rs, http.rs) with no correctness benefit. Every caller
-/// pattern-matches on the `Response` directly, so keeping the variant unboxed
-/// preserves the call-site shape and avoids churn on a hot path.
 pub(crate) async fn acquire_gateway_permits(
     state: &AppState,
 ) -> Result<(UpstreamPermit, KeyLease), Response> {
