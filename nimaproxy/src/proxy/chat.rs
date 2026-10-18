@@ -1,3 +1,4 @@
+use crate::loop_tracker::SESSION_HEADER;
 use crate::proxy::admission::acquire_gateway_permits;
 use crate::proxy::chat_helpers::{accept_header_for_body, non_streaming_usage};
 use crate::proxy::http::log_turn_request;
@@ -6,8 +7,11 @@ use crate::proxy::messages::{
 };
 use crate::proxy::racing::race_models;
 use crate::proxy::retry::RetryPolicy;
-use crate::proxy::timeouts::{record_model_timeout, request_turn_summary, timeout_for_model};
-use crate::turn_log::TurnRecord;
+use crate::proxy::timeouts::{
+    conversation_identity, record_model_timeout, request_turn_summary, sanitize_session,
+    timeout_for_model,
+};
+use crate::turn_log::{LoopKey, TurnRecord};
 use crate::AppState;
 use axum::{
     body::Body,
@@ -16,6 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use chrono::Utc;
 use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
 use std::sync::Arc;
@@ -31,7 +36,7 @@ pub(crate) const MAX_RETRIES: usize = 8;
 /// V3: racing — fires N parallel requests to N models, returns first response.
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let original_body = body.clone();
@@ -66,6 +71,62 @@ pub async fn chat_completions(
         return response;
     }
     let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&body);
+    // Session/loop tracking. The session id is client-supplied (x-nima-session)
+    // or derived from the conversation's first user message; if neither is
+    // available this request is not part of a tracked loop.
+    let (last_role, fingerprint) = conversation_identity(&body);
+    let force_new_turn = headers
+        .get("x-nima-new-turn")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(false);
+    // Resolve the loop this request belongs to. The session id is only ever
+    // carried inside the key, so this yields just the key. A request with
+    // neither the header nor a derivable fingerprint is not tracked at all,
+    // rather than being given an invented session.
+    let loop_key: Option<LoopKey> = match headers
+        .get(SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(sanitize_session)
+    {
+        Some(session_id) => {
+            let position = state.loop_tracker.begin(
+                &session_id,
+                last_role.as_deref(),
+                message_count,
+                force_new_turn,
+                Utc::now(),
+            );
+            if let Some(closed) = position.closed {
+                crate::proxy::http::log_loop_summary(&closed);
+            }
+            Some(LoopKey {
+                session_id,
+                loop_seq: position.loop_seq,
+                round_index: position.round_index,
+            })
+        }
+        None => match fingerprint {
+            Some(fingerprint) => {
+                let position = state.loop_tracker.begin(
+                    &fingerprint,
+                    last_role.as_deref(),
+                    message_count,
+                    force_new_turn,
+                    Utc::now(),
+                );
+                if let Some(closed) = position.closed {
+                    crate::proxy::http::log_loop_summary(&closed);
+                }
+                Some(LoopKey {
+                    session_id: fingerprint,
+                    loop_seq: position.loop_seq,
+                    round_index: position.round_index,
+                })
+            }
+            None => None,
+        },
+    };
     let n = state.pool.len().clamp(1, MAX_RETRIES);
     let mut last_auth_failure_response: Option<Response> = None;
     // Total wall-clock budget for this request's upstream attempts.
@@ -147,6 +208,7 @@ pub async fn chat_completions(
                         success: false,
                         status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
                         request_message_count: message_count,
+                        loop_key: None,
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
@@ -168,6 +230,7 @@ pub async fn chat_completions(
                     success: false,
                     status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
                     request_message_count: message_count,
+                    loop_key: None,
                     response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
@@ -203,6 +266,7 @@ pub async fn chat_completions(
                     success: false,
                     status_code: StatusCode::BAD_GATEWAY.as_u16(),
                     request_message_count: message_count,
+                    loop_key: None,
                     response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
@@ -271,6 +335,7 @@ pub async fn chat_completions(
                         success: false,
                         status_code: status.as_u16(),
                         request_message_count: message_count,
+                        loop_key: None,
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
@@ -337,6 +402,7 @@ pub async fn chat_completions(
                             success: false,
                             status_code: status.as_u16(),
                             request_message_count: message_count,
+                            loop_key: None,
                             response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
@@ -441,6 +507,7 @@ pub async fn chat_completions(
                             success: false,
                             status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
                             request_message_count: message_count,
+                            loop_key: None,
                             response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
@@ -462,6 +529,7 @@ pub async fn chat_completions(
                         success: false,
                         status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
                         request_message_count: message_count,
+                        loop_key: None,
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
@@ -616,6 +684,7 @@ pub async fn chat_completions(
                                 success: false,
                                 status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
                                 request_message_count: message_count,
+                                loop_key: None,
                                 response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
@@ -637,6 +706,7 @@ pub async fn chat_completions(
                             success: false,
                             status_code: StatusCode::GATEWAY_TIMEOUT.as_u16(),
                             request_message_count: message_count,
+                            loop_key: None,
                             response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
@@ -705,6 +775,9 @@ pub async fn chat_completions(
                     success: ok,
                     status_code: status.as_u16(),
                     request_message_count: message_count,
+                    // Cloned: this record is built inside the attempt loop, so
+                    // it must not consume the key that later records also need.
+                    loop_key: loop_key.clone(),
                     response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
@@ -761,6 +834,7 @@ pub async fn chat_completions(
                         tool_call_count,
                         key_label: key_label.clone(),
                         is_racing: false,
+                        loop_key: loop_key.clone(),
                     };
                     tokio::spawn(async move {
                         let deadline = Instant::now() + wait_bound;
@@ -793,8 +867,11 @@ pub async fn chat_completions(
                                 body_bytes: outcome.body_bytes,
                                 prompt_tokens: outcome.prompt_tokens,
                                 completion_tokens: outcome.completion_tokens,
+                                tool_call_count: outcome.tool_call_count as u64,
+                                tool_call_distinct: outcome.tool_call_distinct as u64,
                                 abort_reason,
                             },
+                            &state.loop_tracker,
                         );
                     });
                 }

@@ -280,6 +280,17 @@ async fn main() {
         }
     }
 
+    // A session's LAST turn has no successor request to close it, so the
+    // sweeper is what makes that final loop visible at all. Spawned here, not
+    // inside AppState::new, so tests that build a state without a runtime do
+    // not start one.
+    state.spawn_loop_sweeper();
+    info!(
+        idle_timeout_secs = nimaproxy::loop_idle_timeout().as_secs(),
+        sweep_interval_secs = nimaproxy::LOOP_SWEEP_INTERVAL.as_secs(),
+        "agent-loop sweeper scheduled"
+    );
+
     if model_check_interval_secs > 0 {
         let recheck_state = state.clone();
         let recheck_target = target.clone();

@@ -335,6 +335,7 @@ pub async fn completions(
                         success: false,
                         status_code: status.as_u16(),
                         request_message_count: 1,
+                        loop_key: None,
                         response_message_count: 1,
                         has_tool_calls: false,
                         tool_call_count: 0,
@@ -516,6 +517,7 @@ pub async fn embeddings(
                         success: false,
                         status_code: status.as_u16(),
                         request_message_count: 1,
+                        loop_key: None,
                         response_message_count: 1,
                         has_tool_calls: false,
                         tool_call_count: 0,
@@ -606,6 +608,7 @@ pub struct TurnContext {
     pub tool_call_count: usize,
     pub key_label: Option<String>,
     pub is_racing: bool,
+    pub loop_key: Option<crate::turn_log::LoopKey>,
 }
 
 /// Structural outcome of a forwarded SSE stream, as carried into a turn record.
@@ -627,6 +630,13 @@ pub struct StreamCompletion {
     /// the upstream sent no usage object — never "0 tokens".
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
+    /// Tool-call FRAGMENT entries: `choices[0].delta.tool_calls` entries summed
+    /// across frames. This OVERCOUNTS logical calls — one call whose
+    /// `arguments` stream over N frames counts N here. `tool_call_distinct` is
+    /// the count of logical calls.
+    pub tool_call_count: u64,
+    /// Distinct logical tool calls, de-duplicated by the delta's `index`.
+    pub tool_call_distinct: u64,
     /// Set when the stream was aborted rather than ended (idle-guard timeout,
     /// upstream error), which is also a truncation.
     pub abort_reason: Option<String>,
@@ -643,7 +653,11 @@ pub struct StreamCompletion {
 ///
 /// The record shares the first-byte record's `request_id`, so the two halves of
 /// one turn can be read together.
-pub(crate) fn log_turn_completion(turn: &TurnContext, completion: &StreamCompletion) {
+pub(crate) fn log_turn_completion(
+    turn: &TurnContext,
+    completion: &StreamCompletion,
+    loop_tracker: &crate::loop_tracker::LoopTracker,
+) {
     use crate::turn_log::{classify, log_turn as log_turn_event, TurnLog};
     let mut record = TurnLog::new(TurnRecord {
         requested_model: turn.requested_model.clone(),
@@ -659,6 +673,7 @@ pub(crate) fn log_turn_completion(turn: &TurnContext, completion: &StreamComplet
         tool_call_count: turn.tool_call_count,
         key_label: turn.key_label.clone(),
         is_racing: turn.is_racing,
+        loop_key: turn.loop_key.clone(),
         error: completion.abort_reason.clone(),
         request_tokens: completion.prompt_tokens,
         response_tokens: completion.completion_tokens,
@@ -686,5 +701,177 @@ pub(crate) fn log_turn_completion(turn: &TurnContext, completion: &StreamComplet
     if let Some(reason) = completion.abort_reason.as_ref() {
         record.error = Some(reason.clone());
     }
+    if let Some(loop_key) = &turn.loop_key {
+        // Enrich the round this completion belongs to with the real outcome.
+        // `begin` already counted the round (even if it 504'd and never
+        // reported), so `record_round` only enriches and bumps
+        // `completed_rounds`.
+        loop_tracker.record_round(
+            &loop_key.session_id,
+            crate::loop_tracker::RoundOutcome {
+                model_ms: completion.duration_ms as u64,
+                success: completion.stream_ended_cleanly,
+                finish_reason: completion.finish_reason.clone(),
+                tool_call_fragments: completion.tool_call_count,
+                tool_calls_distinct: completion.tool_call_distinct,
+            },
+            chrono::Utc::now(),
+        );
+    }
     log_turn_event(&record);
+}
+
+/// Log a closed loop as a `loop` record.
+///
+/// A loop record is not a request: its request-level fields are honest
+/// placeholders (`requested_model`/`responding_model` empty, `latency_ms` 0,
+/// `status_code` 200, `success` true, `error` None) so that a request-level
+/// filter never decides whether a loop appears. Consumers must select on
+/// `record_kind=loop` rather than reuse request filters, because a loop record
+/// is not a request outcome.
+///
+/// `round_index: 0` on its `loop_key` is deliberate: a loop summary is not a
+/// round, and any consumer grouping by round must filter `record_kind=loop`
+/// out first.
+pub(crate) fn build_loop_record(
+    summary: &crate::loop_tracker::ClosedLoop,
+) -> crate::turn_log::TurnLog {
+    use crate::turn_log::{TurnLog, TurnRecord};
+    let wall_ms = (summary.ended_at - summary.started_at)
+        .to_std()
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let ended_by = match summary.ended_by {
+        crate::loop_tracker::LoopEnd::NewTurn => "new_turn",
+        crate::loop_tracker::LoopEnd::Idle => "idle",
+    }
+    .to_string();
+    let mut record = TurnLog::new(TurnRecord {
+        requested_model: String::new(),
+        responding_model: String::new(),
+        latency_ms: 0,
+        success: true,
+        status_code: 200,
+        request_message_count: 0,
+        response_message_count: 0,
+        has_tool_calls: false,
+        tool_call_count: 0,
+        key_label: None,
+        is_racing: false,
+        loop_key: Some(crate::turn_log::LoopKey {
+            session_id: summary.session_id.clone(),
+            loop_seq: summary.loop_seq,
+            round_index: 0,
+        }),
+        error: None,
+        request_tokens: None,
+        response_tokens: None,
+    });
+    record.record_kind = TurnLog::RECORD_KIND_LOOP.to_string();
+    record.loop_started_at = Some(summary.started_at);
+    record.loop_ended_at = Some(summary.ended_at);
+    record.loop_rounds = Some(summary.rounds);
+    record.loop_completed_rounds = Some(summary.completed_rounds);
+    record.loop_model_ms = Some(summary.model_ms);
+    record.loop_wall_ms = Some(wall_ms);
+    record.loop_error_rounds = Some(summary.error_rounds);
+    record.loop_tool_call_fragments = Some(summary.tool_call_fragments);
+    record.loop_tool_calls_distinct = Some(summary.tool_calls_distinct);
+    record.loop_last_finish_reason = summary.last_finish_reason.clone();
+    record.loop_ended_by = Some(ended_by);
+    record
+}
+
+/// Write a closed loop to the turn log as a `loop` record.
+pub(crate) fn log_loop_summary(summary: &crate::loop_tracker::ClosedLoop) {
+    use crate::turn_log::log_turn as log_turn_event;
+    log_turn_event(&build_loop_record(summary));
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loop_tracker::{ClosedLoop, LoopEnd};
+    use crate::turn_log::TurnLog;
+    use chrono::Utc;
+
+    /// `build_loop_record` maps a closed loop onto a `loop` record whose
+    /// request-level fields are honest placeholders and whose `loop_*` fields
+    /// mirror the loop, including `loop_wall_ms` as the first-to-last span.
+    ///
+    /// This calls the production builder. An earlier version of this test
+    /// hand-built a `TurnLog`, assigned the same fields to it, and asserted
+    /// them back — a tautology that would have passed with the mapping deleted.
+    #[test]
+    fn test_build_loop_record_maps_a_closed_loop() {
+        let started = Utc::now();
+        let ended = started + chrono::Duration::seconds(5);
+        let summary = ClosedLoop {
+            session_id: "sess-1".to_string(),
+            loop_seq: 2,
+            started_at: started,
+            ended_at: ended,
+            rounds: 4,
+            completed_rounds: 3,
+            model_ms: 1200,
+            error_rounds: 1,
+            tool_call_fragments: 7,
+            tool_calls_distinct: 3,
+            last_finish_reason: Some("stop".to_string()),
+            ended_by: LoopEnd::Idle,
+        };
+
+        let record = build_loop_record(&summary);
+
+        assert_eq!(record.record_kind, TurnLog::RECORD_KIND_LOOP);
+        assert_eq!(record.loop_rounds, Some(4));
+        assert_eq!(record.loop_completed_rounds, Some(3));
+        assert_eq!(record.loop_model_ms, Some(1200));
+        // The span the user actually waited, derived from the loop's own
+        // timestamps rather than from any clock read at write time.
+        assert_eq!(record.loop_wall_ms, Some(5000));
+        assert_eq!(record.loop_error_rounds, Some(1));
+        assert_eq!(record.loop_tool_call_fragments, Some(7));
+        assert_eq!(record.loop_tool_calls_distinct, Some(3));
+        assert_eq!(record.loop_last_finish_reason.as_deref(), Some("stop"));
+        assert_eq!(record.loop_ended_by.as_deref(), Some("idle"));
+        assert_eq!(record.loop_started_at, Some(started));
+        assert_eq!(record.loop_ended_at, Some(ended));
+        // A summary is not a round, so it carries round_index 0: any consumer
+        // grouping by round must filter `record_kind=loop` out first.
+        assert_eq!(
+            record.loop_key,
+            Some(crate::turn_log::LoopKey {
+                session_id: "sess-1".to_string(),
+                loop_seq: 2,
+                round_index: 0,
+            })
+        );
+    }
+
+    /// A loop that ended the same instant it began reports a zero span rather
+    /// than panicking, and a loop with no reported finish reason keeps `None`
+    /// rather than being given a placeholder.
+    #[test]
+    fn test_build_loop_record_handles_a_zero_span_and_no_reason() {
+        let t = Utc::now();
+        let summary = ClosedLoop {
+            session_id: "s".to_string(),
+            loop_seq: 1,
+            started_at: t,
+            ended_at: t,
+            rounds: 1,
+            completed_rounds: 1,
+            model_ms: 0,
+            error_rounds: 0,
+            tool_call_fragments: 0,
+            tool_calls_distinct: 0,
+            last_finish_reason: None,
+            ended_by: LoopEnd::NewTurn,
+        };
+
+        let record = build_loop_record(&summary);
+        assert_eq!(record.loop_wall_ms, Some(0));
+        assert_eq!(record.loop_ended_by.as_deref(), Some("new_turn"));
+        assert_eq!(record.loop_last_finish_reason, None);
+    }
 }
