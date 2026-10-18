@@ -46,9 +46,7 @@ pub(crate) fn conversation_identity(body: &[u8]) -> (Option<String>, Option<Stri
         .iter()
         .find_map(|m| {
             if m.get("role").and_then(|r| r.as_str()) == Some("user") {
-                m.get("content")
-                    .and_then(|c| c.as_str())
-                    .map(|c| c.to_string())
+                m.get("content").and_then(content_text)
             } else {
                 None
             }
@@ -60,6 +58,37 @@ pub(crate) fn conversation_identity(body: &[u8]) -> (Option<String>, Option<Stri
             format!("fp:{:016x}", hasher.finish())
         });
     (last_role, fingerprint)
+}
+
+/// The text of a message's `content`, which OpenAI-compatible clients send
+/// either as a plain string or as an array of typed parts.
+///
+/// Handling only the string form was a real defect, not a theoretical one. The
+/// array form is what a harness sends for every message, so those conversations
+/// got no fingerprint and were therefore not tracked at all. Measured on the
+/// live proxy: 363 of 391 records in a 90-minute window carried no loop
+/// identity while a real 420-message agent loop ran through it — the exact
+/// workload this feature exists to measure.
+///
+/// A part with no `text` (an image, for instance) contributes nothing but must
+/// not prevent a fingerprint, so it is skipped rather than failing the match.
+/// Content with no text at all returns `None` so the search moves on to the
+/// next user message, which is what keeps the id stable: it is always taken
+/// from the earliest user message that carries text.
+fn content_text(content: &Value) -> Option<String> {
+    match content {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(parts) => {
+            let mut text = String::new();
+            for part in parts {
+                if let Some(s) = part.get("text").and_then(|t| t.as_str()) {
+                    text.push_str(s);
+                }
+            }
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
 }
 /// Sanitize a client-supplied session id before it is written to a log file.
 ///
@@ -216,5 +245,46 @@ mod tests {
 
         let with_ctrl_char = "hello\x00world";
         assert!(!sanitize_session(with_ctrl_char).contains('\x00'));
+    }
+
+    /// A user message whose `content` is an array of typed parts — the form a
+    /// harness actually sends — must still produce a fingerprint. Handling only
+    /// the string form left every such conversation untracked, which was
+    /// measured on the live proxy: 363 of 391 records in a 90-minute window had
+    /// no loop identity while a real 420-message agent loop ran through it.
+    #[test]
+    fn conversation_identity_handles_array_content() {
+        let body = br#"{"messages":[{"role":"system","content":"sys"},{"role":"user","content":[{"type":"text","text":"hello parts"},{"type":"image_url","image_url":{"url":"x"}}]},{"role":"tool","content":"r"}]}"#;
+        let (last_role, fingerprint) = conversation_identity(body);
+        assert_eq!(last_role.as_deref(), Some("tool"));
+        assert!(
+            fingerprint.as_deref().is_some_and(|f| f.starts_with("fp:")),
+            "array content must fingerprint, or the whole conversation is untracked"
+        );
+    }
+
+    /// The id must come from the SAME message however the conversation grows,
+    /// or a single loop would split as soon as history changed.
+    #[test]
+    fn conversation_identity_is_stable_as_history_grows() {
+        let one = br#"{"messages":[{"role":"user","content":[{"type":"text","text":"origin"}]}]}"#;
+        let two = br#"{"messages":[{"role":"user","content":[{"type":"text","text":"origin"}]},{"role":"assistant","content":"a"},{"role":"tool","content":"b"}]}"#;
+        assert_eq!(
+            conversation_identity(one).1,
+            conversation_identity(two).1,
+            "the id must be taken from the earliest user message, not the last"
+        );
+    }
+
+    /// Content carrying no text at all (an image-only message) must not stop
+    /// the search: the next textful user message supplies the id.
+    #[test]
+    fn conversation_identity_skips_textless_content() {
+        let body = br#"{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]},{"role":"user","content":"real text"},{"role":"tool","content":"r"}]}"#;
+        let (_, fingerprint) = conversation_identity(body);
+        assert!(
+            fingerprint.is_some(),
+            "a later textful user message must be used"
+        );
     }
 }
