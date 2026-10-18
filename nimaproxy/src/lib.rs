@@ -151,6 +151,7 @@ pub struct GatewayMetrics {
     overload_rejects: AtomicU64,
     no_key_rejects: AtomicU64,
     timeout_count: AtomicU64,
+    truncated_streams: AtomicU64,
     rate_limit_count: AtomicU64,
     fanout_total: AtomicU64,
     fanout_samples: AtomicU64,
@@ -171,6 +172,7 @@ pub struct GatewayMetricsSnapshot {
     pub overload_rejects: u64,
     pub no_key_rejects: u64,
     pub timeout_count: u64,
+    pub truncated_streams: u64,
     pub rate_limit_count: u64,
     pub fanout_total: u64,
     pub fanout_samples: u64,
@@ -193,6 +195,7 @@ impl GatewayMetrics {
             overload_rejects: AtomicU64::new(0),
             no_key_rejects: AtomicU64::new(0),
             timeout_count: AtomicU64::new(0),
+            truncated_streams: AtomicU64::new(0),
             rate_limit_count: AtomicU64::new(0),
             fanout_total: AtomicU64::new(0),
             fanout_samples: AtomicU64::new(0),
@@ -232,6 +235,14 @@ impl GatewayMetrics {
 
     pub fn record_timeout(&self) {
         self.timeout_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A stream that ended mid-response without `[DONE]` (status 200,
+    /// `success=false`). Counted apart from [`Self::record_timeout`], which is
+    /// the no-bytes stall: the two are different upstream failure mechanisms
+    /// and share no code path.
+    pub fn record_truncated_stream(&self) {
+        self.truncated_streams.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_rate_limit(&self) {
@@ -282,6 +293,7 @@ impl GatewayMetrics {
             overload_rejects: self.overload_rejects.load(Ordering::Relaxed),
             no_key_rejects: self.no_key_rejects.load(Ordering::Relaxed),
             timeout_count: self.timeout_count.load(Ordering::Relaxed),
+            truncated_streams: self.truncated_streams.load(Ordering::Relaxed),
             rate_limit_count: self.rate_limit_count.load(Ordering::Relaxed),
             fanout_total,
             fanout_samples,

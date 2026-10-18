@@ -181,6 +181,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "overload_rejects": metrics.overload_rejects,
             "no_key_rejects": metrics.no_key_rejects,
             "timeout_count": metrics.timeout_count,
+            "truncated_streams": metrics.truncated_streams,
             "rate_limit_count": metrics.rate_limit_count,
             "fanout_total": metrics.fanout_total,
             "fanout_samples": metrics.fanout_samples,
@@ -739,6 +740,7 @@ pub(crate) fn log_turn_completion(
     turn: &TurnContext,
     completion: &StreamCompletion,
     loop_tracker: &crate::loop_tracker::LoopTracker,
+    metrics: &crate::GatewayMetrics,
 ) {
     use crate::turn_log::{classify, log_turn as log_turn_event, TurnLog};
     let mut record = TurnLog::new(TurnRecord {
@@ -782,6 +784,12 @@ pub(crate) fn log_turn_completion(
     );
     if let Some(reason) = completion.abort_reason.as_ref() {
         record.error = Some(reason.clone());
+    }
+    if !completion.stream_ended_cleanly {
+        // The stall counter (`timeout_count`) is the no-bytes path in the
+        // request handler; this is the mid-stream cutoff, which arrives here
+        // as a 200 with success=false. Separate mechanisms, separate numbers.
+        metrics.record_truncated_stream();
     }
     if let Some(loop_key) = &turn.loop_key {
         // Enrich the round this completion belongs to with the real outcome.
@@ -983,5 +991,74 @@ mod tests {
         assert_eq!(summary["p90"], serde_json::json!(0));
         assert_eq!(summary["p99"], serde_json::json!(0));
         assert_eq!(summary["max"], serde_json::json!(0));
+    }
+
+    fn test_turn_context() -> TurnContext {
+        TurnContext {
+            requested_model: "test-model".to_string(),
+            responding_model: "test-model".to_string(),
+            message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: None,
+            is_racing: false,
+            loop_key: None,
+        }
+    }
+
+    fn test_completion(cleanly: bool) -> StreamCompletion {
+        StreamCompletion {
+            request_id: None,
+            duration_ms: 100,
+            finish_reason: None,
+            content_chars: 10,
+            stream_ended_cleanly: cleanly,
+            chunk_count: 2,
+            body_bytes: 20,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tool_call_count: 0,
+            tool_call_distinct: 0,
+            abort_reason: if cleanly {
+                None
+            } else {
+                Some("stream ended without data: [DONE]".to_string())
+            },
+        }
+    }
+
+    /// A truncated stream increments `truncated_streams` and NOT
+    /// `timeout_count`: the mid-stream cutoff (200, success=false) is a
+    /// different mechanism from the no-bytes stall, and the numbers must say so.
+    #[test]
+    fn test_truncated_completion_counts_truncation_not_timeout() {
+        let metrics = crate::GatewayMetrics::new();
+        let tracker = crate::loop_tracker::LoopTracker::new(std::time::Duration::from_secs(300));
+        log_turn_completion(
+            &test_turn_context(),
+            &test_completion(false),
+            &tracker,
+            &metrics,
+        );
+        let snap = metrics.snapshot();
+        assert_eq!(snap.truncated_streams, 1);
+        assert_eq!(snap.timeout_count, 0);
+    }
+
+    /// A clean stream increments neither counter: the truncation metric counts
+    /// the truncated class specifically, not all completions.
+    #[test]
+    fn test_clean_completion_counts_neither_counter() {
+        let metrics = crate::GatewayMetrics::new();
+        let tracker = crate::loop_tracker::LoopTracker::new(std::time::Duration::from_secs(300));
+        log_turn_completion(
+            &test_turn_context(),
+            &test_completion(true),
+            &tracker,
+            &metrics,
+        );
+        let snap = metrics.snapshot();
+        assert_eq!(snap.truncated_streams, 0);
+        assert_eq!(snap.timeout_count, 0);
     }
 }

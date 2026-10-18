@@ -872,6 +872,7 @@ pub async fn chat_completions(
                                 abort_reason,
                             },
                             &state.loop_tracker,
+                            &state.gateway_metrics,
                         );
                     });
                 }
