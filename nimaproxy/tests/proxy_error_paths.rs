@@ -31,6 +31,7 @@ fn make_test_state(api_url: String) -> Arc<AppState> {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     })
 }
 
@@ -59,6 +60,7 @@ fn make_two_key_test_state(api_url: String) -> Arc<AppState> {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     })
 }
 
@@ -80,6 +82,7 @@ fn make_racing_state(api_url: String) -> Arc<AppState> {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     })
 }
 
@@ -109,6 +112,7 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             racing_adaptive: true,
@@ -149,6 +153,7 @@ fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             racing_adaptive: true,
@@ -206,6 +211,7 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             racing_adaptive: true,
@@ -760,6 +766,7 @@ async fn test_proxy_with_model_params() {
         racing_strategy: "complete".to_string(),
         model_params,
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let body = serde_json::json!({
@@ -823,6 +830,7 @@ async fn test_proxy_model_params_do_not_enable_stream_when_omitted() {
         racing_strategy: "complete".to_string(),
         model_params,
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let body = serde_json::json!({
@@ -869,6 +877,7 @@ async fn test_direct_chat_request_uses_configured_timeout() {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let body = serde_json::json!({
@@ -966,6 +975,7 @@ async fn test_timeout_retries_on_another_key_within_budget() {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             max_upstream_in_flight: 8,
@@ -1079,6 +1089,7 @@ async fn test_body_timeout_retries_on_another_key_within_budget() {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             max_upstream_in_flight: 8,
@@ -1170,6 +1181,7 @@ async fn test_upstream_io_failure_is_not_treated_as_a_stall() {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             max_upstream_in_flight: 8,
@@ -1255,6 +1267,7 @@ async fn test_proxy_with_router() {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let body = serde_json::json!({
@@ -1330,6 +1343,7 @@ async fn test_models_endpoint_returns_configured_racing_models_without_upstream(
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let resp = models(axum::extract::State(state)).await.into_response();
@@ -1364,6 +1378,7 @@ async fn test_models_endpoint_includes_router_models() {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let resp = models(axum::extract::State(state)).await.into_response();
@@ -1399,6 +1414,7 @@ async fn test_health_exposes_routing_and_racing_metadata() {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let resp = health(axum::extract::State(state)).await.into_response();
@@ -1471,6 +1487,7 @@ async fn test_models_endpoint_no_keys() {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let resp = models(axum::extract::State(state)).await;
@@ -1569,6 +1586,7 @@ async fn test_auto_degraded_retry_reroutes_to_next_model() {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
     let body = serde_json::json!({
         "model": "auto",
@@ -1672,6 +1690,7 @@ async fn test_key_pool_exhaustion() {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let body = serde_json::json!({
@@ -1817,6 +1836,7 @@ fn make_racing_state_two_keys(api_url: String) -> Arc<AppState> {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     })
 }
 
@@ -2078,6 +2098,7 @@ fn make_racing_state_two_keys_fast(api_url: String) -> Arc<AppState> {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             racing_adaptive: false,
@@ -2482,6 +2503,7 @@ async fn test_slow_but_healthy_stream_is_not_a_timeout() {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             max_upstream_in_flight: 8,
@@ -2590,6 +2612,7 @@ async fn test_stalled_stream_still_times_out() {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
         },
         RuntimeControls {
             max_upstream_in_flight: 8,

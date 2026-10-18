@@ -40,6 +40,7 @@ fn make_live_state() -> Option<Arc<AppState>> {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     }))
 }
 

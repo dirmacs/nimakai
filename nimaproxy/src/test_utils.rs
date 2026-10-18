@@ -290,6 +290,7 @@ impl MockAppStateBuilder {
             racing_strategy: self.racing_strategy,
             model_params: self.model_params,
             model_compat: self.model_compat,
+            loop_idle_timeout: crate::loop_idle_timeout(),
         })
     }
 }

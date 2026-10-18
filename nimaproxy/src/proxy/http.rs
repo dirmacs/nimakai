@@ -214,6 +214,88 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         body.to_string(),
     )
 }
+/// GET /loops — live agent-loop depth aggregates over the recent ring.
+pub async fn loops(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Read-only aggregates: counts only, never message content, key material, or session ids.
+    let recent = state.loop_tracker.recent_loops();
+    let mut rounds: Vec<u64> = recent.iter().map(|l| l.rounds).collect();
+    let mut wall_ms: Vec<u64> = recent.iter().map(loop_wall_ms).collect();
+    let mut model_ms: Vec<u64> = recent.iter().map(|l| l.model_ms).collect();
+    let mut tool_calls: Vec<u64> = recent.iter().map(|l| l.tool_calls_distinct).collect();
+    // Counted in a BTreeMap so iteration is ascending by round count.
+    let mut histogram_counts = std::collections::BTreeMap::<u64, u64>::new();
+    for l in &recent {
+        *histogram_counts.entry(l.rounds).or_insert(0) += 1;
+    }
+    let histogram: serde_json::Map<String, Value> = histogram_counts
+        .into_iter()
+        .map(|(r, c)| (format!("{r}"), serde_json::json!(c)))
+        .collect();
+    let mut new_turn = 0u64;
+    let mut idle = 0u64;
+    for l in &recent {
+        match l.ended_by {
+            crate::loop_tracker::LoopEnd::NewTurn => new_turn += 1,
+            crate::loop_tracker::LoopEnd::Idle => idle += 1,
+        }
+    }
+    let body = serde_json::json!({
+        "open_loops": state.loop_tracker.open_loops(),
+        "recent_loops": recent.len(),
+        "recent_capacity": state.loop_tracker.recent_capacity(),
+        "idle_timeout_secs": state.loop_tracker.idle_timeout().as_secs(),
+        "rounds": loop_dist_summary(&mut rounds),
+        "wall_ms": loop_dist_summary(&mut wall_ms),
+        "model_ms": loop_dist_summary(&mut model_ms),
+        "tool_calls_distinct": loop_dist_summary(&mut tool_calls),
+        "rounds_histogram": histogram,
+        "ended_by": {
+            "new_turn": new_turn,
+            "idle": idle,
+        },
+    });
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+}
+
+/// Nearest-rank percentile over an ascending sample: the smallest value at or
+/// above which `p` percent of the sample lies. An empty sample reports 0
+/// rather than panicking, so a dashboard can read the endpoint's shape before
+/// any loop has closed. Mirrors the offline `nimaproxy-query depth` math so
+/// the live endpoint and the log-derived report agree.
+fn loop_percentile(sorted: &[u64], p: u64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (p as f64 / 100.0 * sorted.len() as f64).ceil() as usize;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+/// `{"n","p50","p90","p99","max"}` over a sample, sorted in place. An empty
+/// sample reports all zeros so the response shape is stable from boot.
+fn loop_dist_summary(values: &mut [u64]) -> Value {
+    values.sort_unstable();
+    serde_json::json!({
+        "n": values.len(),
+        "p50": loop_percentile(values, 50),
+        "p90": loop_percentile(values, 90),
+        "p99": loop_percentile(values, 99),
+        "max": values.last().copied().unwrap_or(0),
+    })
+}
+
+/// First-to-last span of a closed loop in milliseconds, from the loop's own
+/// timestamps. A loop that ended the instant it began reports 0.
+fn loop_wall_ms(summary: &crate::loop_tracker::ClosedLoop) -> u64 {
+    (summary.ended_at - summary.started_at)
+        .to_std()
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// GET /props — tool capability discovery endpoint (for OMP compatibility)
 pub async fn props() -> Response {
     eprintln!("[nimaproxy] GET /props");
@@ -737,10 +819,7 @@ pub(crate) fn build_loop_record(
     summary: &crate::loop_tracker::ClosedLoop,
 ) -> crate::turn_log::TurnLog {
     use crate::turn_log::{TurnLog, TurnRecord};
-    let wall_ms = (summary.ended_at - summary.started_at)
-        .to_std()
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let wall_ms = loop_wall_ms(summary);
     let ended_by = match summary.ended_by {
         crate::loop_tracker::LoopEnd::NewTurn => "new_turn",
         crate::loop_tracker::LoopEnd::Idle => "idle",
@@ -873,5 +952,36 @@ mod tests {
         assert_eq!(record.loop_wall_ms, Some(0));
         assert_eq!(record.loop_ended_by.as_deref(), Some("new_turn"));
         assert_eq!(record.loop_last_finish_reason, None);
+    }
+
+    /// `loop_percentile` is nearest-rank: empty samples report 0 instead of
+    /// panicking, a single element is every percentile, and a known sample
+    /// yields the rank `ceil(p/100 * n)` can predict by hand.
+    #[test]
+    fn test_loop_percentile_is_nearest_rank() {
+        assert_eq!(loop_percentile(&[], 50), 0);
+        assert_eq!(loop_percentile(&[], 99), 0);
+        assert_eq!(loop_percentile(&[7], 50), 7);
+        assert_eq!(loop_percentile(&[7], 99), 7);
+        // n=10: p50 -> rank ceil(5)=5 -> 50; p90 -> rank ceil(9)=9 -> 90;
+        // p99 -> rank ceil(9.9)=10 -> 100.
+        let v = [10u64, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        assert_eq!(loop_percentile(&v, 50), 50);
+        assert_eq!(loop_percentile(&v, 90), 90);
+        assert_eq!(loop_percentile(&v, 99), 100);
+        // n=4: p50 -> rank ceil(2)=2 -> 20, the smaller middle value.
+        assert_eq!(loop_percentile(&[10u64, 20, 30, 40], 50), 20);
+    }
+
+    /// An empty sample still produces the full distribution object with zero
+    /// fields, so the endpoint's shape is readable before any loop closes.
+    #[test]
+    fn test_loop_dist_summary_reports_zeros_when_empty() {
+        let summary = loop_dist_summary(&mut []);
+        assert_eq!(summary["n"], serde_json::json!(0));
+        assert_eq!(summary["p50"], serde_json::json!(0));
+        assert_eq!(summary["p90"], serde_json::json!(0));
+        assert_eq!(summary["p99"], serde_json::json!(0));
+        assert_eq!(summary["max"], serde_json::json!(0));
     }
 }

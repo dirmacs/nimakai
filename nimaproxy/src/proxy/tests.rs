@@ -36,6 +36,7 @@ fn create_test_app_state() -> AppState {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: crate::loop_idle_timeout(),
     });
     match Arc::try_unwrap(state) {
         Ok(state) => state,
@@ -70,6 +71,7 @@ fn create_adaptive_test_state() -> Arc<AppState> {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: crate::loop_idle_timeout(),
         },
         RuntimeControls {
             racing_adaptive: true,
@@ -887,6 +889,7 @@ fn saturated_single_key_state(max_in_flight_per_key: usize) -> Arc<AppState> {
             racing_strategy: "complete".to_string(),
             model_params: HashMap::new(),
             model_compat: ModelCompat::default(),
+            loop_idle_timeout: crate::loop_idle_timeout(),
         },
         RuntimeControls {
             racing_adaptive: false,

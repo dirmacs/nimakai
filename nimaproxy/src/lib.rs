@@ -334,6 +334,7 @@ pub struct AppStateParams {
     pub racing_strategy: String,
     pub model_params: HashMap<String, ModelParams>,
     pub model_compat: config::ModelCompat,
+    pub loop_idle_timeout: Duration,
 }
 
 /// How long a loop may sit silent before the sweeper closes it.
@@ -349,6 +350,9 @@ pub struct AppStateParams {
 /// Five minutes sits well above the tail of a single model round (p99 measured
 /// at 16.5s in production) plus generous tool latency, because splitting a loop
 /// corrupts the metric whereas a delayed summary only delays it.
+///
+/// This is the default for an absent (or zero) `loop_idle_timeout_secs` key;
+/// the binary passes the configured value through [`AppStateParams`] instead.
 pub fn loop_idle_timeout() -> Duration {
     Duration::from_secs(300)
 }
@@ -375,6 +379,7 @@ impl AppState {
             racing_strategy,
             model_params,
             model_compat,
+            loop_idle_timeout,
         } = params;
 
         let client = Client::builder()
@@ -416,7 +421,7 @@ impl AppState {
             min_dynamic_timeout_ms: controls.min_dynamic_timeout_ms.max(1000),
             dynamic_sample_floor: controls.dynamic_sample_floor.max(2),
             auth_failure_cooldown_secs: controls.auth_failure_cooldown_secs,
-            loop_tracker: Arc::new(loop_tracker::LoopTracker::new(loop_idle_timeout())),
+            loop_tracker: Arc::new(loop_tracker::LoopTracker::new(loop_idle_timeout)),
             upstream_permits: Arc::new(Semaphore::new(controls.max_upstream_in_flight.max(1))),
             gateway_metrics: Arc::new(GatewayMetrics::new()),
         })
@@ -1110,6 +1115,7 @@ label = "test"
             racing_strategy: "round_robin".to_string(),
             model_params,
             model_compat,
+            loop_idle_timeout: loop_idle_timeout(),
         });
 
         assert_eq!(state.racing_models.len(), 1);
