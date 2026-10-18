@@ -119,6 +119,12 @@ pub struct LoopPosition {
 struct OpenLoop {
     session_id: String,
     loop_seq: u64,
+    /// Message count of the request that OPENED this loop.
+    ///
+    /// This is what separates a retry of the opening request (an identical
+    /// body, same count) from a genuine new turn whose predecessor produced
+    /// nothing to append. See [`LoopTracker::begin`].
+    opened_at_message_count: usize,
     started_at: DateTime<Utc>,
     /// Last activity. This, not the clock at sweep time, becomes `ended_at`.
     last_seen: DateTime<Utc>,
@@ -183,6 +189,7 @@ impl LoopTracker {
         &self,
         session_id: &str,
         last_role: Option<&str>,
+        message_count: usize,
         force_new_turn: bool,
         now: DateTime<Utc>,
     ) -> LoopPosition {
@@ -192,19 +199,32 @@ impl LoopTracker {
             .or_insert_with(SessionState::new);
 
         // A trailing `user` message means no assistant reply to it exists yet,
-        // so this request opens a fresh turn.
+        // so it normally opens a fresh turn.
         //
-        // The `completed_rounds > 0` guard is what keeps a duplicate of a
-        // still-unanswered first request from closing a loop that has nothing
-        // in it. `rounds` cannot serve here: a round is counted at entry, so it
-        // is already 1 after the first attempt. The same guard means a turn
-        // whose rounds all failed keeps accumulating rather than being closed,
-        // which is the honest reading — a failed round produced nothing the
-        // user could react to, so their next message is a retry of that turn,
-        // not a new one.
+        // The exception is a request that is a RETRY of this loop's own opening
+        // request: no round completed AND the same number of messages as when
+        // the loop opened. A harness resends the identical body when a round
+        // fails, and closing on it would emit a loop with nothing in it and
+        // inflate the loop count.
+        //
+        // `completed_rounds > 0` alone is NOT a sufficient boundary test, and
+        // depending on it was measured to fail two ways on the live proxy:
+        //   * a round's outcome is recorded when its stream ends, which can land
+        //     after the next request has already begun — firing two requests
+        //     back to back made the second continue loop 1 instead of opening
+        //     loop 2, while the same pair with a 4s gap opened loop 2 correctly;
+        //   * a round that never reported at all (a 504) never bumps it, so a
+        //     turn whose rounds all failed would swallow the next turn.
+        // Both merge two genuine user turns into one loop, corrupting the depth
+        // this exists to report. The message count is the signal that survives
+        // both: a conversation that has moved on carries more messages than the
+        // one its loop opened with.
         let trailing_user = last_role == Some("user");
         let starts_new_turn = force_new_turn
-            || (trailing_user && state.open.as_ref().is_some_and(|l| l.completed_rounds > 0));
+            || (trailing_user
+                && state.open.as_ref().is_some_and(|l| {
+                    l.completed_rounds > 0 || message_count != l.opened_at_message_count
+                }));
 
         let mut closed = None;
         if starts_new_turn {
@@ -219,6 +239,7 @@ impl LoopTracker {
             state.open = Some(OpenLoop {
                 session_id: session_id.to_string(),
                 loop_seq: seq,
+                opened_at_message_count: message_count,
                 started_at: now,
                 last_seen: now,
                 rounds: 0,
@@ -395,7 +416,7 @@ mod tests {
     #[test]
     fn first_request_opens_loop_one() {
         let t = tracker();
-        let pos = t.begin("s1", Some("user"), false, t0());
+        let pos = t.begin("s1", Some("user"), 2, false, t0());
         assert_eq!(pos.loop_seq, 1);
         assert_eq!(pos.round_index, 1);
         assert!(pos.closed.is_none());
@@ -406,8 +427,8 @@ mod tests {
     #[test]
     fn a_tool_result_continues_the_same_loop() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, t0());
-        let pos = t.begin("s1", Some("tool"), false, t0());
+        t.begin("s1", Some("user"), 2, false, t0());
+        let pos = t.begin("s1", Some("tool"), 2, false, t0());
         assert_eq!(pos.loop_seq, 1);
         assert_eq!(pos.round_index, 2);
         assert!(pos.closed.is_none());
@@ -418,9 +439,9 @@ mod tests {
     #[test]
     fn a_trailing_user_message_closes_the_previous_loop() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, t0());
+        t.begin("s1", Some("user"), 2, false, t0());
         t.record_round("s1", round(1000, true), t0());
-        let pos = t.begin("s1", Some("user"), false, at("2026-10-18T10:05:00Z"));
+        let pos = t.begin("s1", Some("user"), 2, false, at("2026-10-18T10:05:00Z"));
 
         assert_eq!(pos.loop_seq, 2);
         assert_eq!(pos.round_index, 1);
@@ -435,9 +456,9 @@ mod tests {
     #[test]
     fn force_new_turn_closes_regardless_of_trailing_role() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, t0());
+        t.begin("s1", Some("user"), 2, false, t0());
         t.record_round("s1", round(10, true), t0());
-        let pos = t.begin("s1", Some("tool"), true, t0());
+        let pos = t.begin("s1", Some("tool"), 2, true, t0());
         assert_eq!(pos.loop_seq, 2);
         assert_eq!(
             pos.closed.map(|c| c.loop_seq),
@@ -452,8 +473,8 @@ mod tests {
     #[test]
     fn a_duplicate_first_request_does_not_emit_an_empty_loop() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, t0());
-        let pos = t.begin("s1", Some("user"), false, t0());
+        t.begin("s1", Some("user"), 2, false, t0());
+        let pos = t.begin("s1", Some("user"), 2, false, t0());
         assert!(pos.closed.is_none());
         assert_eq!(pos.loop_seq, 1);
         assert_eq!(pos.round_index, 2);
@@ -464,7 +485,7 @@ mod tests {
     #[test]
     fn record_round_enriches_without_recounting_rounds() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, t0());
+        t.begin("s1", Some("user"), 2, false, t0());
         t.record_round(
             "s1",
             RoundOutcome {
@@ -477,7 +498,7 @@ mod tests {
             t0(),
         );
         let closed = t
-            .begin("s1", Some("user"), false, t0())
+            .begin("s1", Some("user"), 2, false, t0())
             .closed
             .expect("loop closed");
         assert_eq!(closed.rounds, 1, "begin counts the round, not record_round");
@@ -493,10 +514,10 @@ mod tests {
     #[test]
     fn a_round_that_never_reported_is_still_counted() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, t0());
-        t.begin("s1", Some("tool"), false, t0());
+        t.begin("s1", Some("user"), 2, false, t0());
+        t.begin("s1", Some("tool"), 2, false, t0());
         t.record_round("s1", round(200, true), t0());
-        let closed = t.begin("s1", Some("user"), false, t0()).closed.unwrap();
+        let closed = t.begin("s1", Some("user"), 2, false, t0()).closed.unwrap();
         assert_eq!(closed.rounds, 2);
         assert_eq!(closed.completed_rounds, 1);
         assert_eq!(
@@ -509,10 +530,10 @@ mod tests {
     #[test]
     fn a_failed_round_counts_as_an_error_round() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, t0());
+        t.begin("s1", Some("user"), 2, false, t0());
         t.record_round("s1", round(100, false), t0());
         t.record_round("s1", round(100, true), t0());
-        let closed = t.begin("s1", Some("user"), false, t0()).closed.unwrap();
+        let closed = t.begin("s1", Some("user"), 2, false, t0()).closed.unwrap();
         assert_eq!(closed.error_rounds, 1);
     }
 
@@ -521,7 +542,7 @@ mod tests {
     #[test]
     fn sweep_stamps_the_loops_own_last_activity() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, at("2026-10-18T10:00:00Z"));
+        t.begin("s1", Some("user"), 2, false, at("2026-10-18T10:00:00Z"));
         t.record_round("s1", round(1000, true), at("2026-10-18T10:00:30Z"));
 
         // Sweep an hour later: the loop's end must remain 10:00:30.
@@ -537,7 +558,7 @@ mod tests {
     #[test]
     fn sweep_leaves_a_recent_loop_open() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, at("2026-10-18T10:00:00Z"));
+        t.begin("s1", Some("user"), 2, false, at("2026-10-18T10:00:00Z"));
         let swept = t.sweep(at("2026-10-18T10:04:59Z"));
         assert!(swept.is_empty());
         assert_eq!(t.open_loops(), 1);
@@ -547,13 +568,13 @@ mod tests {
     #[test]
     fn sessions_do_not_share_loops() {
         let t = tracker();
-        let a = t.begin("s1", Some("user"), false, t0());
-        let b = t.begin("s2", Some("user"), false, t0());
+        let a = t.begin("s1", Some("user"), 2, false, t0());
+        let b = t.begin("s2", Some("user"), 2, false, t0());
         assert_eq!(a.loop_seq, 1);
         assert_eq!(b.loop_seq, 1);
         assert_eq!(t.open_loops(), 2);
 
-        let a2 = t.begin("s1", Some("tool"), false, t0());
+        let a2 = t.begin("s1", Some("tool"), 2, false, t0());
         assert_eq!(a2.round_index, 2, "s2's traffic must not advance s1");
         assert_eq!(a2.session_id, "s1");
     }
@@ -564,7 +585,7 @@ mod tests {
     fn sweep_order_is_deterministic() {
         let t = tracker();
         for s in ["s3", "s1", "s2"] {
-            t.begin(s, Some("user"), false, at("2026-10-18T10:00:00Z"));
+            t.begin(s, Some("user"), 2, false, at("2026-10-18T10:00:00Z"));
         }
         let first = t.sweep(at("2026-10-18T11:00:00Z"));
         let ids: Vec<_> = first.iter().map(|c| c.session_id.as_str()).collect();
@@ -578,11 +599,11 @@ mod tests {
     #[test]
     fn sweep_forgets_an_abandoned_session() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, at("2026-10-18T10:00:00Z"));
+        t.begin("s1", Some("user"), 2, false, at("2026-10-18T10:00:00Z"));
         t.sweep(at("2026-10-18T11:00:00Z"));
         // The entry must be gone: a later request starts a fresh loop at 1
         // rather than resuming a conversation the sweeper already closed.
-        let pos = t.begin("s1", Some("user"), false, at("2026-10-18T12:00:00Z"));
+        let pos = t.begin("s1", Some("user"), 2, false, at("2026-10-18T12:00:00Z"));
         assert_eq!(pos.loop_seq, 1);
     }
 
@@ -599,7 +620,7 @@ mod tests {
     #[test]
     fn a_missing_finish_reason_does_not_erase_the_last_one() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, t0());
+        t.begin("s1", Some("user"), 2, false, t0());
         t.record_round("s1", round(10, true), t0()); // finish_reason: "stop"
         t.record_round(
             "s1",
@@ -612,7 +633,7 @@ mod tests {
             },
             t0(),
         );
-        let closed = t.begin("s1", Some("user"), false, t0()).closed.unwrap();
+        let closed = t.begin("s1", Some("user"), 2, false, t0()).closed.unwrap();
         assert_eq!(closed.last_finish_reason.as_deref(), Some("stop"));
     }
 
@@ -620,7 +641,7 @@ mod tests {
     #[test]
     fn a_sweep_clock_behind_the_loop_does_not_close_it() {
         let t = tracker();
-        t.begin("s1", Some("user"), false, at("2026-10-18T10:00:00Z"));
+        t.begin("s1", Some("user"), 2, false, at("2026-10-18T10:00:00Z"));
         let swept = t.sweep(at("2026-10-18T09:00:00Z"));
         assert!(swept.is_empty());
     }
@@ -631,5 +652,43 @@ mod tests {
     fn idle_timeout_is_readable() {
         let t = LoopTracker::new(Duration::from_secs(120));
         assert_eq!(t.idle_timeout(), Duration::from_secs(120));
+    }
+
+    /// A trailing user message with a CHANGED message count opens a new turn
+    /// even though no round ever completed. This is the shape a storm of 504s
+    /// produces, and it is the case `completed_rounds > 0` alone got wrong: the
+    /// failed turn reported nothing, yet the conversation has moved on and must
+    /// not be merged into the previous loop.
+    #[test]
+    fn a_changed_message_count_starts_a_new_turn_without_a_completed_round() {
+        let t = tracker();
+        let first = t.begin("s1", Some("user"), 2, false, t0());
+        assert_eq!(first.loop_seq, 1);
+
+        let second = t.begin("s1", Some("user"), 5, false, t0());
+        assert_eq!(
+            second.loop_seq, 2,
+            "the conversation grew, so this is a new turn"
+        );
+        assert_eq!(second.round_index, 1);
+        let closed = second.closed.expect("the previous loop must be reported");
+        assert_eq!(
+            closed.rounds, 1,
+            "the loop that produced nothing is still reported, as rounds=1, completed=0"
+        );
+        assert_eq!(closed.completed_rounds, 0);
+    }
+
+    /// A RETRY of the opening request — identical message count, no completed
+    /// round — stays in the same loop rather than emitting an empty one. This is
+    /// the case that must not be treated as a new turn.
+    #[test]
+    fn a_retry_with_the_same_message_count_stays_in_the_loop() {
+        let t = tracker();
+        t.begin("s1", Some("user"), 2, false, t0());
+        let retry = t.begin("s1", Some("user"), 2, false, t0());
+        assert!(retry.closed.is_none());
+        assert_eq!(retry.loop_seq, 1);
+        assert_eq!(retry.round_index, 2);
     }
 }

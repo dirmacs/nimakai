@@ -93,6 +93,7 @@ pub async fn chat_completions(
             let position = state.loop_tracker.begin(
                 &session_id,
                 last_role.as_deref(),
+                message_count,
                 force_new_turn,
                 Utc::now(),
             );
@@ -110,6 +111,7 @@ pub async fn chat_completions(
                 let position = state.loop_tracker.begin(
                     &fingerprint,
                     last_role.as_deref(),
+                    message_count,
                     force_new_turn,
                     Utc::now(),
                 );

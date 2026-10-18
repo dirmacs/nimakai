@@ -511,7 +511,18 @@ impl TurnLogger {
         // is on disk. A record whose id is visible but which was never written
         // would be worse than no id at all: the completion record would claim
         // a join that does not exist.
-        *self.last_request_id.lock().unwrap() = turn.request_id.clone();
+        //
+        // `loop` summaries are excluded. `last_request_id` exists for exactly
+        // one purpose — letting the first-byte writer read back the id it just
+        // generated so the completion record can share it — and a loop summary
+        // is not a request, has no completion record, and therefore has no join
+        // to serve. Publishing it only overwrites the id that a request is
+        // waiting to read, which was measured: with loop summaries publishing,
+        // `stream_observability` became flaky, because a test read back another
+        // test's id and then asserted against the wrong turn's finish_reason.
+        if turn.record_kind != TurnLog::RECORD_KIND_LOOP {
+            *self.last_request_id.lock().unwrap() = turn.request_id.clone();
+        }
 
         // Rotate once this file is over the threshold. The check is after the
         // write (not before) so the file that triggered it keeps the record
