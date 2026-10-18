@@ -290,6 +290,7 @@ cargo build --release
 # Copy and edit config
 cp nimaproxy.toml.example nimaproxy.toml
 # Edit nimaproxy.toml with your NVIDIA API keys
+# See nimaproxy/nimaproxy.toml.example for all optional keys, including `loop_idle_timeout_secs` (default 300).
 
 # Run
 ./target/release/nimaproxy --config nimaproxy.toml

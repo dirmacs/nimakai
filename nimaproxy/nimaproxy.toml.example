@@ -11,6 +11,11 @@
 # Upstream NVIDIA NIM target. Defaults to https://integrate.api.nvidia.com.
 # target = "https://integrate.api.nvidia.com"
 
+# How long a session's final agent loop may sit silent (seconds) before the
+# sweeper closes and summarises it. Too short splits one turn into two loops;
+# too long delays the final summary. Defaults to 300; 0 means "use the default".
+# loop_idle_timeout_secs = 300
+
 # ── API Keys ────────────────────────────────────────────────────────────────
 # Each key's RPM budget (40 RPM) pools together via round-robin rotation.
 # On 429, the proxy cools down the rate-limited key and retries with the next.

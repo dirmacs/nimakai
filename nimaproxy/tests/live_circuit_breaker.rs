@@ -46,6 +46,7 @@ fn make_live_state_with_circuit_breaker() -> Option<Arc<AppState>> {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     }))
 }
 

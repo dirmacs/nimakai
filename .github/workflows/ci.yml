@@ -23,10 +23,14 @@ jobs:
           cargo --version
           rustc --version
 
-      # Deterministic test targets. Hardcoded, not discovered: cargo's
+      # Deterministic INTEGRATION test targets. Hardcoded, not discovered: cargo's
       # --message-format=json "test-target" filter is fragile across cargo
       # versions, and a discovery that silently matches nothing turns this
       # gate into a vacuous green. Adding a target here is a visible omission.
+      #
+      # These four are the integration suite only. The crate's own unit tests
+      # (every #[cfg(test)] mod tests under nimaproxy/src/) are NOT covered
+      # by the loop below; they are gated by the separate `Unit tests` step.
       #
       # Excluded on purpose:
       #   live_chat, live_circuit_breaker, live_conversation,
@@ -43,6 +47,11 @@ jobs:
             echo "=== target: $t ==="
             cargo test --locked --manifest-path nimaproxy/Cargo.toml --test "$t"
           done
+
+      - name: Unit tests
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.0'
+        run: cargo test --locked --manifest-path nimaproxy/Cargo.toml --lib
 
       - name: Lint
         env:

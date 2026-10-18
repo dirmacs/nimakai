@@ -48,6 +48,7 @@ fn make_state() -> Arc<AppState> {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     })
 }
 
@@ -72,6 +73,7 @@ fn make_state_no_racing() -> Arc<AppState> {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     })
 }
 

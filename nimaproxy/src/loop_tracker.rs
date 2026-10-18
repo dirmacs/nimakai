@@ -40,7 +40,7 @@
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 /// Header a client may set to name its own conversation.
@@ -48,6 +48,14 @@ use std::time::Duration;
 /// Preferred over the derived fingerprint because the client knows the real
 /// boundary between conversations and the proxy can only infer it.
 pub const SESSION_HEADER: &str = "x-nima-session";
+
+/// How many finalized loops the tracker retains for the live depth endpoint.
+///
+/// Bounded because an unbounded ring would grow without limit on a
+/// long-running gateway; the endpoint reports recent behaviour, not all
+/// history. When the ring is full the oldest loop is dropped silently: that
+/// is normal rotation, not an error, and must never surface as one.
+pub const RECENT_LOOP_CAPACITY: usize = 512;
 
 /// How a loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +172,10 @@ impl SessionState {
 /// Registry of sessions and their in-progress loops.
 pub struct LoopTracker {
     sessions: Mutex<HashMap<String, SessionState>>,
+    /// Most recently finalized loops, oldest first, capped at
+    /// [`RECENT_LOOP_CAPACITY`]. Fed on EVERY finalize path so the live
+    /// depth endpoint sees a faithful recent history rather than half of one.
+    recent: Mutex<VecDeque<ClosedLoop>>,
     idle_timeout: Duration,
 }
 
@@ -171,6 +183,7 @@ impl LoopTracker {
     pub fn new(idle_timeout: Duration) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            recent: Mutex::new(VecDeque::new()),
             idle_timeout,
         }
     }
@@ -229,7 +242,9 @@ impl LoopTracker {
         let mut closed = None;
         if starts_new_turn {
             if let Some(finished) = state.open.take() {
-                closed = Some(finalize(finished, LoopEnd::NewTurn));
+                let finalized = finalize(finished, LoopEnd::NewTurn);
+                self.remember(finalized.clone());
+                closed = Some(finalized);
             }
         }
 
@@ -350,6 +365,10 @@ impl LoopTracker {
                 .cmp(&b.session_id)
                 .then(a.loop_seq.cmp(&b.loop_seq))
         });
+        for ended in &closed {
+            self.remember(ended.clone());
+        }
+
         closed
     }
 
@@ -364,6 +383,26 @@ impl LoopTracker {
 
     pub fn idle_timeout(&self) -> Duration {
         self.idle_timeout
+    }
+
+    /// Snapshot of the most recently finalized loops, oldest first.
+    pub fn recent_loops(&self) -> Vec<ClosedLoop> {
+        self.recent.lock().iter().cloned().collect()
+    }
+
+    /// How many finalized loops [`Self::recent_loops`] can hold.
+    pub fn recent_capacity(&self) -> usize {
+        RECENT_LOOP_CAPACITY
+    }
+
+    /// File a finalized loop in the recent ring, evicting the oldest when
+    /// full. Eviction is normal rotation on a busy gateway, never an error.
+    fn remember(&self, closed: ClosedLoop) {
+        let mut recent = self.recent.lock();
+        if recent.len() >= RECENT_LOOP_CAPACITY {
+            recent.pop_front();
+        }
+        recent.push_back(closed);
     }
 }
 
@@ -690,5 +729,44 @@ mod tests {
         assert!(retry.closed.is_none());
         assert_eq!(retry.loop_seq, 1);
         assert_eq!(retry.round_index, 2);
+    }
+
+    /// Every finalize path feeds the recent ring, so the live endpoint sees a
+    /// faithful recent history rather than half of one.
+    #[test]
+    fn both_finalize_paths_feed_the_recent_ring() {
+        let t = tracker();
+        // New-turn path: a second turn closes the first.
+        t.begin("s1", Some("user"), 2, false, t0());
+        t.record_round("s1", round(10, true), t0());
+        let pos = t.begin("s1", Some("user"), 2, false, at("2026-10-18T10:05:00Z"));
+        assert!(pos.closed.is_some());
+        // Idle path: a session that never began a second turn. Swept at 10:06,
+        // when s2's loop (last seen 10:00) is idle but s1's new loop (last
+        // seen 10:05) is not.
+        t.begin("s2", Some("user"), 2, false, t0());
+        let swept = t.sweep(at("2026-10-18T10:06:00Z"));
+        assert_eq!(swept.len(), 1);
+        let recent = t.recent_loops();
+        assert_eq!(recent.len(), 2);
+        assert!(recent.iter().any(|c| c.ended_by == LoopEnd::NewTurn));
+        assert!(recent.iter().any(|c| c.ended_by == LoopEnd::Idle));
+    }
+
+    /// The ring holds only the most recent loops: past capacity the oldest is
+    /// dropped silently, which is normal rotation rather than an error.
+    #[test]
+    fn the_recent_ring_evicts_the_oldest_past_capacity() {
+        let t = tracker();
+        t.begin("s", Some("user"), 2, false, t0());
+        for _ in 0..RECENT_LOOP_CAPACITY + 88 {
+            t.begin("s", Some("user"), 2, true, t0());
+        }
+        let recent = t.recent_loops();
+        assert_eq!(recent.len(), RECENT_LOOP_CAPACITY);
+        assert_eq!(t.recent_capacity(), RECENT_LOOP_CAPACITY);
+        // 600 loops closed (seqs 1..=600); the ring keeps the last 512.
+        assert_eq!(recent.first().map(|c| c.loop_seq), Some(89));
+        assert_eq!(recent.last().map(|c| c.loop_seq), Some(600));
     }
 }

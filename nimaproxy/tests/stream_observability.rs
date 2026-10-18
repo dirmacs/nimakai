@@ -61,6 +61,7 @@ fn make_state(api_url: String) -> Arc<AppState> {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     })
 }
 
@@ -548,6 +549,7 @@ async fn stalled_stream_still_produces_a_completion_record() {
         racing_strategy: "complete".to_string(),
         model_params: HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let (response, request_id) = log.turn_response(state, turn_body()).await;

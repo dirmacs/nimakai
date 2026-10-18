@@ -344,6 +344,7 @@ fn test_integration_app_state_creation() {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     assert_eq!(state.pool.len(), 1);
@@ -499,6 +500,7 @@ fn test_integration_auto_routing_no_router() {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
     assert!(state.router.is_none());
 }
@@ -783,6 +785,7 @@ fn test_model_validation_rejects_invalid_model() {
         racing_strategy: "round_robin".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     {
@@ -823,6 +826,7 @@ fn test_model_validation_allows_auto_and_empty() {
         racing_strategy: "round_robin".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     {
@@ -856,6 +860,7 @@ fn test_model_validation_passes_when_no_cache() {
         racing_strategy: "round_robin".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let result = validate_model_exists("any-model", &state);
@@ -884,6 +889,7 @@ fn test_role_transformation_developer_to_user() {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: compat,
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let request_body = json!({
@@ -929,6 +935,7 @@ fn test_role_transformation_tool_to_assistant() {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: compat,
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let request_body = json!({
@@ -977,6 +984,7 @@ fn test_role_transformation_no_change_for_allowed_model() {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: compat,
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     let request_body = json!({
@@ -1025,6 +1033,7 @@ fn test_role_transformation_all_mistral_models() {
         racing_strategy: "complete".to_string(),
         model_params: std::collections::HashMap::new(),
         model_compat: compat,
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
     // The Mistral model is NOT in the allow-list, so developer role should be transformed to user.

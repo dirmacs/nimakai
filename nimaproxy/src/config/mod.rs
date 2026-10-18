@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use std::fs;
+use std::time::Duration;
 
 mod keys;
 mod racing;
@@ -72,6 +73,10 @@ pub struct Config {
     pub model_params: Option<std::collections::HashMap<String, ModelParams>>,
     pub model_compat: Option<ModelCompat>,
     pub circuit_breaker: Option<CircuitBreakerConfig>,
+    /// Agent-loop idle timeout in seconds (default 300). See
+    /// [`Config::loop_idle_timeout_secs`] for the tuning tradeoff.
+    #[serde(default)]
+    pub loop_idle_timeout_secs: Option<u64>,
 }
 
 impl Config {
@@ -403,10 +408,80 @@ impl Config {
             .and_then(|l| l.path.clone())
             .unwrap_or_else(|| "/var/log/nimaproxy/turns.jsonl".to_string())
     }
+
+    /// How long a loop may sit silent before the sweeper closes it.
+    ///
+    /// A loop is normally closed by the client starting its next turn, but the
+    /// LAST turn of a session has no successor, so without a sweep it would
+    /// never be summarised at all. The value is a compromise in both
+    /// directions: too short and a slow tool call between two rounds of the
+    /// SAME turn is mistaken for the end of that turn, which splits one loop
+    /// into two and halves the measured depth — the very number this exists to
+    /// report; too long and each session's final loop stays invisible for that
+    /// long.
+    ///
+    /// A configured `0` is treated as absent: an immediate sweep would close a
+    /// loop the moment it opened, so `0` can only be a mistake, never a
+    /// meaningful "close instantly" setting.
+    pub fn loop_idle_timeout_secs(&self) -> Duration {
+        Duration::from_secs(
+            self.loop_idle_timeout_secs
+                .filter(|&s| s != 0)
+                .unwrap_or(300),
+        )
+    }
 }
 
 pub fn load(path: &str) -> Result<Config, String> {
     let raw =
         fs::read_to_string(path).map_err(|e| format!("cannot read config '{}': {}", path, e))?;
     toml::from_str(&raw).map_err(|e| format!("invalid config '{}': {}", path, e))
+}
+
+#[cfg(test)]
+mod loop_idle_timeout_tests {
+    use super::*;
+
+    fn config_from_toml(body: &str) -> Config {
+        toml::from_str(body).expect("test config must parse")
+    }
+
+    /// Absent key resolves to the 300s default, so old configs keep working unchanged.
+    #[test]
+    fn loop_idle_timeout_absent_means_default() {
+        let cfg = config_from_toml(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        assert_eq!(cfg.loop_idle_timeout_secs(), Duration::from_secs(300));
+    }
+
+    /// A configured value is honoured verbatim.
+    #[test]
+    fn loop_idle_timeout_configured_value_used() {
+        let cfg = config_from_toml(
+            r#"
+loop_idle_timeout_secs = 60
+[[keys]]
+key = "test"
+"#,
+        );
+        assert_eq!(cfg.loop_idle_timeout_secs(), Duration::from_secs(60));
+    }
+
+    /// Zero falls back to the default: an immediate sweep would close a loop the
+    /// moment it opened, so 0 cannot mean "close immediately".
+    #[test]
+    fn loop_idle_timeout_zero_means_default() {
+        let cfg = config_from_toml(
+            r#"
+loop_idle_timeout_secs = 0
+[[keys]]
+key = "test"
+"#,
+        );
+        assert_eq!(cfg.loop_idle_timeout_secs(), Duration::from_secs(300));
+    }
 }

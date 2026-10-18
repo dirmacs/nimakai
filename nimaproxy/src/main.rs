@@ -238,6 +238,7 @@ async fn main() {
         );
     }
     let model_check_interval_secs = cfg.racing_model_check_interval_secs();
+    let loop_idle_timeout = cfg.loop_idle_timeout_secs();
 
     pruned_models.sort();
     pruned_models.dedup();
@@ -270,6 +271,7 @@ async fn main() {
             racing_strategy,
             model_params,
             model_compat,
+            loop_idle_timeout,
         },
         runtime_controls,
     );
@@ -286,7 +288,7 @@ async fn main() {
     // not start one.
     state.spawn_loop_sweeper();
     info!(
-        idle_timeout_secs = nimaproxy::loop_idle_timeout().as_secs(),
+        idle_timeout_secs = loop_idle_timeout.as_secs(),
         sweep_interval_secs = nimaproxy::LOOP_SWEEP_INTERVAL.as_secs(),
         "agent-loop sweeper scheduled"
     );
@@ -325,6 +327,10 @@ async fn main() {
         .route("/v1/completions", post(nimaproxy::proxy::http::completions))
         .route("/v1/embeddings", post(nimaproxy::proxy::http::embeddings))
         .route("/props", get(nimaproxy::proxy::http::props))
+        // Read-only agent-loop depth summary. Like /stats, it is unauthenticated
+        // and reports aggregate counts only — never message content, session ids
+        // or key material.
+        .route("/loops", get(nimaproxy::proxy::http::loops))
         .fallback(fallback_handler)
         .with_state(state.clone());
 
