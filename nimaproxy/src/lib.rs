@@ -1,5 +1,6 @@
 pub mod config;
 pub mod key_pool;
+pub mod loop_tracker;
 #[cfg(test)]
 pub mod mock_http;
 pub mod model_refresh;
@@ -87,6 +88,13 @@ pub struct AppState {
     /// Cooldown (seconds) applied to a key after an upstream 401/403 (auth failure) on any
     /// inference path. `0` disables auth-failure quarantine. See `config::auth_failure_cooldown_secs`.
     pub auth_failure_cooldown_secs: u64,
+    /// Session and agent-loop registry.
+    ///
+    /// The turn log records one line per HTTP request. An agent loop is one
+    /// user turn served by many sequential requests, so nothing in the log
+    /// groups them and "how deep did this turn go" is unanswerable from the
+    /// records alone. This holds the grouping. See [`loop_tracker`].
+    pub loop_tracker: Arc<loop_tracker::LoopTracker>,
     upstream_permits: Arc<Semaphore>,
     pub gateway_metrics: Arc<GatewayMetrics>,
 }
@@ -327,6 +335,29 @@ pub struct AppStateParams {
     pub model_params: HashMap<String, ModelParams>,
     pub model_compat: config::ModelCompat,
 }
+
+/// How long a loop may sit silent before the sweeper closes it.
+///
+/// A loop is normally closed by the client starting its next turn, but the LAST
+/// turn of a session has no successor, so without a sweep it would never be
+/// summarised at all. The value is a compromise in both directions: too short
+/// and a slow tool call between two rounds of the SAME turn is mistaken for the
+/// end of that turn, which splits one loop into two and halves the measured
+/// depth — the very number this exists to report; too long and each session's
+/// final loop stays invisible for that long.
+///
+/// Five minutes sits well above the tail of a single model round (p99 measured
+/// at 16.5s in production) plus generous tool latency, because splitting a loop
+/// corrupts the metric whereas a delayed summary only delays it.
+pub fn loop_idle_timeout() -> Duration {
+    Duration::from_secs(300)
+}
+
+/// How often the sweeper looks for loops to close. Independent of the idle
+/// timeout: the timeout decides WHEN a loop is over, this decides how promptly
+/// we notice.
+pub const LOOP_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
 impl AppState {
     pub fn new(params: AppStateParams) -> Arc<Self> {
         Self::new_with_controls(params, RuntimeControls::default())
@@ -385,9 +416,43 @@ impl AppState {
             min_dynamic_timeout_ms: controls.min_dynamic_timeout_ms.max(1000),
             dynamic_sample_floor: controls.dynamic_sample_floor.max(2),
             auth_failure_cooldown_secs: controls.auth_failure_cooldown_secs,
+            loop_tracker: Arc::new(loop_tracker::LoopTracker::new(loop_idle_timeout())),
             upstream_permits: Arc::new(Semaphore::new(controls.max_upstream_in_flight.max(1))),
             gateway_metrics: Arc::new(GatewayMetrics::new()),
         })
+    }
+
+    /// Drive the loop sweeper until the process ends.
+    ///
+    /// Deliberately NOT spawned from `new_with_controls`: tests construct an
+    /// `AppState` with no runtime, so a constructor that spawns would panic
+    /// there or leak one task per test. The binary calls this once, after the
+    /// state exists; its absence in tests is the point.
+    ///
+    /// A loop is normally closed by the client beginning its next turn. The
+    /// sweeper exists for the LAST turn of a session, which has no successor
+    /// and would otherwise never be summarised.
+    pub fn spawn_loop_sweeper(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        // A plain OS thread, not a tokio task: this crate does not enable
+        // tokio's `time` feature (see Cargo.toml), so `tokio::time::interval`
+        // would not compile, and a sweeper that wakes every 30 seconds has no
+        // need of a reactor. It also decouples the sweeper from the server's
+        // runtime lifecycle.
+        //
+        // Sleep first, so boot does not begin with a sweep of nothing.
+        std::thread::Builder::new()
+            .name("loop-sweeper".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(LOOP_SWEEP_INTERVAL);
+                for closed in state.loop_tracker.sweep(chrono::Utc::now()) {
+                    crate::proxy::http::log_loop_summary(&closed);
+                }
+            })
+            // Loud on purpose. Serving traffic does not depend on the sweeper,
+            // but the depth metric does: without it every session's final loop
+            // is never summarised, and the loss would be silent.
+            .expect("failed to spawn the agent-loop sweeper thread");
     }
 
     pub fn configured_models(&self) -> Vec<String> {

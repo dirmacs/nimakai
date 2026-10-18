@@ -139,6 +139,70 @@ pub struct TurnLog {
     /// keeps working.
     #[serde(default)]
     pub failure_mode: Option<String>,
+    /// Which agent loop this record belongs to, if any.
+    ///
+    /// `None` for ordinary per-request records and for records written before
+    /// loop tracking existed. Loop summary records carry a real key so a
+    /// reader can filter loop summaries by session.
+    #[serde(default)]
+    pub loop_key: Option<LoopKey>,
+
+    /// When the loop started, if this record is or relates to a loop summary.
+    /// `None` for per-request records.
+    #[serde(default)]
+    pub loop_started_at: Option<DateTime<Utc>>,
+
+    /// When the loop ended, if this record is or relates to a loop summary.
+    /// `None` for per-request records.
+    #[serde(default)]
+    pub loop_ended_at: Option<DateTime<Utc>>,
+
+    /// Total rounds counted for the loop, if this record is or relates to a
+    /// loop summary. `None` for per-request records.
+    #[serde(default)]
+    pub loop_rounds: Option<u64>,
+
+    /// Rounds that produced a reported outcome, if this record is or relates
+    /// to a loop summary. `None` for per-request records.
+    #[serde(default)]
+    pub loop_completed_rounds: Option<u64>,
+
+    /// Summed upstream model time for the loop, if this record is or relates
+    /// to a loop summary. `None` for per-request records.
+    #[serde(default)]
+    pub loop_model_ms: Option<u64>,
+
+    /// The loop's own first-to-last wall-clock span (what the user waited),
+    /// if this record is or relates to a loop summary. `None` for
+    /// per-request records. `loop_model_ms` is summed upstream time (what the
+    /// model cost); `loop_wall_ms - loop_model_ms` is tool-execution plus
+    /// client time, and that difference is the whole reason both are stored.
+    #[serde(default)]
+    pub loop_wall_ms: Option<u64>,
+
+    /// Rounds that ended in an error, if this record is or relates to a loop
+    /// summary. `None` for per-request records.
+    #[serde(default)]
+    pub loop_error_rounds: Option<u64>,
+
+    /// Tool call fragments forwarded across the loop, if this record is or
+    /// relates to a loop summary. `None` for per-request records.
+    #[serde(default)]
+    pub loop_tool_call_fragments: Option<u64>,
+
+    /// Distinct tool calls across the loop, if this record is or relates to a
+    /// loop summary. `None` for per-request records.
+    #[serde(default)]
+    pub loop_tool_calls_distinct: Option<u64>,
+
+    /// Last finish reason the upstream reported for the loop, if any.
+    #[serde(default)]
+    pub loop_last_finish_reason: Option<String>,
+
+    /// How the loop ended: `"new_turn"` or `"idle"`, if this record is or
+    /// relates to a loop summary. `None` for per-request records.
+    #[serde(default)]
+    pub loop_ended_by: Option<String>,
 }
 
 /// Default `record_kind` for records written before the field existed.
@@ -156,6 +220,19 @@ fn default_record_kind() -> String {
 ///
 /// `TurnLog::new` and `log_turn_request` both take this, so the shape is
 /// fixed once and every call site reads the same way.
+/// A loop's position within a session: which conversation, which agent loop
+/// (user turn), and which round within that loop.
+///
+/// All fields are explicit: there is no `Default`, so every caller must name
+/// the session, loop sequence, and round it is addressing. A loop summary
+/// record carries `round_index: 0` because it is not a round, and any
+/// consumer grouping by round must filter `record_kind=loop` out first.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LoopKey {
+    pub session_id: String,
+    pub loop_seq: u64,
+    pub round_index: u64,
+}
 #[derive(Debug, Clone)]
 pub struct TurnRecord {
     pub requested_model: String,
@@ -172,6 +249,13 @@ pub struct TurnRecord {
     pub error: Option<String>,
     pub request_tokens: Option<u32>,
     pub response_tokens: Option<u32>,
+    /// Which agent loop this request belongs to, if a session could be
+    /// established. `None` means the request is not part of a tracked loop
+    /// (no session id was available), and error-path records intentionally
+    /// keep this `None`: the round was already counted by
+    /// [`LoopTracker::begin`], so the round count stays correct even though
+    /// those records cannot name the loop.
+    pub loop_key: Option<LoopKey>,
 }
 
 impl TurnLog {
@@ -183,6 +267,7 @@ impl TurnLog {
     /// attempt that produced it.
     pub const RECORD_KIND_TTFB: &'static str = "ttfb";
     pub const RECORD_KIND_COMPLETION: &'static str = "completion";
+    pub const RECORD_KIND_LOOP: &'static str = "loop";
 
     pub fn new(record: TurnRecord) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -228,6 +313,18 @@ impl TurnLog {
             chunk_count: None,
             body_bytes: None,
             failure_mode: None,
+            loop_key: record.loop_key,
+            loop_started_at: None,
+            loop_ended_at: None,
+            loop_rounds: None,
+            loop_completed_rounds: None,
+            loop_model_ms: None,
+            loop_wall_ms: None,
+            loop_error_rounds: None,
+            loop_tool_call_fragments: None,
+            loop_tool_calls_distinct: None,
+            loop_last_finish_reason: None,
+            loop_ended_by: None,
         }
     }
 }
@@ -531,6 +628,7 @@ mod tests {
             is_racing: true,
             error: None,
             request_tokens: None,
+            loop_key: None,
             response_tokens: None,
         });
 
@@ -560,6 +658,7 @@ mod tests {
             is_racing: false,
             error: None,
             request_tokens: None,
+            loop_key: None,
             response_tokens: None,
         });
         let b = TurnLog::new(TurnRecord {
@@ -576,6 +675,7 @@ mod tests {
             is_racing: false,
             error: None,
             request_tokens: None,
+            loop_key: None,
             response_tokens: None,
         });
         assert!(a.request_id.is_some(), "request_id must be populated");
@@ -602,6 +702,7 @@ mod tests {
             is_racing: false,
             error: None,
             request_tokens: None,
+            loop_key: None,
             response_tokens: None,
         });
 
@@ -654,12 +755,69 @@ mod tests {
             is_racing: false,
             error: None,
             request_tokens: None,
+            loop_key: None,
             response_tokens: None,
         });
 
         let json = serde_json::to_string(&turn).unwrap();
         assert!(json.contains("test-model"));
         assert!(json.contains("requested_model"));
+    }
+    /// A `TurnRecord` with `loop_key: None` yields a `TurnLog` whose
+    /// `loop_key` is `None`: the legacy path stays valid and old records keep
+    /// reading back without a loop association.
+    #[test]
+    fn test_loop_key_none_is_legacy_path() {
+        let turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "test-model".to_string(),
+            latency_ms: 100,
+            success: true,
+            status_code: 200,
+            request_message_count: 2,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: Some("key1".to_string()),
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            loop_key: None,
+            response_tokens: None,
+        });
+        assert_eq!(turn.loop_key, None);
+    }
+
+    /// A `TurnRecord` carrying a real `LoopKey` round-trips through
+    /// serialization: serialization keeps `session_id`, `loop_seq`, and
+    /// `round_index`, and deserialization reads them back.
+    #[test]
+    fn test_loop_key_round_trips() {
+        let key = LoopKey {
+            session_id: "sess-1".to_string(),
+            loop_seq: 3,
+            round_index: 2,
+        };
+        let turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "test-model".to_string(),
+            latency_ms: 100,
+            success: true,
+            status_code: 200,
+            request_message_count: 2,
+            response_message_count: 1,
+            has_tool_calls: false,
+            tool_call_count: 0,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            loop_key: Some(key.clone()),
+            response_tokens: None,
+        });
+        let json = serde_json::to_string(&turn).unwrap();
+        let back: TurnLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.loop_key, Some(key));
     }
 
     /// The write path itself, previously 0% covered.
@@ -684,6 +842,7 @@ mod tests {
             is_racing: false,
             error: None,
             request_tokens: None,
+            loop_key: None,
             response_tokens: None,
         })
     }

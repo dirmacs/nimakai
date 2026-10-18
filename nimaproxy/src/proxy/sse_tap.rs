@@ -27,6 +27,7 @@ use bytes::Bytes;
 use futures::Stream;
 use parking_lot::Mutex;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -57,7 +58,22 @@ struct SseTapInner {
     /// Sum of characters in `choices[0].delta.content` across frames.
     content_chars: AtomicU64,
     /// Number of `choices[0].delta.tool_calls` entries seen across frames.
+    ///
+    /// Counts fragment entries, not logical calls: a single call whose
+    /// `arguments` stream over ~26 frames counts ~26 here. Use
+    /// `tool_call_distinct` for the de-duplicated reading.
     tool_call_count: AtomicUsize,
+    /// Distinct logical tool calls, keyed so a call whose `arguments` stream
+    /// over many frames counts once rather than once per fragment entry.
+    ///
+    /// `tool_call_count` counts fragment entries and overcounts logical calls;
+    /// this set is the de-duplicated reading.
+    tool_call_keys: Mutex<HashSet<String>>,
+    /// Monotonic sequence for anonymous tool-call keys. An entry that carries
+    /// neither `index` nor `id` cannot be joined to a previous call, so it
+    /// gets a unique per-occurrence key — folding it into another call would
+    /// undercount.
+    anon_seq: AtomicUsize,
     /// Whether the terminal `data: [DONE]` frame was observed.
     saw_done: AtomicBool,
     /// Number of `Ok` chunks passed through the tap.
@@ -180,8 +196,40 @@ impl SseTap {
                 self.inner
                     .tool_call_count
                     .fetch_add(tool_calls.len(), Ordering::Relaxed);
+                for entry in tool_calls {
+                    let key = self.tool_call_key(entry);
+                    self.inner.tool_call_keys.lock().insert(key);
+                }
             }
         }
+    }
+    /// Build a stable, joinable key for one `tool_calls` delta entry.
+    ///
+    /// Index is preferred over `id` because every fragment of a single logical
+    /// call shares its array position, while `id` is only present on the first
+    /// fragment. Keying on `id` would leave every fragment after the first
+    /// without a key, and keying on a missing id folds that fragment into a
+    /// previous call — undercounting. An entry that carries neither index nor
+    /// id cannot be joined to anything, so it gets a unique per-occurrence
+    /// anonymous key; merging it with any other call would also undercount.
+    fn tool_call_key(&self, entry: &serde_json::Value) -> String {
+        if let Some(idx) = entry.get("index").and_then(serde_json::Value::as_u64) {
+            return format!("i:{idx}");
+        }
+        if let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) {
+            return format!("d:{id}");
+        }
+        let n = self.inner.anon_seq.fetch_add(1, Ordering::Relaxed);
+        format!("a:{n}")
+    }
+
+    /// Distinct logical tool calls, de-duplicated across fragment frames.
+    ///
+    /// Unlike [`tool_call_count`](Self::tool_call_count), which counts every
+    /// `tool_calls` delta entry (so a call whose `arguments` stream over many
+    /// frames counts once per frame), this counts each logical call once.
+    pub fn tool_call_distinct(&self) -> usize {
+        self.inner.tool_call_keys.lock().len()
     }
 
     /// Last non-null `finish_reason` observed, if any.
@@ -193,6 +241,12 @@ impl SseTap {
         self.inner.content_chars.load(Ordering::Relaxed)
     }
 
+    /// Number of `choices[0].delta.tool_calls` entries seen across frames.
+    ///
+    /// Counts fragment entries, not logical calls: a single call whose
+    /// `arguments` stream over ~26 frames counts ~26 here. This is the pinned
+    /// fragment contract. Use [`tool_call_distinct`](Self::tool_call_distinct)
+    /// for the de-duplicated logical-call count.
     pub fn tool_call_count(&self) -> usize {
         self.inner.tool_call_count.load(Ordering::Relaxed)
     }
@@ -241,6 +295,7 @@ impl SseTap {
             finish_reason: self.finish_reason(),
             content_chars: self.content_chars(),
             tool_call_count: self.tool_call_count(),
+            tool_call_distinct: self.tool_call_distinct(),
             stream_ended_cleanly: self.saw_done(),
             chunk_count: self.chunk_count(),
             body_bytes: self.body_bytes(),
@@ -255,7 +310,17 @@ impl SseTap {
 pub struct SseOutcome {
     pub finish_reason: Option<String>,
     pub content_chars: u64,
+    /// Number of `choices[0].delta.tool_calls` entries seen across frames —
+    /// fragment entries, not logical calls. A single call whose `arguments`
+    /// stream over many frames counts once per frame here; see
+    /// `tool_call_distinct` for the de-duplicated logical-call count.
     pub tool_call_count: usize,
+    /// Distinct logical tool calls, de-duplicated across fragment frames.
+    ///
+    /// Keyed per call so a call whose `arguments` stream over many frames
+    /// counts once rather than once per fragment entry. See
+    /// [`SseTap::tool_call_distinct`] for the keying rule.
+    pub tool_call_distinct: usize,
     /// Defaults to `false`: a stream that was never observed says nothing
     /// about whether it ended cleanly, and the conservative reading is "not
     /// clean".
@@ -523,6 +588,7 @@ mod tests {
         let tc2 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"g\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
         let outcome = feed(&[unicode, tc, tc2, "data: [DONE]\n\n"]).await;
         assert_eq!(outcome.tool_call_count, 2);
+        assert_eq!(outcome.tool_call_distinct, 2);
         assert_eq!(outcome.content_chars, 6);
         assert_eq!(outcome.finish_reason.as_deref(), Some("tool_calls"));
     }
@@ -694,5 +760,43 @@ mod tests {
         assert!(tap.is_finalized());
         assert_eq!(tap.content_chars(), 4);
         assert!(!tap.saw_done());
+    }
+    /// One logical call whose `arguments` stream over three fragment frames
+    /// counts as three entries under the pinned `tool_call_count` contract,
+    /// but only one distinct logical call under `tool_call_distinct`. This
+    /// test fails if the distinct counter is removed.
+    #[tokio::test]
+    async fn tool_call_fragments_overcount_one_logical_call() {
+        let f1 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"k\\\":\\\"v\\\"\"}}]}}]}\n\n";
+        let f2 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"arguments\":\"{\\\"k\\\":\\\"w\\\"}\"}}]}}]}\n\n";
+        let f3 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let outcome = feed(&[f1, f2, f3, "data: [DONE]\n\n"]).await;
+        assert_eq!(outcome.tool_call_count, 3);
+        assert_eq!(outcome.tool_call_distinct, 1);
+    }
+
+    /// Two separate calls (index 0 and index 1) with fragments each count
+    /// as two distinct calls.
+    #[tokio::test]
+    async fn distinct_tool_calls_counts_separate_calls() {
+        let c0 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"function\":{\"name\":\"f\",\"arguments\":\"{\"}}]}}]}\n\n";
+        let c0b = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"function\":{\"arguments\":\"}\"}}]}}]}\n\n";
+        let c1 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"function\":{\"name\":\"g\",\"arguments\":\"{\"}}]}}]}\n\n";
+        let c1b = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let outcome = feed(&[c0, c0b, c1, c1b, "data: [DONE]\n\n"]).await;
+        assert_eq!(outcome.tool_call_count, 4);
+        assert_eq!(outcome.tool_call_distinct, 2);
+    }
+
+    /// Two entries with neither `index` nor `id` cannot be joined, so each gets
+    /// a unique anonymous key and distinct == 2 — the fallback must never fold
+    /// distinct calls together.
+    #[tokio::test]
+    async fn tool_call_without_joinable_key_is_not_folded() {
+        let e1 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"f\",\"arguments\":\"{\"}}]}}]}\n\n";
+        let e2 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"g\",\"arguments\":\"{\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let outcome = feed(&[e1, e2, "data: [DONE]\n\n"]).await;
+        assert_eq!(outcome.tool_call_count, 2);
+        assert_eq!(outcome.tool_call_distinct, 2);
     }
 }
