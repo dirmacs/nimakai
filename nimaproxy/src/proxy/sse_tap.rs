@@ -799,4 +799,32 @@ mod tests {
         assert_eq!(outcome.tool_call_count, 2);
         assert_eq!(outcome.tool_call_distinct, 2);
     }
+
+    /// The exact frame shape a real upstream sends, captured from live traffic:
+    /// `id` appears ONLY on the first fragment, and every continuation carries
+    /// `index` alone.
+    ///
+    /// This is what pins the key ordering to `index` before `id`. An id-first
+    /// key scores frame 1 as `d:chatcmpl-tool-…` and frames 2..4 — which have no
+    /// `id` — as `i:0`, counting ONE logical call as TWO. Neither of the other
+    /// tests catches that: one feeds frames that carry no `id` at all (so the
+    /// fallback still finds `index`), and the other carries `id` on every frame
+    /// (so id-first happens to agree). This is the shape that discriminates, and
+    /// it is the shape production actually uses.
+    #[tokio::test]
+    async fn an_id_only_on_the_first_fragment_does_not_split_the_call() {
+        let f1 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"chatcmpl-tool-82e4ebc410e18260\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}\n\n";
+        let f2 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\": \\\"echo\"}}]}}]}\n\n";
+        let f3 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" hello\"}}]}}]}\n\n";
+        let f4 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let outcome = feed(&[f1, f2, f3, f4, "data: [DONE]\n\n"]).await;
+        assert_eq!(
+            outcome.tool_call_count, 4,
+            "four fragment entries, which is the overcounting figure"
+        );
+        assert_eq!(
+            outcome.tool_call_distinct, 1,
+            "one logical call: the continuations must join the first fragment by index"
+        );
+    }
 }
