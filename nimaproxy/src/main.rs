@@ -221,6 +221,7 @@ async fn main() {
         admission_wait_ms: cfg.admission_wait_ms(),
         min_dynamic_timeout_ms: cfg.min_dynamic_timeout_ms(),
         dynamic_sample_floor: cfg.dynamic_sample_floor(),
+        mid_stream_idle_timeout_ms: cfg.mid_stream_idle_timeout_ms(),
         auth_failure_cooldown_secs: cfg.auth_failure_cooldown_secs(),
     };
     if let Some(ids) = &upstream_ids {

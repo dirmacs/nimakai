@@ -130,6 +130,7 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
     )
@@ -171,6 +172,7 @@ fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
     )
@@ -229,6 +231,7 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
     )
@@ -983,6 +986,7 @@ async fn test_timeout_retries_on_another_key_within_budget() {
             admission_wait_ms: 9000,
             min_dynamic_timeout_ms: 300,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 300,
             auth_failure_cooldown_secs: 900,
             ..RuntimeControls::default()
         },
@@ -1097,6 +1101,7 @@ async fn test_body_timeout_retries_on_another_key_within_budget() {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 250,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 250,
             auth_failure_cooldown_secs: 900,
             ..RuntimeControls::default()
         },
@@ -1189,6 +1194,7 @@ async fn test_upstream_io_failure_is_not_treated_as_a_stall() {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 250,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 250,
             auth_failure_cooldown_secs: 900,
             ..RuntimeControls::default()
         },
@@ -2116,6 +2122,7 @@ fn make_racing_state_two_keys_fast(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 8000,
             auth_failure_cooldown_secs: 900,
         },
     )
@@ -2511,6 +2518,7 @@ async fn test_slow_but_healthy_stream_is_not_a_timeout() {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 250,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 250,
             auth_failure_cooldown_secs: 900,
             ..RuntimeControls::default()
         },
@@ -2620,6 +2628,7 @@ async fn test_stalled_stream_still_times_out() {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 250,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 250,
             auth_failure_cooldown_secs: 900,
             ..RuntimeControls::default()
         },
@@ -2673,5 +2682,188 @@ async fn test_stalled_stream_still_times_out() {
         elapsed < Duration::from_secs(2),
         "a stalled upstream must be detected within about one window (250 ms), not \
          held open for the upstream's 30 s silence: took {elapsed:?}"
+    );
+}
+
+/// The split's core promise: a mid-stream gap past the FIRST-byte window but
+/// inside the IDLE window must not abort the stream. Before the split the
+/// guard fired at the first-byte window, so a live generation pausing
+/// between tokens was killed as a stall.
+///
+/// Uses a real TCP listener, for the same reason as the stalled-stream test
+/// above: a mock buffers its writes, so the sleeps inside it are not
+/// observable as inter-chunk gaps, and a mock-based version of this test
+/// passes even with the guard removed entirely.
+#[tokio::test]
+async fn test_mid_stream_gap_inside_idle_window_is_not_a_stall() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            // First chunk arrives immediately; the second follows after a
+            // pause that exceeds the 250 ms first-byte window but sits well
+            // inside the 2000 ms idle window. The proxy must forward both.
+            for chunk in [
+                "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{}}]}\n\ndata: [DONE]\n\n",
+            ] {
+                let framed = format!("{:x}\r\n{}\r\n", chunk.len(), chunk);
+                let _ = sock.write_all(framed.as_bytes()).await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            let _ = sock.write_all(b"0\r\n\r\n").await;
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 1,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            // Split: the first-byte rail stays tight while the mid-stream
+            // rail tolerates the 500 ms pause.
+            mid_stream_idle_timeout_ms: 2000,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "gap-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("a gap inside the idle window must not abort the stream");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("first") && text.contains("[DONE]"),
+        "both chunks around the 500 ms gap must arrive: {text}"
+    );
+}
+
+/// The other direction: a gap past the IDLE window must still abort the
+/// stream, promptly. Without this the test above could pass by simply never
+/// timing out mid-stream.
+#[tokio::test]
+async fn test_mid_stream_gap_past_idle_window_still_aborts() {
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n";
+            let framed = format!("{:x}\r\n{}\r\n", chunk.len(), chunk);
+            let _ = sock.write_all(framed.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Quiet far past the idle window: the guard must abort the
+            // body rather than hold it open for this silence.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 1,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            // Split: the idle rail is wider than the first-byte rail, but
+            // the 30 s silence exceeds it too, so the guard must fire.
+            mid_stream_idle_timeout_ms: 500,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "stall-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    // The handler returns a lazy body, so the stall is only observed while
+    // the caller drains: the elapsed measurement must cover the drain.
+    let drained = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
+    let elapsed = started.elapsed();
+    assert!(
+        drained.is_err(),
+        "a gap past the idle window must abort the body, not complete it"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the idle guard (500 ms) must abort promptly, not after the \
+         upstream's 30 s silence: took {elapsed:?}"
     );
 }

@@ -131,6 +131,23 @@ pub struct TurnLog {
     #[serde(default)]
     pub body_bytes: Option<u64>,
 
+    /// Largest gap between two consecutive forwarded chunks, in milliseconds.
+    /// Present only on `completion` records whose stream forwarded at least
+    /// two chunks. What lets the next truncation be diagnosed: a completion
+    /// with `stream_ended_cleanly: false` and a small `max_inter_chunk_gap_ms`
+    /// is a hung upstream (many small gaps, then silence), while one large
+    /// gap is a single pathological pause. Absent otherwise — never zero.
+    #[serde(default)]
+    pub max_inter_chunk_gap_ms: Option<u64>,
+
+    /// How the stream ended: `clean`, `guard_stall`, or `upstream_error`.
+    /// Present only on `completion` records. `guard_stall` means the proxy's
+    /// own idle guard aborted the stream; `upstream_error` means the upstream
+    /// broke the connection itself. Absent on records written before the tap
+    /// observed stream ends.
+    #[serde(default)]
+    pub stream_ended_by: Option<String>,
+
     /// Named structural classification of the turn, from [`classify`].
     ///
     /// Derived only from the fields above. It never inspects response text:
@@ -348,6 +365,8 @@ impl TurnLog {
             stream_ended_cleanly: None,
             chunk_count: None,
             body_bytes: None,
+            max_inter_chunk_gap_ms: None,
+            stream_ended_by: None,
             failure_mode: None,
             loop_key: record.loop_key,
             loop_started_at: None,

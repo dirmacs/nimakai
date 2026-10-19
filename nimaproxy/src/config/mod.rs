@@ -160,6 +160,11 @@ pub struct LimitsConfig {
 pub struct TimeoutsConfig {
     pub min_dynamic_timeout_ms: Option<u64>,
     pub dynamic_sample_floor: Option<usize>,
+    /// Maximum tolerated gap between two chunks of one response, in
+    /// milliseconds. Absent (or 0) falls back to the 60 s default. See
+    /// [`Config::mid_stream_idle_timeout_ms`] for why the default is wider
+    /// than the first-byte rail.
+    pub mid_stream_idle_timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -348,6 +353,30 @@ impl Config {
             .max(2)
     }
 
+    /// Maximum tolerated gap between two chunks of one response, in
+    /// milliseconds.
+    ///
+    /// This is the mid-stream idle rail, and it is deliberately wider than
+    /// the first-byte rail (`timeout_ms` / `min_dynamic_timeout_ms`, 25 s in
+    /// production). The two bounds guard different events: the first byte
+    /// answers "is the upstream alive", while a mid-stream gap answers "did
+    /// a live generation stall". Production turn-log analysis puts healthy
+    /// inter-chunk gaps in the sub-second range, so a 60 s window still
+    /// catches every pathological stall — the guard fires on single gaps
+    /// two orders of magnitude above the healthy mean — while no longer
+    /// killing a generation that pauses to think between tokens.
+    ///
+    /// A configured `0` is treated as absent: an idle window of zero would
+    /// abort every stream on its second chunk, so `0` can only be a mistake,
+    /// never a meaningful "tolerate no gap" setting.
+    pub fn mid_stream_idle_timeout_ms(&self) -> u64 {
+        self.timeouts
+            .as_ref()
+            .and_then(|t| t.mid_stream_idle_timeout_ms)
+            .filter(|&ms| ms != 0)
+            .unwrap_or(60_000)
+    }
+
     pub fn routing_models(&self) -> Vec<String> {
         self.routing
             .as_ref()
@@ -486,5 +515,59 @@ key = "test"
 "#,
         );
         assert_eq!(cfg.loop_idle_timeout_secs(), Duration::from_secs(300));
+    }
+}
+
+#[cfg(test)]
+mod mid_stream_idle_timeout_tests {
+    use super::*;
+
+    fn config_from_toml(body: &str) -> Config {
+        toml::from_str(body).expect("test config must parse")
+    }
+
+    /// Absent key resolves to the 60 s default, which is deliberately wider
+    /// than the 25 s first-byte rail: healthy inter-chunk gaps are
+    /// sub-second, so the wider rail still catches pathological stalls while
+    /// tolerating a generation that pauses to think between tokens.
+    #[test]
+    fn mid_stream_idle_absent_means_sixty_seconds() {
+        let cfg = config_from_toml(
+            r#"
+[[keys]]
+key = "test"
+"#,
+        );
+        assert_eq!(cfg.mid_stream_idle_timeout_ms(), 60_000);
+    }
+
+    /// A configured value is honoured verbatim, so the rail is tunable
+    /// without touching the first-byte window.
+    #[test]
+    fn mid_stream_idle_configured_value_used() {
+        let cfg = config_from_toml(
+            r#"
+[timeouts]
+mid_stream_idle_timeout_ms = 45000
+[[keys]]
+key = "test"
+"#,
+        );
+        assert_eq!(cfg.mid_stream_idle_timeout_ms(), 45_000);
+    }
+
+    /// Zero falls back to the default: a zero idle window would abort every
+    /// stream on its second chunk, so 0 cannot mean "tolerate no gap".
+    #[test]
+    fn mid_stream_idle_zero_means_default() {
+        let cfg = config_from_toml(
+            r#"
+[timeouts]
+mid_stream_idle_timeout_ms = 0
+[[keys]]
+key = "test"
+"#,
+        );
+        assert_eq!(cfg.mid_stream_idle_timeout_ms(), 60_000);
     }
 }

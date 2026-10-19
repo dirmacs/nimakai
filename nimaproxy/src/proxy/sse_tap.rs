@@ -29,9 +29,10 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 /// Bound on the trailing partial line held across chunk boundaries.
 ///
@@ -40,6 +41,64 @@ use std::task::{Context, Poll};
 /// without limit; once it is reached the line is treated as unsplittable and
 /// parsing restarts at the next newline.
 const MAX_PARTIAL_LINE: usize = 8 * 1024;
+
+/// How a tapped stream ended, as observed by [`TappedStream`].
+///
+/// This answers the question `saw_done` cannot: a stream that ended without
+/// `[DONE]` either stalled under the idle guard or broke upstream, and those
+/// are different operator actions (widen the window vs suspect the network).
+/// The tap sits *inside* the guard, so it sees the guard's abort error and
+/// can tell the two apart by the same typed payload the assembly path
+/// classifies with ([`crate::proxy::streaming::is_stall`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamEnd {
+    /// The upstream closed the stream itself (`None`), or the tap never saw
+    /// the stream end at all. A truncated stream can still be `Clean`: the
+    /// upstream simply stopped sending without breaking the connection, and
+    /// an unobserved stream says nothing worse than "no reported error".
+    #[default]
+    Clean,
+    /// The idle guard fired: the stream yielded an error carrying the
+    /// [`crate::proxy::streaming::StreamStalled`] payload.
+    GuardStall,
+    /// The stream yielded an error that is not a guard stall: the upstream
+    /// broke the connection itself.
+    UpstreamError,
+}
+
+impl StreamEnd {
+    /// The value stored in the tap's atomic. Match arms, not a cast, so a
+    /// future variant is a compile error here rather than a silent alias.
+    fn discriminant(self) -> u8 {
+        match self {
+            StreamEnd::Clean => 0,
+            StreamEnd::GuardStall => 1,
+            StreamEnd::UpstreamError => 2,
+        }
+    }
+
+    /// The inverse of [`Self::discriminant`]. An unknown value reads as
+    /// `Clean`: the field is only ever written by this module, so anything
+    /// else is impossible, and the conservative reading of an impossible
+    /// value is "no reported error".
+    fn from_discriminant(v: u8) -> Self {
+        match v {
+            1 => StreamEnd::GuardStall,
+            2 => StreamEnd::UpstreamError,
+            _ => StreamEnd::Clean,
+        }
+    }
+
+    /// The string written to the turn log, so the record is readable without
+    /// consulting this enum. Snake case matches `failure_mode`'s vocabulary.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StreamEnd::Clean => "clean",
+            StreamEnd::GuardStall => "guard_stall",
+            StreamEnd::UpstreamError => "upstream_error",
+        }
+    }
+}
 
 /// Structural facts observed about one forwarded SSE stream.
 ///
@@ -90,6 +149,20 @@ struct SseTapInner {
     finalized: AtomicBool,
     /// Trailing partial SSE line, carried across chunk boundaries.
     partial: Mutex<String>,
+    /// When the last `Ok` chunk was observed, if any. The clock behind the gap
+    /// measurement: `None` until the first forwarded chunk arrives, so the
+    /// wait for the first byte is never counted as a mid-stream gap.
+    last_chunk_at: Mutex<Option<Instant>>,
+    /// Largest observed gap between two consecutive forwarded chunks, in
+    /// milliseconds. Updated with a compare-and-swap loop so a concurrent
+    /// poll never loses a larger gap to a smaller one.
+    max_gap_ms: AtomicU64,
+    /// How the stream ended, as observed by the adapter: clean EOF, a
+    /// guard-stall error, or an upstream error. Stored as the
+    /// [`StreamEnd::discriminant`] so it fits an atomic; the default, `Clean`,
+    /// is what a stream that was never observed must say — it ended with no
+    /// reported error, so there is no evidence of an abort.
+    ended_by: AtomicU8,
 }
 
 impl SseTap {
@@ -107,6 +180,30 @@ impl SseTap {
         self.inner
             .body_bytes
             .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+
+        // The gap clock: measured between consecutive forwarded chunks, at
+        // observe time rather than poll time, so what is recorded is the
+        // upstream's inter-chunk spacing. The first chunk only starts the
+        // clock — the wait for it is the TTFB bound's business, not a gap.
+        let now = Instant::now();
+        if let Some(prev) = self.inner.last_chunk_at.lock().replace(now) {
+            let gap_ms = now
+                .duration_since(prev)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            let mut cur = self.inner.max_gap_ms.load(Ordering::Relaxed);
+            while gap_ms > cur {
+                match self.inner.max_gap_ms.compare_exchange_weak(
+                    cur,
+                    gap_ms,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => cur = next,
+                }
+            }
+        }
 
         let mut partial = self.inner.partial.lock();
         // SSE lines are separated by LF; CRLF is stripped per line below, so a
@@ -264,6 +361,41 @@ impl SseTap {
         self.inner.body_bytes.load(Ordering::Relaxed)
     }
 
+    /// Largest gap between two consecutive forwarded chunks, in milliseconds.
+    ///
+    /// This is what lets the next truncation be diagnosed instead of argued
+    /// over: without it the log cannot discriminate a single 26 s gap from a
+    /// hung upstream, because both look like "stream ended without [DONE]".
+    /// `None` when fewer than two chunks were forwarded, which is "no gap
+    /// was observed", never "the gap was zero".
+    pub fn max_gap_ms(&self) -> Option<u64> {
+        if self.inner.last_chunk_at.lock().is_some() && self.chunk_count() >= 2 {
+            Some(self.inner.max_gap_ms.load(Ordering::Relaxed))
+        } else {
+            None
+        }
+    }
+
+    /// How the stream ended, as recorded by the adapter. `Clean` when the
+    /// upstream closed the stream itself — or when the end was never observed,
+    /// which says nothing worse than "no reported error".
+    pub fn ended_by(&self) -> StreamEnd {
+        StreamEnd::from_discriminant(self.inner.ended_by.load(Ordering::Relaxed))
+    }
+
+    /// Record how the stream ended. Called exactly once, by the adapter, on
+    /// the terminal poll; a compare-and-swap keeps a late second terminal
+    /// (the `Drop` finalize racing a final `poll_next`) from overwriting the
+    /// first reading.
+    pub(crate) fn record_end(&self, end: StreamEnd) {
+        let _ = self.inner.ended_by.compare_exchange(
+            StreamEnd::Clean.discriminant(),
+            end.discriminant(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
     /// `usage.prompt_tokens` from the upstream's usage frame, if it sent one.
     ///
     /// `None` means the upstream did not report it, which is not a zero: a
@@ -301,6 +433,8 @@ impl SseTap {
             body_bytes: self.body_bytes(),
             prompt_tokens: self.prompt_tokens(),
             completion_tokens: self.completion_tokens(),
+            max_gap_ms: self.max_gap_ms(),
+            ended_by: self.ended_by(),
         }
     }
 }
@@ -330,6 +464,13 @@ pub struct SseOutcome {
     /// Usage tokens the upstream reported. `None` when it reported none.
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
+    /// Largest gap between two consecutive forwarded chunks, in milliseconds.
+    /// `None` when fewer than two chunks were forwarded: no gap observed.
+    pub max_gap_ms: Option<u64>,
+    /// How the stream ended: clean EOF, a guard stall, or an upstream error.
+    /// Defaults to `Clean`, which for an unobserved stream means "no reported
+    /// error" — never evidence of an abort.
+    pub ended_by: StreamEnd,
 }
 
 /// A stream adapter that observes chunks and finalizes the tap exactly once
@@ -387,11 +528,23 @@ impl Stream for TappedStream {
                 // The stream failed, so it did not end cleanly. Finalize here
                 // so the completion record is still written for an aborted
                 // stream (an idle-guard timeout produces exactly this shape).
+                //
+                // The cause is classified by the typed stall payload, not by
+                // the error kind: an upstream may time out on its own, and
+                // only the payload proves the *guard* fired. This is what
+                // lets the next truncation answer "guard abort or upstream
+                // close" from the log alone, with no packet capture.
+                if crate::proxy::streaming::is_stall(&e) {
+                    tap.record_end(StreamEnd::GuardStall);
+                } else {
+                    tap.record_end(StreamEnd::UpstreamError);
+                }
                 tap.finalize();
                 this.ended = true;
                 Poll::Ready(Some(Err(e)))
             }
             Poll::Ready(None) => {
+                tap.record_end(StreamEnd::Clean);
                 tap.finalize();
                 this.ended = true;
                 Poll::Ready(None)
@@ -759,6 +912,91 @@ mod tests {
         assert!(second.is_err());
         assert!(tap.is_finalized());
         assert_eq!(tap.content_chars(), 4);
+        assert!(!tap.saw_done());
+    }
+
+    /// The gap clock measures what the upstream did between chunks: a 60 ms
+    /// pause between two forwarded chunks is recorded as (about) 60 ms.
+    ///
+    /// The lower bound is generous (half the sleep): a loaded CI host can
+    /// only stretch the observed gap, never shrink it below what the
+    /// upstream waited, so the assertion that matters is "at least the
+    /// pause, modulo scheduling", not an exact value.
+    #[tokio::test]
+    async fn max_gap_records_the_largest_inter_chunk_pause() {
+        let tap = SseTap::new();
+        tap.observe(&Bytes::from_static(b"data: {\"choices\":[]}\n\n"));
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        tap.observe(&Bytes::from_static(b"data: {\"choices\":[]}\n\n"));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tap.observe(&Bytes::from_static(b"data: [DONE]\n\n"));
+        let gap = tap
+            .max_gap_ms()
+            .expect("three chunks must produce a gap reading");
+        assert!(
+            (30..500).contains(&gap),
+            "the 60 ms pause must dominate the reading, got {gap} ms"
+        );
+        assert_eq!(tap.outcome().max_gap_ms, Some(gap));
+    }
+
+    /// A single chunk has no gap: the wait for the first byte is the TTFB
+    /// bound's business, not a mid-stream gap, so it must not be recorded.
+    #[tokio::test]
+    async fn single_chunk_stream_has_no_gap_reading() {
+        let tap = SseTap::new();
+        tap.observe(&Bytes::from_static(b"data: [DONE]\n\n"));
+        assert_eq!(tap.max_gap_ms(), None);
+        assert_eq!(tap.outcome().max_gap_ms, None);
+    }
+
+    /// A guard stall and an upstream break are different ends, classified by
+    /// the typed payload — not by the error kind, which both share. This is
+    /// the record-first half of the RST question: "guard abort or upstream
+    /// close" answered from the log alone.
+    #[tokio::test]
+    async fn tapped_stream_records_guard_stall_vs_upstream_error() {
+        use crate::proxy::streaming::{is_stall, stalled_error};
+
+        // Guard stall: the idle guard's error carries the typed payload.
+        let tap = SseTap::new();
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from_static(b"data: {\"choices\":[]}\n\n")),
+            Err(stalled_error(std::time::Duration::from_millis(100))),
+        ]);
+        let mut tapped = TappedStream::new(tap.clone(), stream);
+        assert!(tapped.next().await.is_some());
+        let err = tapped.next().await.unwrap().unwrap_err();
+        assert!(is_stall(&err), "test setup must yield a real stall");
+        assert_eq!(tap.ended_by(), StreamEnd::GuardStall);
+        assert_eq!(tap.outcome().ended_by, StreamEnd::GuardStall);
+
+        // Upstream break: same TimedOut kind, no payload — a different end.
+        let tap = SseTap::new();
+        let stream = futures::stream::iter(vec![
+            Ok(Bytes::from_static(b"data: {\"choices\":[]}\n\n")),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "upstream timed out on its own",
+            )),
+        ]);
+        let mut tapped = TappedStream::new(tap.clone(), stream);
+        assert!(tapped.next().await.is_some());
+        let err = tapped.next().await.unwrap().unwrap_err();
+        assert!(!is_stall(&err), "test setup must not yield a stall");
+        assert_eq!(tap.ended_by(), StreamEnd::UpstreamError);
+
+        // Clean EOF stays clean — and a truncated stream (no [DONE]) can
+        // still be clean-ended: the upstream simply stopped sending without
+        // breaking the connection.
+        let tap = SseTap::new();
+        let stream = futures::stream::iter(vec![Ok(Bytes::from_static(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"Comm\"}}]}\n\n",
+        ))]);
+        let mut tapped = TappedStream::new(tap.clone(), stream);
+        assert!(tapped.next().await.is_some());
+        assert!(tapped.next().await.is_none());
+        assert_eq!(tap.ended_by(), StreamEnd::Clean);
         assert!(!tap.saw_done());
     }
     /// One logical call whose `arguments` stream over three fragment frames

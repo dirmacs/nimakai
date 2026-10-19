@@ -140,7 +140,7 @@ stateDiagram-v2
     AwaitKeyLease --> Sending
     Sending --> CollectingBody : headers OK
     Sending --> SendTimeout : Err
-    CollectingBody --> BodyTimeout : inter-chunk gap > window
+    CollectingBody --> BodyTimeout : inter-chunk gap > idle_window
     CollectingBody --> InspectBody : Ok
     InspectBody --> TerminalOk : 2xx
     InspectBody --> Retry : 429 / 401 / 403 / DEGRADED
@@ -166,7 +166,11 @@ started.elapsed() + window <= attempt_budget
 ```
 
 where `attempt_budget = window*2 + admission_wait_ms + slack_ms`
-(`src/proxy.rs:902`). The second guard encodes a **liveness** property:
+(`src/proxy.rs:902`). `BodyTimeout` retries under the wider
+`body_stall_budget = window*2 + idle_window + admission_wait_ms + slack_ms`,
+because that attempt consumed a first-byte window AND ran into the idle
+rail; the other timeout branches keep the fast budget. The second guard
+encodes a **liveness** property:
 "a retry will be attempted whenever one more window fits" — and its first
 formulation violated exactly that, silently, because `elapsed` includes
 the admission wait.

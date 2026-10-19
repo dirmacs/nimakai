@@ -723,6 +723,13 @@ pub struct StreamCompletion {
     /// Set when the stream was aborted rather than ended (idle-guard timeout,
     /// upstream error), which is also a truncation.
     pub abort_reason: Option<String>,
+    /// Largest gap between two consecutive forwarded chunks, in milliseconds.
+    /// `None` when fewer than two chunks were forwarded: no gap observed.
+    pub max_gap_ms: Option<u64>,
+    /// How the stream ended, in the tap's vocabulary (`clean`,
+    /// `guard_stall`, `upstream_error`). What answers "guard abort or
+    /// upstream close" on the next truncation without any capture infra.
+    pub ended_by: String,
 }
 
 /// Log the completion of a streamed turn.
@@ -769,6 +776,8 @@ pub(crate) fn log_turn_completion(
     record.stream_ended_cleanly = Some(completion.stream_ended_cleanly);
     record.chunk_count = Some(completion.chunk_count);
     record.body_bytes = Some(completion.body_bytes);
+    record.max_inter_chunk_gap_ms = completion.max_gap_ms;
+    record.stream_ended_by = Some(completion.ended_by.clone());
     // Only when the upstream actually reported usage. A completion record with
     // no usage frame keeps the fields `None`, so a query can tell "0 tokens"
     // from "unknown".
@@ -1024,6 +1033,8 @@ mod tests {
             } else {
                 Some("stream ended without data: [DONE]".to_string())
             },
+            max_gap_ms: Some(12),
+            ended_by: "clean".to_string(),
         }
     }
 

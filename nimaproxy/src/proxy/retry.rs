@@ -45,13 +45,15 @@ pub enum RetryDecision {
 
 /// Retry policy for one request.
 ///
-/// Constructed once per request from the model's timeout window and the
+/// Constructed once per request from the model's timeout windows and the
 /// configured admission wait, then consulted by each timeout branch.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
     max_retries: usize,
     window: Duration,
+    idle_window: Duration,
     budget: Duration,
+    body_stall_budget: Duration,
 }
 
 impl RetryPolicy {
@@ -62,17 +64,51 @@ impl RetryPolicy {
     /// * `admission_wait_ms` — time a request may wait for a permit before
     ///   admission gives up; counted against the budget because it elapses
     ///   before the first attempt starts
+    ///
+    /// The mid-stream window equals the first-byte window here: this is the
+    /// pre-split shape, kept so existing callers behave byte-identically.
     pub fn new(max_retries: usize, window_ms: u64, admission_wait_ms: u64) -> Self {
+        Self::new_split(max_retries, window_ms, window_ms, admission_wait_ms)
+    }
+
+    /// Build a policy with a split first-byte / mid-stream window.
+    ///
+    /// * `first_byte_ms` — the per-attempt first-byte window: sending the
+    ///   request and waiting for the first byte of the body
+    /// * `idle_ms` — the per-attempt mid-stream idle window: the largest
+    ///   tolerated gap between two chunks once the body has started
+    ///
+    /// The two budgets differ because the two failures spent different time.
+    /// A send timeout or a no-bytes stall consumed at most one first-byte
+    /// window, so its retry is admitted under the fast budget:
+    /// `2 * first_byte + admission + slack`. A mid-body stall consumed a
+    /// first-byte window AND ran into the idle rail, so its retry is
+    /// admitted under the body-stall budget: `2 * first_byte + idle +
+    /// admission + slack`. Sizing the body-stall retry from the fast budget
+    /// would silently refuse retries the client could have afforded; sizing
+    /// the fast retries from the body budget would let a fast failure wait
+    /// longer than a single window's worth of extra patience.
+    pub fn new_split(
+        max_retries: usize,
+        first_byte_ms: u64,
+        idle_ms: u64,
+        admission_wait_ms: u64,
+    ) -> Self {
         Self {
             max_retries: max_retries.max(1),
-            window: Duration::from_millis(window_ms),
-            budget: Duration::from_millis(window_ms)
+            window: Duration::from_millis(first_byte_ms),
+            idle_window: Duration::from_millis(idle_ms),
+            budget: Duration::from_millis(first_byte_ms)
                 .saturating_mul(BUDGET_MULTIPLIER)
+                .saturating_add(Duration::from_millis(admission_wait_ms))
+                .saturating_add(Duration::from_millis(BUDGET_SLACK_MS)),
+            body_stall_budget: Duration::from_millis(first_byte_ms)
+                .saturating_mul(BUDGET_MULTIPLIER)
+                .saturating_add(Duration::from_millis(idle_ms))
                 .saturating_add(Duration::from_millis(admission_wait_ms))
                 .saturating_add(Duration::from_millis(BUDGET_SLACK_MS)),
         }
     }
-
     /// Decide whether `attempt` (0-based) should be retried.
     ///
     /// Both conditions must hold:
@@ -81,8 +117,37 @@ impl RetryPolicy {
     /// * one more full window fits in the budget measured from the start of
     ///   the request, so the client's total wait is capped.
     pub fn decide(&self, started: Instant, attempt: usize) -> RetryDecision {
+        // The fast budget: for send timeouts and no-bytes stalls, which
+        // consumed at most one first-byte window. `decide_body_stall` is the
+        // only branch with a different spent shape.
+        self.decide_under(started, attempt, self.window, self.budget)
+    }
+
+    /// Decide whether a mid-body stall on `attempt` (0-based) should be
+    /// retried.
+    ///
+    /// Same attempt bound as [`Self::decide`], but the budget is the
+    /// body-stall budget: the failed attempt already consumed a first-byte
+    /// window and ran into the idle rail, so judging its retry by the fast
+    /// budget would refuse retries the client's wait still has room for.
+    /// The admitted retry is still a single extra attempt — the budget
+    /// admits exactly one window pair, never an unbounded chain.
+    pub fn decide_body_stall(&self, started: Instant, attempt: usize) -> RetryDecision {
+        self.decide_under(started, attempt, self.window, self.body_stall_budget)
+    }
+
+    /// The shared decision shape: attempts remain, and one more first-byte
+    /// window fits under the given budget. One function so the two budgets
+    /// cannot drift into two decision rules.
+    fn decide_under(
+        &self,
+        started: Instant,
+        attempt: usize,
+        window: Duration,
+        budget: Duration,
+    ) -> RetryDecision {
         let attempts_remain = attempt + 1 < self.max_retries;
-        let fits_budget = started.elapsed() + self.window <= self.budget;
+        let fits_budget = started.elapsed() + window <= budget;
         if attempts_remain && fits_budget {
             RetryDecision::Retry
         } else {
@@ -95,9 +160,21 @@ impl RetryPolicy {
         self.budget
     }
 
+    /// The wall-clock ceiling for a mid-body stall retry: the fast budget
+    /// plus one idle window, for the window the failed attempt spent
+    /// mid-stream. Equals [`Self::budget`] when the windows are unsplit.
+    pub fn body_stall_budget(&self) -> Duration {
+        self.body_stall_budget
+    }
+
     /// The per-attempt window.
     pub fn window(&self) -> Duration {
         self.window
+    }
+
+    /// The per-attempt mid-stream idle window.
+    pub fn idle_window(&self) -> Duration {
+        self.idle_window
     }
 }
 
@@ -196,5 +273,71 @@ mod tests {
         let p = policy(0, 300, 0);
         let started = Instant::now();
         assert_eq!(p.decide(started, 0), RetryDecision::GiveUp);
+    }
+
+    /// The unsplit constructor is exactly the split one with equal windows:
+    /// existing callers behave byte-identically after the split. Note the
+    /// body-stall budget is still the wider of the two even with equal
+    /// windows: it accounts for a first-byte window spent AND an idle
+    /// window's worth of mid-stream time, which differ in shape even when
+    /// the two rails coincide.
+    #[test]
+    fn test_new_equals_new_split_with_equal_windows() {
+        let unsplit = RetryPolicy::new(4, 15_000, 5000);
+        let split = RetryPolicy::new_split(4, 15_000, 15_000, 5000);
+        assert_eq!(unsplit.budget(), split.budget());
+        assert_eq!(unsplit.body_stall_budget(), split.body_stall_budget());
+        assert_eq!(
+            split.body_stall_budget(),
+            split.budget() + Duration::from_millis(15_000)
+        );
+        assert_eq!(unsplit.window(), split.window());
+    }
+
+    /// The body-stall budget is the fast budget plus one idle window: the
+    /// failed attempt consumed a first-byte window AND ran into the idle
+    /// rail, so its retry is admitted under the wider ceiling.
+    #[test]
+    fn test_body_stall_budget_adds_one_idle_window() {
+        let p = RetryPolicy::new_split(8, 25_000, 60_000, 5000);
+        assert_eq!(
+            p.budget(),
+            Duration::from_millis(2 * 25_000 + 5000 + 500),
+            "fast budget is unchanged by the split"
+        );
+        assert_eq!(
+            p.body_stall_budget(),
+            Duration::from_millis(2 * 25_000 + 60_000 + 5000 + 500),
+            "body-stall budget must be 2*first_byte + idle + admission + slack"
+        );
+    }
+
+    /// A mid-body stall is retried where the fast budget would refuse: the
+    /// attempt spent a first-byte window plus most of an idle window, so it
+    /// is over the fast ceiling but inside the body-stall ceiling.
+    #[test]
+    fn test_body_stall_retry_admitted_past_fast_budget() {
+        let p = RetryPolicy::new_split(8, 1000, 4000, 0);
+        // Fast budget: 2*1000 + 0 + 500 = 2500 ms. Body budget: 2500 + 4000.
+        // 3000 ms elapsed: 3000 + 1000 > 2500 (fast refuses) but
+        // 3000 + 1000 <= 6500 (body-stall admits).
+        let started = Instant::now() - Duration::from_millis(3000);
+        assert_eq!(p.decide(started, 0), RetryDecision::GiveUp);
+        assert_eq!(p.decide_body_stall(started, 0), RetryDecision::Retry);
+    }
+
+    /// The body-stall retry is still bounded: past its own ceiling, with
+    /// attempts remaining, it gives up rather than chaining forever.
+    #[test]
+    fn test_body_stall_retry_refused_past_its_budget() {
+        let p = RetryPolicy::new_split(8, 1000, 4000, 0);
+        // Body budget is 6500 ms; 6000 elapsed + 1000 window = 7000 > 6500.
+        let started = Instant::now() - Duration::from_millis(6000);
+        assert_eq!(p.decide_body_stall(started, 0), RetryDecision::GiveUp);
+        // And the attempt bound still applies on the wide budget too.
+        assert_eq!(
+            p.decide_body_stall(Instant::now(), 7),
+            RetryDecision::GiveUp
+        );
     }
 }
