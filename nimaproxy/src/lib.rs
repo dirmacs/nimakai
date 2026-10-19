@@ -143,7 +143,7 @@ impl Default for RuntimeControls {
             admission_wait_ms: 1500,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
-            mid_stream_idle_timeout_ms: 60_000,
+            mid_stream_idle_timeout_ms: 180_000,
             auth_failure_cooldown_secs: 900,
         }
     }

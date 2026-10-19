@@ -134,7 +134,7 @@ fn retry_test_state(target: String) -> Arc<AppState> {
             // The stall these tests inject is 30 s of silence; pin the idle
             // window to the same 250 ms the first-byte rail uses here so the
             // injected silence still reads as a stall after the #21 split
-            // (production default is 60 s, which would swallow it).
+            // (production default is 180 s, which would swallow it).
             mid_stream_idle_timeout_ms: 250,
             dynamic_sample_floor: 10,
             auth_failure_cooldown_secs: 900,
