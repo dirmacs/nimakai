@@ -401,9 +401,21 @@ impl AppState {
             loop_idle_timeout,
         } = params;
 
+        // No `.timeout(...)` on the shared client: reqwest's client-level
+        // timeout is a WHOLE-REQUEST cap — headers, body, and stream — so it
+        // severed healthy long generations at 120 s with an upstream_error,
+        // measured 3/3 on the proxy arm of an A/B whose direct arm completed
+        // the same 338 s and 458 s generations. Every phase of every path
+        // already carries its own bound, so the cap was redundant as well as
+        // harmful: the send (first-byte window), the wait for the first byte
+        // (same window), the streaming body (`streaming::with_idle_timeout`,
+        // inter-chunk idle window), and the non-streaming assembly (per-next
+        // idle bound). The `/v1/models` passthrough, which has no per-phase
+        // bounds of its own, sets a per-request timeout at the call site
+        // instead (see `proxy::http`), so no request on this client is
+        // unbounded.
         let client = Client::builder()
             .use_rustls_tls()
-            .timeout(std::time::Duration::from_secs(120))
             .pool_max_idle_per_host(16)
             .build()
             .expect("failed to build HTTP client");

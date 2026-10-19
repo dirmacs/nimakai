@@ -42,10 +42,15 @@ pub async fn models(State(state): State<Arc<AppState>>) -> Response {
     let Some((key, _)) = state.pool.next_key() else {
         return (StatusCode::TOO_MANY_REQUESTS, "no active API keys").into_response();
     };
+    // The shared client carries no timeout (see `AppState::new_with_controls`),
+    // and this passthrough has no per-phase bounds of its own, so the request
+    // sets its own whole-request cap: a catalog fetch is short, and a hung
+    // upstream must not hold this handler (and its key) open forever.
     match state
         .client
         .get(format!("{}/v1/models", state.target))
         .header("Authorization", format!("Bearer {}", key))
+        .timeout(Duration::from_secs(120))
         .send()
         .await
     {
@@ -350,16 +355,37 @@ pub async fn completions(
         let key_label = key_lease.label.clone();
         eprintln!("[nimaproxy] POST /v1/completions - about to send request");
         let t0 = Instant::now();
-        let result = state
-            .client
-            .post(format!("{}/v1/completions", state.target))
-            .header("Authorization", format!("Bearer {}", key_lease.key))
-            .header("Content-Type", "application/json")
-            .body(body.clone())
-            .send()
-            .await;
+        // Bound the send (headers) the way the chat path does: the shared
+        // client carries no timeout, and a whole-request cap here would
+        // reintroduce exactly the defect the client builder removed — the
+        // body below is assembled under the idle rail instead. A per-request
+        // `.timeout(...)` would cover the body too, so it is NOT equivalent.
+        let send_window =
+            Duration::from_millis(crate::proxy::timeouts::timeout_for_model(&state, &model_id));
+        let result = tokio::time::timeout(
+            send_window,
+            state
+                .client
+                .post(format!("{}/v1/completions", state.target))
+                .header("Authorization", format!("Bearer {}", key_lease.key))
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+                .send(),
+        )
+        .await;
         match result {
-            Err(e) => {
+            // A send that times out and a send that fails are the same
+            // outcome on this path — no bytes were committed — so both
+            // share the existing error arm rather than growing a second one.
+            Err(_) | Ok(Err(_)) => {
+                let msg = match &result {
+                    Err(_) => format!(
+                        "upstream send timed out after {}ms",
+                        send_window.as_millis()
+                    ),
+                    Ok(Err(e)) => e.to_string(),
+                    Ok(Ok(_)) => unreachable!("matched by the outer pattern"),
+                };
                 if let Some(label) = key_label.as_ref() {
                     state.model_stats.record_with_key(
                         &model_id,
@@ -372,9 +398,9 @@ pub async fn completions(
                         .model_stats
                         .record(&model_id, t0.elapsed().as_millis() as f64, false);
                 }
-                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                return (StatusCode::BAD_GATEWAY, msg).into_response();
             }
-            Ok(resp) => {
+            Ok(Ok(resp)) => {
                 let status = resp.status();
                 let ok = status.is_success();
                 if status == StatusCode::TOO_MANY_REQUESTS {
@@ -532,16 +558,36 @@ pub async fn embeddings(
         let _upstream_permit = upstream_permit;
         let key_label = key_lease.label.clone();
         let t0 = Instant::now();
-        let result = state
-            .client
-            .post(format!("{}/v1/embeddings", state.target))
-            .header("Authorization", format!("Bearer {}", key_lease.key))
-            .header("Content-Type", "application/json")
-            .body(body.clone())
-            .send()
-            .await;
+        // As in `completions` above: bound the send (headers) with the
+        // first-byte window. A per-request `.timeout(...)` is NOT equivalent
+        // — it would cover the body too and reintroduce the defect the
+        // client builder removed; the body is assembled under the idle rail.
+        let send_window =
+            Duration::from_millis(crate::proxy::timeouts::timeout_for_model(&state, &model_id));
+        let result = tokio::time::timeout(
+            send_window,
+            state
+                .client
+                .post(format!("{}/v1/embeddings", state.target))
+                .header("Authorization", format!("Bearer {}", key_lease.key))
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+                .send(),
+        )
+        .await;
         match result {
-            Err(e) => {
+            // A send that times out and a send that fails are the same
+            // outcome on this path — no bytes were committed — so both
+            // share the existing error arm rather than growing a second one.
+            Err(_) | Ok(Err(_)) => {
+                let msg = match &result {
+                    Err(_) => format!(
+                        "upstream send timed out after {}ms",
+                        send_window.as_millis()
+                    ),
+                    Ok(Err(e)) => e.to_string(),
+                    Ok(Ok(_)) => unreachable!("matched by the outer pattern"),
+                };
                 if let Some(label) = key_label.as_ref() {
                     state.model_stats.record_with_key(
                         &model_id,
@@ -554,9 +600,9 @@ pub async fn embeddings(
                         .model_stats
                         .record(&model_id, t0.elapsed().as_millis() as f64, false);
                 }
-                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+                return (StatusCode::BAD_GATEWAY, msg).into_response();
             }
-            Ok(resp) => {
+            Ok(Ok(resp)) => {
                 let status = resp.status();
                 let ok = status.is_success();
                 if status == StatusCode::TOO_MANY_REQUESTS {

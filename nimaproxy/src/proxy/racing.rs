@@ -301,7 +301,22 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                     };
                     // For 4xx/5xx: buffer body now (stream will be consumed) so we can log it
                     if status.as_u16() != 429 && status.as_u16() >= 400 {
-                        let body_bytes = resp.bytes().await.unwrap_or_default();
+                        // Bounded like the success-path body below: the shared
+                        // client carries no timeout, so an unbounded read here
+                        // would let a hung error body stall this leg past the
+                        // racing deadline. An unreadable error body degrades to
+                        // an empty one — the status is already in hand.
+                        let error_body_window = timeout_before_deadline(deadline, timeout_ms_for_model)
+                            .unwrap_or(0);
+                        let body_bytes = match timeout(
+                            Duration::from_millis(error_body_window),
+                            resp.bytes(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(bytes)) => bytes,
+                            Ok(Err(_)) | Err(_) => Bytes::new(),
+                        };
                         let body_str = String::from_utf8_lossy(&body_bytes);
                         // Auth failure (401/403): this racing leg's KEY is bad, not the
                         // model. Quarantine the key only — do NOT call `record_outcome`
