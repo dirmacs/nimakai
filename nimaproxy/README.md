@@ -207,6 +207,27 @@ Client → nimaproxy → NVIDIA NIM API
          └─ Circuit breaker
 ```
 
+## Known Upstream Behavior
+
+Model-side findings from the 2026-10-19 A/B program (direct-vs-proxy, 38+
+records). None of these are proxy defects; they are documented here so
+operators and clients do not re-diagnose them as transport faults.
+
+### `tool_choice: required` can wedge the model on complex schemas
+
+With step-5-preview, a demanding prompt (12-section plan) combined with a
+complex output schema (array of 5-field objects) under `tool_choice:
+required` produces total silence on BOTH the direct and proxy arms (3/3
+runs each, no bytes past headers). Bisected 2026-10-19: neither the full
+schema with a tiny prompt nor the full prompt with a trivial schema wedges
+it — the wedge needs the conjunction. The same prompt+schema under
+`tool_choice: auto` completes on both arms (38–40KB tool-call streams),
+with ~178s first-byte latency showing the planning burden that `required`
+never survives. Guidance: prefer `auto` for complex output shapes, or
+simplify the forced schema. The proxy forwards megabyte-scale tool-call
+streams without truncation (proven to 1.1MB), so size is not the constraint.
+
+
 ## Testing
 
 ```bash
