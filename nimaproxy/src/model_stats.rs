@@ -1526,15 +1526,29 @@ mod getter_tests {
         // the configured timeout -- deliberate, not an accident of two equal settings.
         let pinned = 25_000u64;
 
-        // (a) No samples at all: the low-sample branch returns max outright. It BYPASSES
-        //     the floor, so it is the branch a floor-only change would silently miss.
+        // (a) The low-sample branch: the model HAS an entry but its ring is shorter than
+        //     sample_floor. Record one sample so `map.get()` returns `Some` -- without it
+        //     this silently exercises the unknown-model arm that (b) already covers, and
+        //     claims coverage it does not have. This is the branch production is in right
+        //     now, so it is the one whose behaviour is worth pinning.
         let store = ModelStatsStore::new(3000.0);
+        store.record("low-sample", 500.0, true); // ring_len = 1 < 25
         assert_eq!(
             store.get_model_timeout_with_policy("low-sample", pinned, pinned, 25),
             pinned
         );
 
-        // (b) A model with no recorded stats returns max.
+        // (a2) ...and that branch BYPASSES the floor: it returns max even when min is much
+        //      lower. So a change that raised only the floor would not have moved it, which
+        //      is exactly the trap this test exists to pin.
+        let bypass = ModelStatsStore::new(3000.0);
+        bypass.record("low-sample", 500.0, true); // ring_len = 1 < 10
+        assert_eq!(
+            bypass.get_model_timeout_with_policy("low-sample", 25_000, 8_000, 10),
+            25_000
+        );
+
+        // (b) A model with no recorded stats at all returns max, via the unknown-model arm.
         assert_eq!(
             store.get_model_timeout_with_policy("never-seen", pinned, pinned, 25),
             pinned
