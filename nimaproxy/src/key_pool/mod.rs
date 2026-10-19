@@ -1,5 +1,6 @@
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
@@ -110,7 +111,7 @@ impl KeyPool {
         let start = self.index.fetch_add(1, Ordering::Relaxed) % n;
         for i in 0..n {
             let idx = (start + i) % n;
-            let cd = self.cooldowns[idx].lock().unwrap();
+            let cd = self.cooldowns[idx].lock();
             match *cd {
                 Some((expiry, _)) if Instant::now() < expiry => continue, // still cooling
                 _ => return Some((self.keys[idx].key.clone(), idx)),
@@ -120,6 +121,24 @@ impl KeyPool {
     }
 
     pub fn next_key_with_permit(&self) -> Result<KeyLease, KeyAcquireError> {
+        self.next_key_with_permit_excluding(None)
+    }
+
+    /// Pick the next available key that is not `exclude`.
+    ///
+    /// The exclusion is what makes a retry go to *another* key rather than
+    /// cycling back to the one that just stalled: plain round-robin hands the
+    /// next attempt the next slot, which is the failed key again as soon as
+    /// the pool wraps. Retrying the identical prompt on a fresh key is the
+    /// proxy-side half of the same-prompt-as-fresh retry rule.
+    ///
+    /// A single-key pool cannot satisfy an exclusion, so it degrades to the
+    /// unexcluded pick: refusing would turn every stall into an admission
+    /// failure, and a stall is observational-only (it never benches the key).
+    pub fn next_key_with_permit_excluding(
+        &self,
+        exclude: Option<usize>,
+    ) -> Result<KeyLease, KeyAcquireError> {
         let n = self.keys.len();
         if n == 0 {
             return Err(KeyAcquireError::NoKeys);
@@ -130,34 +149,42 @@ impl KeyPool {
         let mut active_seen = false;
         let mut busy_seen = false;
 
-        for i in 0..n {
-            let idx = (start + i) % n;
-            let cd = self.cooldowns[idx].lock().unwrap();
-            if matches!(*cd, Some((expiry, _)) if now < expiry) {
-                continue;
-            }
-            drop(cd);
-            active_seen = true;
-
-            if self.in_flight_for_key(idx) >= self.current_window(idx) {
-                busy_seen = true;
-                continue;
-            }
-
-            match self.permits[idx].clone().try_acquire_owned() {
-                Ok(permit) => {
-                    return Ok(KeyLease {
-                        key: self.keys[idx].key.clone(),
-                        idx,
-                        label: self.get_key_label(idx),
-                        _permit: permit,
-                    });
+        // Two passes: the first skips the excluded key, the second drops the
+        // exclusion so a single-key pool (or a pool whose other keys are all
+        // cooling) still yields a lease rather than failing admission.
+        for pass in 0..2 {
+            for i in 0..n {
+                let idx = (start + i) % n;
+                if pass == 0 && exclude == Some(idx) {
+                    continue;
                 }
-                Err(TryAcquireError::NoPermits) => {
-                    busy_seen = true;
+                let cd = self.cooldowns[idx].lock();
+                if matches!(*cd, Some((expiry, _)) if now < expiry) {
+                    continue;
                 }
-                Err(TryAcquireError::Closed) => {
+                drop(cd);
+                active_seen = true;
+
+                if self.in_flight_for_key(idx) >= self.current_window(idx) {
                     busy_seen = true;
+                    continue;
+                }
+
+                match self.permits[idx].clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        return Ok(KeyLease {
+                            key: self.keys[idx].key.clone(),
+                            idx,
+                            label: self.get_key_label(idx),
+                            _permit: permit,
+                        });
+                    }
+                    Err(TryAcquireError::NoPermits) => {
+                        busy_seen = true;
+                    }
+                    Err(TryAcquireError::Closed) => {
+                        busy_seen = true;
+                    }
                 }
             }
         }
@@ -168,7 +195,6 @@ impl KeyPool {
             Err(KeyAcquireError::AllCoolingDown)
         }
     }
-
     pub fn active_count(&self) -> usize {
         self.status().iter().filter(|s| s.active).count()
     }

@@ -22,7 +22,7 @@ impl super::KeyPool {
             .iter()
             .enumerate()
             .filter_map(|(i, sem)| {
-                let cd = self.cooldowns[i].lock().unwrap();
+                let cd = self.cooldowns[i].lock();
                 if matches!(*cd, Some((expiry, _)) if now < expiry) {
                     None
                 } else {
@@ -41,11 +41,11 @@ impl super::KeyPool {
             .iter()
             .enumerate()
             .filter_map(|(i, window)| {
-                let cd = self.cooldowns[i].lock().unwrap();
+                let cd = self.cooldowns[i].lock();
                 if matches!(*cd, Some((expiry, _)) if now < expiry) {
                     None
                 } else {
-                    Some(window.lock().unwrap().current)
+                    Some(window.lock().current)
                 }
             })
             .sum()
@@ -75,8 +75,8 @@ impl super::KeyPool {
                 // cooldown). Holding both for the whole read is safe because
                 // that order is consistent everywhere, so there is no
                 // lock-order inversion.
-                let cd = self.cooldowns[i].lock().unwrap();
-                let window = self.windows[i].lock().unwrap();
+                let cd = self.cooldowns[i].lock();
+                let window = self.windows[i].lock();
                 let (active, remaining, bench_reason) = match *cd {
                     Some((expiry, reason)) if now < expiry => {
                         (false, expiry.duration_since(now).as_secs(), Some(reason))

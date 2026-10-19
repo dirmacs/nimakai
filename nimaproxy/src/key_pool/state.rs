@@ -63,7 +63,7 @@ impl super::KeyPool {
     pub fn mark_rate_limited(&self, idx: usize, secs: u64) {
         if idx < self.cooldowns.len() {
             self.record_rate_limited(idx);
-            let mut cd = self.cooldowns[idx].lock().unwrap();
+            let mut cd = self.cooldowns[idx].lock();
             *cd = Some((
                 Instant::now() + Duration::from_secs(secs),
                 BenchReason::RateLimit,
@@ -89,14 +89,14 @@ impl super::KeyPool {
             counter.fetch_add(1, Ordering::Relaxed);
         }
         if !cooldown.is_zero() {
-            let mut cd = self.cooldowns[idx].lock().unwrap();
+            let mut cd = self.cooldowns[idx].lock();
             *cd = Some((Instant::now() + cooldown, BenchReason::AuthFailure));
         }
     }
 
     pub fn record_rate_limited(&self, idx: usize) {
         if let Some(window) = self.windows.get(idx) {
-            let mut window = window.lock().unwrap();
+            let mut window = window.lock();
             window.current = (window.current / 2).max(1);
             window.successes_since_increase = 0;
         }
@@ -104,7 +104,7 @@ impl super::KeyPool {
 
     pub fn record_success(&self, idx: usize) {
         if let Some(window) = self.windows.get(idx) {
-            let mut window = window.lock().unwrap();
+            let mut window = window.lock();
             if window.current < self.max_in_flight_per_key {
                 // Proportional recovery. Shrink is multiplicative and
                 // instantaneous (one 429 halves the window), so a fixed
@@ -140,7 +140,7 @@ impl super::KeyPool {
     pub(crate) fn current_window(&self, idx: usize) -> usize {
         self.windows
             .get(idx)
-            .map(|w| w.lock().unwrap().current)
+            .map(|w| w.lock().current)
             .unwrap_or(self.max_in_flight_per_key)
     }
 
