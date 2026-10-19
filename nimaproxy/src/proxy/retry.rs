@@ -57,20 +57,6 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Build a policy from the production knobs.
-    ///
-    /// * `max_retries` — attempt cap, normally `pool.len().min(MAX_RETRIES)`
-    /// * `window_ms` — the per-attempt timeout window
-    /// * `admission_wait_ms` — time a request may wait for a permit before
-    ///   admission gives up; counted against the budget because it elapses
-    ///   before the first attempt starts
-    ///
-    /// The mid-stream window equals the first-byte window here: this is the
-    /// pre-split shape, kept so existing callers behave byte-identically.
-    pub fn new(max_retries: usize, window_ms: u64, admission_wait_ms: u64) -> Self {
-        Self::new_split(max_retries, window_ms, window_ms, admission_wait_ms)
-    }
-
     /// Build a policy with a split first-byte / mid-stream window.
     ///
     /// * `first_byte_ms` — the per-attempt first-byte window: sending the
@@ -183,7 +169,7 @@ mod tests {
     use super::*;
 
     fn policy(max_retries: usize, window_ms: u64, admission_wait_ms: u64) -> RetryPolicy {
-        RetryPolicy::new(max_retries, window_ms, admission_wait_ms)
+        RetryPolicy::new_split(max_retries, window_ms, window_ms, admission_wait_ms)
     }
 
     /// The retry fires when a full window still fits in the budget.
@@ -275,25 +261,6 @@ mod tests {
         assert_eq!(p.decide(started, 0), RetryDecision::GiveUp);
     }
 
-    /// The unsplit constructor is exactly the split one with equal windows:
-    /// existing callers behave byte-identically after the split. Note the
-    /// body-stall budget is still the wider of the two even with equal
-    /// windows: it accounts for a first-byte window spent AND an idle
-    /// window's worth of mid-stream time, which differ in shape even when
-    /// the two rails coincide.
-    #[test]
-    fn test_new_equals_new_split_with_equal_windows() {
-        let unsplit = RetryPolicy::new(4, 15_000, 5000);
-        let split = RetryPolicy::new_split(4, 15_000, 15_000, 5000);
-        assert_eq!(unsplit.budget(), split.budget());
-        assert_eq!(unsplit.body_stall_budget(), split.body_stall_budget());
-        assert_eq!(
-            split.body_stall_budget(),
-            split.budget() + Duration::from_millis(15_000)
-        );
-        assert_eq!(unsplit.window(), split.window());
-    }
-
     /// The body-stall budget is the fast budget plus one idle window: the
     /// failed attempt consumed a first-byte window AND ran into the idle
     /// rail, so its retry is admitted under the wider ceiling.
@@ -309,6 +276,15 @@ mod tests {
             p.body_stall_budget(),
             Duration::from_millis(2 * 25_000 + 60_000 + 5000 + 500),
             "body-stall budget must be 2*first_byte + idle + admission + slack"
+        );
+        // Equal windows still differ in shape: body-stall accounts for a
+        // first-byte window spent AND an idle window's worth of mid-stream
+        // time, so it stays wider than the fast budget even when the rails
+        // coincide.
+        let q = RetryPolicy::new_split(4, 15_000, 15_000, 5000);
+        assert_eq!(
+            q.body_stall_budget(),
+            q.budget() + Duration::from_millis(15_000)
         );
     }
 
