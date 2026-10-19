@@ -1,0 +1,17 @@
+# docker-compose.yml — RETIRED 2026-10-19
+
+The single-service compose spec that used to sit at this path has been
+removed: it pinned the retired `loop-depth-v4` image while the service had
+moved on, and keeping it meant a deploy from this file would have silently
+rolled the image back.
+
+The canonical home for the service definition is now
+**dirmacs/infra, `stacks/nimaproxy/`** (per that repo's DEPLOYMENT-MODEL §4:
+app source stays here, orchestration lives there). The README in that stack
+records the identity rules — in particular, that stack deliberately cannot
+recreate or adopt the live container; it is a faithful slice, not the
+orchestrator.
+
+This stub exists so `git log -- docker-compose.yml` and old references land
+somewhere explanatory instead of on a 404. Safe to delete once nothing
+points here anymore.
