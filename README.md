@@ -253,6 +253,7 @@ tests/
 nimaproxy/
   Cargo.toml               lib + bin + tests
   nimaproxy.toml.example   Template for users (all optional keys)
+  nimaproxy.toml           Local run config, gitignored - may hold literal keys
   src/
     lib.rs                 Exports modules + AppState
     main.rs                Binary entry point
@@ -285,17 +286,22 @@ Standalone Rust binary for production use. Provides OpenAI-compatible API with k
 cd nimaproxy
 cargo build --release
 
-# Copy the template
-cp nimaproxy/nimaproxy.toml.example nimaproxy/nimaproxy.toml
+# Copy the template (paths below are relative to the crate, since we cd'd into it)
+cp nimaproxy.toml.example nimaproxy.toml
 # Point each key at an environment variable rather than embedding a secret:
 #   [[keys]]
 #   key = "${NIMAPROXY_KEY_PRIMARY}"
 export NIMAPROXY_KEY_PRIMARY=nvapi-...
-# See nimaproxy/nimaproxy.toml.example for all optional keys, including `loop_idle_timeout_secs` (default 300).
+# See nimaproxy.toml.example for all optional keys, including `loop_idle_timeout_secs` (default 300).
 
 # Run
-./target/release/nimaproxy --config nimaproxy/nimaproxy.toml
+./target/release/nimaproxy --config nimaproxy.toml
 ```
+
+**Two config paths, and they differ.** `nimaproxy.toml` at the **repo root** is tracked,
+and holds `${VAR}` placeholders — never credentials. The copy beside the crate,
+`nimaproxy/nimaproxy.toml`, is **gitignored**: it is meant for local runs and may hold
+literal keys, so do not move it to the root or commit it.
 
 **Keys are resolved from the environment.** Each `key` may be a `${VAR}` reference
 instead of a literal secret, so a config can be committed and reviewed without
