@@ -259,15 +259,51 @@ pub struct TurnRecord {
 }
 
 impl TurnLog {
-    /// Which phase of a request a record describes.
+    /// Which kind of record this is: [`Self::RECORD_KIND_TTFB`],
+    /// [`Self::RECORD_KIND_COMPLETION`], or [`Self::RECORD_KIND_LOOP`].
+    ///
     /// A streamed turn now produces two records: `ttfb` when the first byte
     /// arrives (what the proxy knew at that instant) and `completion` when the
     /// stream ends (what the stream actually turned out to be). They share a
     /// `request_id`, so a truncated generation can be traced back to the
     /// attempt that produced it.
+    ///
+    /// # Denominator rule — read this before computing a rate from the log
+    ///
+    /// The three kinds do not share a denominator, and only one of them can be
+    /// one. [`Self::is_request_record`] answers this in code; the reasons are
+    /// worth stating, because each mistake yields a plausible number rather
+    /// than an error:
+    ///
+    /// - `ttfb` is written exactly **once per request**, before the outcome is
+    ///   known, so it is the only valid denominator for a success or failure
+    ///   rate.
+    /// - `completion` is written only when a stream *ends*, so it is absent for
+    ///   every request that failed. A rate over completions reports 0% failures
+    ///   by construction, however many requests failed.
+    /// - `loop` is a loop summary written when a user turn ends (see [`LoopKey`],
+    ///   and the `loops`/`depth` queries in `log_query`). It is deliberate,
+    ///   queryable instrumentation, not accidental output — but it is not a
+    ///   model call: empty model, zero messages, zero latency. It is a
+    ///   non-denominator, which is a different thing from a defect.
+    ///
+    /// Because all three share one file, a count over "every record in
+    /// turns.jsonl" mixes one denominator with two non-denominators. Measured on
+    /// 2026-10-19 traffic that is a ~2x error from the ttfb/completion pair
+    /// alone, before any loop records are counted.
     pub const RECORD_KIND_TTFB: &'static str = "ttfb";
     pub const RECORD_KIND_COMPLETION: &'static str = "completion";
     pub const RECORD_KIND_LOOP: &'static str = "loop";
+
+    /// Whether this record was written exactly once per request, and so is a
+    /// valid denominator for a success or failure rate.
+    ///
+    /// True only for `ttfb`. Prefer this to comparing `record_kind` against a
+    /// literal in an ad-hoc script, so that a future non-request kind cannot
+    /// silently enter a rate computation that was already written.
+    pub fn is_request_record(&self) -> bool {
+        self.record_kind == Self::RECORD_KIND_TTFB
+    }
 
     pub fn new(record: TurnRecord) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -648,6 +684,68 @@ mod tests {
         assert_eq!(turn.latency_ms, 742);
         assert!(turn.success);
         assert!(!turn.has_tool_calls);
+    }
+
+    /// Only `ttfb` may serve as a rate denominator: it is the one kind written
+    /// exactly once per request. `completion` is absent on failure and `loop` is
+    /// not a model call, so a rate computed over either is wrong in a direction
+    /// that looks plausible rather than failing loudly. This is pinned because
+    /// adding a future record kind without regard to the rule is exactly how a
+    /// measurement drifts while continuing to look well-formed.
+    #[test]
+    fn test_only_ttfb_may_be_a_rate_denominator() {
+        fn record() -> TurnRecord {
+            TurnRecord {
+                requested_model: "auto".to_string(),
+                responding_model: "m".to_string(),
+                latency_ms: 10,
+                success: true,
+                status_code: 200,
+                request_message_count: 1,
+                response_message_count: 1,
+                has_tool_calls: false,
+                tool_call_count: 0,
+                key_label: Some("test".to_string()),
+                is_racing: false,
+                error: None,
+                request_tokens: None,
+                loop_key: None,
+                response_tokens: None,
+            }
+        }
+
+        // A fresh record is a request record: it is written before the outcome
+        // is known, which is precisely what makes it usable as a denominator.
+        let ttfb = TurnLog::new(record());
+        assert_eq!(ttfb.record_kind, TurnLog::RECORD_KIND_TTFB);
+        assert!(ttfb.is_request_record());
+
+        // A completion exists only once a stream ends, so it is missing for
+        // every failed request and cannot be a denominator.
+        let mut completion = TurnLog::new(record());
+        completion.record_kind = TurnLog::RECORD_KIND_COMPLETION.to_string();
+        assert!(
+            !completion.is_request_record(),
+            "completion is absent on failure and must not be a denominator"
+        );
+
+        // A loop summary is deliberate instrumentation, but it is not a call.
+        let mut loop_summary = TurnLog::new(record());
+        loop_summary.record_kind = TurnLog::RECORD_KIND_LOOP.to_string();
+        assert!(
+            !loop_summary.is_request_record(),
+            "a loop summary is not a model call and must not be a denominator"
+        );
+
+        // Records written before the field existed deserialize as ttfb and are
+        // genuine request records, so the legacy path must stay a denominator.
+        let fresh = TurnLog::new(record());
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("record_kind");
+        let legacy: TurnLog = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.record_kind, TurnLog::RECORD_KIND_TTFB);
+        assert!(legacy.is_request_record());
     }
 
     /// The request id must be populated and unique, otherwise the log cannot
