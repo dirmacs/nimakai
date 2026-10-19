@@ -25,6 +25,7 @@ pub(crate) fn no_key_response(state: &AppState) -> Response {
     state.gateway_metrics.record_no_key();
     (StatusCode::TOO_MANY_REQUESTS, "all API keys rate-limited").into_response()
 }
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn try_acquire_gateway_permits(
     state: &AppState,
 ) -> Result<(UpstreamPermit, KeyLease), GatewayAcquireError> {
