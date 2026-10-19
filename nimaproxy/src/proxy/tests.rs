@@ -89,6 +89,7 @@ fn create_adaptive_test_state() -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 8000,
             auth_failure_cooldown_secs: 900,
         },
     )
@@ -907,6 +908,7 @@ fn saturated_single_key_state(max_in_flight_per_key: usize) -> Arc<AppState> {
             admission_wait_ms: 5000,
             min_dynamic_timeout_ms: 15_000,
             dynamic_sample_floor: 25,
+            mid_stream_idle_timeout_ms: 15_000,
             auth_failure_cooldown_secs: 900,
         },
     )

@@ -135,15 +135,28 @@ pub async fn chat_completions(
     // for the retry, plus the admission wait that elapses before the first
     // permit, plus scheduling slack.
     //
+    // Since the split, "the window" is two windows: the first-byte window
+    // (`request_timeout_ms`) bounds the send and the wait for the first byte,
+    // while the idle window (`mid_stream_idle_timeout_ms`) bounds each gap
+    // between chunks once the body has started. The retry policy therefore
+    // carries two budgets. A send timeout or a no-bytes stall consumed at
+    // most one first-byte window, so its retry is admitted under the fast
+    // budget (`2 * first_byte + admission + slack`). A mid-body stall
+    // consumed a first-byte window AND ran into the idle rail, so its retry
+    // is admitted under the body-stall budget, which is the fast budget
+    // plus one idle window. Either way the retry is still a single extra
+    // attempt — the budget admits exactly one window pair, never a chain.
+    //
     // The admission allowance is load-bearing and was measured, not assumed:
     // `elapsed` is measured from the start of the REQUEST, which includes
     // waiting for a permit (up to `admission_wait_ms`, 5000 ms in production).
     // Observed on the live host, a single attempt measured 16546 ms against a
     // 15000 ms window, so a bare 2x budget (30500 ms) rejected the retry
     // because 16546 + 15000 > 30500.
-    let retry_policy = RetryPolicy::new(
+    let retry_policy = RetryPolicy::new_split(
         n,
         timeout_for_model(&state, &model_id),
+        state.mid_stream_idle_timeout_ms,
         state.admission_wait_ms,
     );
     let started = Instant::now();
@@ -443,14 +456,20 @@ pub async fn chat_completions(
                 // the stream had delivered 262 chunks in 7.9 s.
                 //
                 // The contract that must survive the change: a stall is still
-                // detected. Two separate bounds do that now —
-                //   1. the first byte must arrive within the timeout window
-                //      (that is the "is the upstream alive" signal, and it is
-                //      what the retry and the 504 are keyed on), and
-                //   2. no single inter-chunk gap may exceed the window, which
-                //      catches a mid-stream stall.
+                // detected. Two separate bounds do that now, and they are two
+                // separate KNOBS, because they guard different events:
+                //   1. the first byte must arrive within the first-byte window
+                //      (`request_timeout_ms`: the "is the upstream alive"
+                //      signal, and what the retry and the 504 are keyed on), and
+                //   2. no single inter-chunk gap may exceed the idle window
+                //      (`mid_stream_idle_timeout_ms`), which catches a
+                //      mid-stream stall.
                 // A response that merely takes a long time to finish is
-                // therefore allowed, which is the whole point.
+                // therefore allowed, which is the whole point. And a live
+                // generation that pauses to think between tokens is allowed a
+                // longer pause than a silent upstream is allowed before its
+                // first byte — that is why the idle window defaults wider
+                // (60 s vs 25 s).
                 let resp_status = axum::http::StatusCode::from_u16(status.as_u16())
                     .unwrap_or(StatusCode::BAD_GATEWAY);
                 let content_type = resp
@@ -465,6 +484,7 @@ pub async fn chat_completions(
                     .bytes_stream()
                     .map_err(|e| std::io::Error::other(e.to_string()));
                 let window = Duration::from_millis(request_timeout_ms);
+                let idle_window = Duration::from_millis(state.mid_stream_idle_timeout_ms);
 
                 request_state = crate::proxy::request_state::RequestState::InFlight;
                 // Bound the wait for the FIRST byte. This is the only part that
@@ -608,7 +628,7 @@ pub async fn chat_completions(
                 let tap = crate::proxy::sse_tap::SseTap::new();
                 let tapped = crate::proxy::sse_tap::TappedStream::new(
                     tap.clone(),
-                    crate::proxy::streaming::with_idle_timeout(with_first, window),
+                    crate::proxy::streaming::with_idle_timeout(with_first, idle_window),
                 );
 
                 // Usage tokens for this turn. Streaming paths leave them to the
@@ -634,7 +654,13 @@ pub async fn chat_completions(
                     let mut stalled = false;
                     futures::pin_mut!(tapped);
                     loop {
-                        match timeout(window, tapped.next()).await {
+                        // The idle window, not the first-byte window: the body
+                        // has started, so this is the mid-stream rail now. The
+                        // guard inside `tapped` fires first (same window), so
+                        // in practice the stall arrives as a typed payload on
+                        // the `Ok` arm below; this outer bound is the backstop
+                        // for a guard that somehow never yields.
+                        match timeout(idle_window, tapped.next()).await {
                             Ok(Some(Ok(chunk))) => collected.push(chunk),
                             // The idle guard reports a stall as an error on the
                             // stream, so a silent upstream arrives here and not
@@ -669,12 +695,15 @@ pub async fn chat_completions(
                         );
                         state.pool.note_upstream_stall(idx);
 
+                        // The body-stall budget: this attempt consumed a
+                        // first-byte window AND ran into the idle rail, so
+                        // its retry is admitted under the wider ceiling.
                         let may_retry = request_state.on_failure(false).can_retry(
                             attempt,
                             n,
                             started,
                             std::time::Duration::from_millis(request_timeout_ms),
-                            retry_policy.budget(),
+                            retry_policy.body_stall_budget(),
                         );
                         if may_retry {
                             log_turn_request(TurnRecord {
@@ -692,7 +721,7 @@ pub async fn chat_completions(
                                 is_racing: false,
                                 error: Some(format!(
                                     "upstream body stalled after {}ms; retrying on another key",
-                                    request_timeout_ms
+                                    state.mid_stream_idle_timeout_ms
                                 )),
                                 request_tokens: None,
                                 response_tokens: None,
@@ -714,14 +743,17 @@ pub async fn chat_completions(
                             is_racing: false,
                             error: Some(format!(
                                 "upstream body stalled after {}ms",
-                                request_timeout_ms
+                                state.mid_stream_idle_timeout_ms
                             )),
                             request_tokens: None,
                             response_tokens: None,
                         });
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
-                            format!("upstream body stalled after {}ms", request_timeout_ms),
+                            format!(
+                                "upstream body stalled after {}ms",
+                                state.mid_stream_idle_timeout_ms
+                            ),
                         )
                             .into_response();
                     }
@@ -820,11 +852,12 @@ pub async fn chat_completions(
                     // The wait is bounded rather than open-ended. A client that
                     // goes away mid-stream can leave the body unpolled forever,
                     // and an unbounded wait would leak a task per such request.
-                    // The bound is generous (5 minutes past the inter-chunk
-                    // window) so a slow-but-healthy generation is never cut off;
-                    // if it expires, the stream is recorded as truncated, which
-                    // is what a client that stopped reading actually produced.
-                    let wait_bound = window * 20 + Duration::from_secs(60);
+                    // The bound scales with the IDLE window — the widest gap a
+                    // healthy stream may legitimately show — plus a minute, so
+                    // a slow-but-healthy generation is never cut off; if it
+                    // expires, the stream is recorded as truncated, which is
+                    // what a client that stopped reading actually produced.
+                    let wait_bound = idle_window * 20 + Duration::from_secs(60);
                     let started_stream = Instant::now();
                     let turn_ctx = crate::proxy::http::TurnContext {
                         requested_model: original_model.clone(),
@@ -870,6 +903,8 @@ pub async fn chat_completions(
                                 tool_call_count: outcome.tool_call_count as u64,
                                 tool_call_distinct: outcome.tool_call_distinct as u64,
                                 abort_reason,
+                                max_gap_ms: outcome.max_gap_ms,
+                                ended_by: outcome.ended_by.as_str().to_string(),
                             },
                             &state.loop_tracker,
                             &state.gateway_metrics,

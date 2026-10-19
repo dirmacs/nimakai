@@ -676,3 +676,108 @@ async fn absent_usage_records_no_token_counts() {
         "no usage frame means no completion count, never 0"
     );
 }
+
+/// The completion record carries the largest observed inter-chunk gap.
+///
+/// A mock upstream delivers its whole body as one chunk, so the gap clock
+/// never starts here: the record must say "no gap observed", not 0. The
+/// positive arm — a real gap recorded in milliseconds — lives in the tap's
+/// unit tests, where the chunk timing is under the test's control; what
+/// this proves is the end-to-end field path for the degenerate shape, plus
+/// the clean end cause on the same record.
+#[tokio::test]
+async fn single_chunk_stream_records_no_gap_and_clean_end() {
+    let (_server, url) = mock_upstream(&format!(
+        "{}{}data: [DONE]\n\n",
+        frame("Hello", ""),
+        frame(" world", "stop")
+    ))
+    .await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (_, request_id) = log.turn(state, turn_body()).await;
+
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(
+        completion.max_inter_chunk_gap_ms, None,
+        "one forwarded chunk means no gap was observed, never a 0 ms gap"
+    );
+    assert_eq!(
+        completion.stream_ended_by.as_deref(),
+        Some("clean"),
+        "an upstream that closed its own stream ended cleanly"
+    );
+}
+
+/// A stream the idle guard aborts must record `guard_stall` as its end
+/// cause — not `upstream_error`, and not `clean`. This is the field that
+/// answers "guard abort or upstream close" on the next truncation without
+/// any capture infra.
+#[tokio::test]
+async fn guard_aborted_stream_records_guard_stall_end_cause() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    // A real TCP listener, not a mock: a mock buffers its whole chunked
+    // body into one fast write, so the stream ends cleanly before the
+    // guard can fire and the record says `clean`. Only a real
+    // inter-chunk gap exercises the guard.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            // One frame, then silence past the idle window: the guard —
+            // not the upstream — is what ends this stream.
+            let chunk = frame("partial answer", "");
+            let framed = format!("{:x}\r\n{}\r\n", chunk.len(), chunk);
+            let _ = sock.write_all(framed.as_bytes()).await;
+            let _ = sock.flush().await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+
+    let log = LogFile::new();
+    // A short idle window so the guard fires inside the test; the
+    // first-byte window is equally short, but the first byte arrives
+    // immediately, so only the mid-stream rail is exercised.
+    let state = nimaproxy::AppState::new_with_controls(
+        nimaproxy::AppStateParams {
+            keys: vec![KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 150,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        nimaproxy::RuntimeControls {
+            mid_stream_idle_timeout_ms: 150,
+            ..nimaproxy::RuntimeControls::default()
+        },
+    );
+
+    let (response, request_id) = log.turn_response(state, turn_body()).await;
+    assert_eq!(response.status(), 200);
+    let _ = to_bytes(response.into_body(), 1 << 20).await;
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(completion.stream_ended_cleanly, Some(false));
+    assert_eq!(
+        completion.stream_ended_by.as_deref(),
+        Some("guard_stall"),
+        "the guard aborted this stream, so the record must say so"
+    );
+}

@@ -85,6 +85,11 @@ pub struct AppState {
     pub admission_wait_ms: u64,
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
+    /// Maximum tolerated gap between two chunks of one response (ms). The
+    /// mid-stream idle rail: wider than the first-byte window by default,
+    /// because a live generation pausing between tokens is not a dead
+    /// upstream. See [`config::Config::mid_stream_idle_timeout_ms`].
+    pub mid_stream_idle_timeout_ms: u64,
     /// Cooldown (seconds) applied to a key after an upstream 401/403 (auth failure) on any
     /// inference path. `0` disables auth-failure quarantine. See `config::auth_failure_cooldown_secs`.
     pub auth_failure_cooldown_secs: u64,
@@ -116,6 +121,7 @@ pub struct RuntimeControls {
     pub admission_wait_ms: u64,
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
+    pub mid_stream_idle_timeout_ms: u64,
     pub auth_failure_cooldown_secs: u64,
 }
 
@@ -137,6 +143,7 @@ impl Default for RuntimeControls {
             admission_wait_ms: 1500,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 60_000,
             auth_failure_cooldown_secs: 900,
         }
     }
@@ -432,6 +439,11 @@ impl AppState {
             admission_wait_ms: controls.admission_wait_ms,
             min_dynamic_timeout_ms: controls.min_dynamic_timeout_ms.max(1000),
             dynamic_sample_floor: controls.dynamic_sample_floor.max(2),
+            // No floor: the mid-stream window is a test-tunable rail like
+            // the first-byte window (which is equally unclamped here — its
+            // floor lives in the config accessor), and sub-second windows
+            // are what the stall tests run against.
+            mid_stream_idle_timeout_ms: controls.mid_stream_idle_timeout_ms,
             auth_failure_cooldown_secs: controls.auth_failure_cooldown_secs,
             loop_tracker: Arc::new(loop_tracker::LoopTracker::new(loop_idle_timeout)),
             upstream_permits: Arc::new(Semaphore::new(controls.max_upstream_in_flight.max(1))),

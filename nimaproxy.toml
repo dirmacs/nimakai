@@ -120,6 +120,14 @@ admission_wait_ms = 30000
 # together or the dynamic path silently undoes the change.
 min_dynamic_timeout_ms = 25000
 dynamic_sample_floor = 25
+# 2026-10-19: the mid-stream idle rail, split from the first-byte window
+# above. The first byte answers "is the upstream alive" (25 s); a gap
+# between chunks answers "did a live generation stall", and healthy gaps
+# are sub-second per turn-log analysis, so 60 s still catches every
+# pathological stall while tolerating a generation that pauses to think
+# between tokens. Same as the code default — pinned here so the deployed
+# value is visible next to the rail it was split from.
+mid_stream_idle_timeout_ms = 60000
 
 [routing]
 strategy = "latency_aware"

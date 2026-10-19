@@ -4,6 +4,19 @@ All notable changes to nimakai are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Mid-stream idle window split from the first-byte window.** The inter-chunk
+  stall guard is now governed by `[timeouts].mid_stream_idle_timeout_ms`
+  (default 60 s) instead of sharing the 25 s first-byte rail, so a live
+  generation that pauses to think between tokens is no longer killed as a
+  stall. The retry budget splits with it: send/no-bytes failures retry under
+  the fast budget, mid-body stalls under a wider body-stall budget. Completion
+  records now carry `max_inter_chunk_gap_ms` (largest observed inter-chunk
+  gap) and `stream_ended_by` (`clean` / `guard_stall` / `upstream_error`), so
+  the next truncation answers "one pathological gap or a hung upstream" and
+  "guard abort or upstream close" from the log alone.
+
 ### Changed
 
 - **API keys can come from the environment.** `[[keys]].key` now accepts a `${VAR}` reference,
