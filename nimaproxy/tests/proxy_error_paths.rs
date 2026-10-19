@@ -2867,3 +2867,165 @@ async fn test_mid_stream_gap_past_idle_window_still_aborts() {
          upstream's 30 s silence: took {elapsed:?}"
     );
 }
+
+/// A healthy stream longer than any whole-request cap must complete.
+///
+/// The shared client used to carry a 120 s whole-request timeout, which
+/// severed healthy long generations mid-stream (measured 3/3 on the proxy arm
+/// of an A/B whose direct arm completed the same 338 s and 458 s
+/// generations). The cap is gone; the only mid-stream bound left is the
+/// inter-chunk idle rail. This test holds every gap inside that rail while
+/// pushing the TOTAL past 120 s, and requires the full body to arrive.
+///
+/// Uses paused tokio time (`start_paused`), not wall-clock sleeps: 40 chunks
+/// at 4 s test-time gaps is 156 s of stream for milliseconds of wall clock.
+/// The clock is driven explicitly — the handler and the body drain each run
+/// as a spawned task while the test advances time in 1 s steps — because a
+/// paused clock only moves when told to. Uses a real TCP listener for the
+/// same reason as the stall tests above: a mock buffers its writes, so the
+/// gaps would not be observable as inter-chunk pauses at the HTTP layer.
+#[tokio::test(start_paused = true)]
+async fn test_stream_longer_than_whole_request_cap_survives() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const CHUNKS: usize = 40;
+    const GAP_SECS: u64 = 4;
+    // 39 gaps x 4 s = 156 s of test-time stream, past the removed 120 s cap,
+    // while every gap sits inside the 10 s idle window.
+    const IDLE_WINDOW_MS: u64 = 10_000;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            for i in 0..CHUNKS {
+                // The first chunk leaves immediately so the first-byte bound
+                // is trivially satisfied; every later chunk follows a gap
+                // that is long in total but short against the idle rail.
+                if i > 0 {
+                    tokio::time::sleep(Duration::from_secs(GAP_SECS)).await;
+                }
+                let chunk =
+                    format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"tok{i}\"}}}}]}}\n\n");
+                let framed = format!("{:x}\r\n{}\r\n", chunk.len(), chunk);
+                let _ = sock.write_all(framed.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+            let done = "data: [DONE]\n\n";
+            let framed = format!("{:x}\r\n{}\r\n", done.len(), done);
+            let _ = sock.write_all(framed.as_bytes()).await;
+            let _ = sock.write_all(b"0\r\n\r\n").await;
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 1,
+            // The first-byte rail in test-time: generous, because the clock
+            // only advances when this test drives it.
+            racing_timeout_ms: 30_000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 1000,
+            dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: IDLE_WINDOW_MS,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "long-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    // Drive a spawned future to completion by advancing the paused clock in
+    // 1 s steps. Each step is instant in wall-clock; the cap bounds the
+    // drive in TEST-time so a hung future fails instead of hanging the
+    // suite. Returns the output once the task finishes.
+    async fn drive_to_completion<T>(handle: tokio::task::JoinHandle<T>, max_steps: u64) -> T {
+        for _ in 0..max_steps {
+            if handle.is_finished() {
+                break;
+            }
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            handle.is_finished(),
+            "drove {max_steps} s of test-time without the future completing"
+        );
+        handle.await.expect("driven task must not panic")
+    }
+
+    let clock_start = tokio::time::Instant::now();
+    let wall_start = std::time::Instant::now();
+
+    // Phase 1: the handler awaits the first byte internally, so it needs
+    // the clock driven too — it cannot simply be awaited on a paused clock.
+    let handler = tokio::spawn({
+        let state = state.clone();
+        let body = Bytes::from(body.to_string());
+        async move {
+            chat_completions(axum::extract::State(state), HeaderMap::new(), body)
+                .await
+                .into_response()
+        }
+    });
+    let resp = drive_to_completion(handler, 60).await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+    // Phase 2: the handler hands back a lazy body, so the 156 s stream is
+    // only observed while the caller drains — the drain needs driving too.
+    // Cap well past the stream length so a regression fails, not hangs.
+    let drain =
+        tokio::spawn(async move { axum::body::to_bytes(resp.into_body(), usize::MAX).await });
+    let drained = drive_to_completion(drain, 300).await;
+
+    let test_elapsed = clock_start.elapsed();
+    let wall_elapsed = wall_start.elapsed();
+
+    let bytes = drained.expect("a healthy 156 s stream must drain cleanly");
+    let text = String::from_utf8_lossy(&bytes);
+    for i in 0..CHUNKS {
+        assert!(
+            text.contains(&format!("tok{i}")),
+            "lost chunk {i} of {CHUNKS} in a stream whose gaps never exceeded the idle window: {text}"
+        );
+    }
+    assert!(
+        text.contains("[DONE]"),
+        "the stream must terminate cleanly: {text}"
+    );
+    assert!(
+        test_elapsed >= Duration::from_secs(120),
+        "the test proves nothing unless the stream actually crossed the removed 120 s cap; only drove {test_elapsed:?}"
+    );
+    assert!(
+        wall_elapsed < Duration::from_secs(60),
+        "paused time must keep this fast in wall-clock; took {wall_elapsed:?}"
+    );
+}

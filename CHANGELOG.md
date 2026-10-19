@@ -17,6 +17,22 @@ All notable changes to nimakai are documented in this file.
   the next truncation answers "one pathological gap or a hung upstream" and
   "guard abort or upstream close" from the log alone.
 
+### Fixed
+
+- **Removed the shared client's 120 s whole-request timeout.** reqwest's
+  client-level timeout caps headers, body, and stream together, so it severed
+  healthy long generations mid-stream — measured 3/3 on the proxy arm of an
+  A/B whose direct arm completed the same 338 s and 458 s generations. Every
+  phase already carries its own bound (send and first byte under the
+  first-byte window, streaming bodies under the inter-chunk idle rail,
+  non-streaming assembly under the per-next idle bound), so the cap was
+  redundant as well as harmful. Paths that had relied on it without a bound
+  of their own now carry one: `/v1/completions` and `/v1/embeddings` bound
+  the send with the first-byte window, the racing error-body read is bounded
+  by the racing deadline, and the `/v1/models` passthrough keeps a
+  per-request cap. A paused-time regression test holds a 156 s stream with
+  sub-idle gaps to completion.
+
 ### Changed
 
 - **API keys can come from the environment.** `[[keys]].key` now accepts a `${VAR}` reference,
