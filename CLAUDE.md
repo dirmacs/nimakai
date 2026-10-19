@@ -114,7 +114,8 @@ cargo build --release --manifest-path=nimaproxy/Cargo.toml
 
 # Copy and edit config
 cp nimaproxy/nimaproxy.toml.example nimaproxy/nimaproxy.toml
-# Edit nimaproxy.toml with your NVIDIA API keys
+# Reference keys via the environment, e.g. key = "${NIMAPROXY_KEY_PRIMARY}"
+# (an unset or empty variable is a hard startup error; literal keys also work)
 
 # Run
 ./nimaproxy/target/release/nimaproxy --config nimaproxy/nimaproxy.toml

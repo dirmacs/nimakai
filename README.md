@@ -252,13 +252,11 @@ tests/
 ```text
 nimaproxy/
   Cargo.toml               lib + bin + tests
-  nimaproxy.toml           Config (NOT committed - contains API keys)
-  nimaproxy.toml.example   Template for users
-  .gitignore               Excludes nimaproxy.toml
+  nimaproxy.toml.example   Template for users (all optional keys)
   src/
     lib.rs                 Exports modules + AppState
     main.rs                Binary entry point
-    config.rs              TOML config parsing
+    config/                TOML config parsing (keys, racing) + unit tests
     turn_log.rs             Request logging and query analysis
     key_pool.rs            Key rotation, rate-limit tracking
     model_stats.rs          Per-model latency tracking
@@ -287,14 +285,30 @@ Standalone Rust binary for production use. Provides OpenAI-compatible API with k
 cd nimaproxy
 cargo build --release
 
-# Copy and edit config
-cp nimaproxy.toml.example nimaproxy.toml
-# Edit nimaproxy.toml with your NVIDIA API keys
+# Copy the template
+cp nimaproxy/nimaproxy.toml.example nimaproxy/nimaproxy.toml
+# Point each key at an environment variable rather than embedding a secret:
+#   [[keys]]
+#   key = "${NIMAPROXY_KEY_PRIMARY}"
+export NIMAPROXY_KEY_PRIMARY=nvapi-...
 # See nimaproxy/nimaproxy.toml.example for all optional keys, including `loop_idle_timeout_secs` (default 300).
 
 # Run
-./target/release/nimaproxy --config nimaproxy.toml
+./target/release/nimaproxy --config nimaproxy/nimaproxy.toml
 ```
+
+**Keys are resolved from the environment.** Each `key` may be a `${VAR}` reference
+instead of a literal secret, so a config can be committed and reviewed without
+holding credentials:
+
+```toml
+[[keys]]
+key = "${NIMAPROXY_KEY_PRIMARY}"
+label = "primary"
+```
+
+A referenced variable that is unset or empty is a hard startup error, so a typo
+fails loudly rather than leasing a blank key. Literal keys still work unchanged.
 
 **Endpoints:**
 
