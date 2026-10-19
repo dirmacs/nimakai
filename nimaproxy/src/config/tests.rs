@@ -950,3 +950,164 @@ fn test_model_params_get_missing_key() {
     let params_no_kwargs = ModelParams::default();
     assert!(params_no_kwargs.get("any_key").is_none());
 }
+
+// Tests below mutate the process environment, which is global and shared
+// across test threads, so they serialize on this lock and clean up every
+// variable they set.
+static ENV_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[test]
+fn test_literal_key_passes_through_unchanged() {
+    let _guard = ENV_TEST_LOCK.lock();
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "nvapi-literal-key-material"
+label = "literal"
+"#,
+    );
+
+    let config = load(file.path().to_str().unwrap()).unwrap();
+
+    assert_eq!(config.keys.len(), 1);
+    assert_eq!(config.keys[0].key, "nvapi-literal-key-material");
+}
+
+#[test]
+fn test_placeholder_expands_when_set() {
+    let _guard = ENV_TEST_LOCK.lock();
+    std::env::set_var("NIMAPROXY_TEST_KEY_A", "nvapi-resolved-secret-a");
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "${NIMAPROXY_TEST_KEY_A}"
+label = "from-env"
+"#,
+    );
+
+    let result = load(file.path().to_str().unwrap());
+    std::env::remove_var("NIMAPROXY_TEST_KEY_A");
+
+    let config = result.unwrap();
+    assert_eq!(config.keys.len(), 1);
+    assert_eq!(config.keys[0].key, "nvapi-resolved-secret-a");
+}
+
+#[test]
+fn test_unset_variable_fails_closed_without_key_material() {
+    let _guard = ENV_TEST_LOCK.lock();
+    std::env::remove_var("NIMAPROXY_TEST_KEY_MISSING");
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "nvapi-first-literal"
+label = "first"
+
+[[keys]]
+key = "${NIMAPROXY_TEST_KEY_MISSING}"
+label = "second"
+"#,
+    );
+
+    let result = load(file.path().to_str().unwrap());
+
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("NIMAPROXY_TEST_KEY_MISSING"),
+        "error must name the variable: {err}"
+    );
+    assert!(
+        err.contains('1') && err.contains("second"),
+        "error must identify the entry by index and label: {err}"
+    );
+    assert!(
+        !err.contains("nvapi-first-literal"),
+        "error must not echo key material: {err}"
+    );
+    assert!(
+        !err.contains("${") && !err.contains('}'),
+        "error must not echo the placeholder text: {err}"
+    );
+}
+
+#[test]
+fn test_embedded_placeholder_stays_literal() {
+    let _guard = ENV_TEST_LOCK.lock();
+    std::env::set_var("NIMAPROXY_TEST_KEY_X", "nvapi-should-not-appear");
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "abc${NIMAPROXY_TEST_KEY_X}def"
+
+[[keys]]
+key = "${1BAD}"
+
+[[keys]]
+key = "$NIMAPROXY_TEST_KEY_X"
+"#,
+    );
+
+    let result = load(file.path().to_str().unwrap());
+    std::env::remove_var("NIMAPROXY_TEST_KEY_X");
+
+    let config = result.unwrap();
+    assert_eq!(config.keys.len(), 3);
+    assert_eq!(config.keys[0].key, "abc${NIMAPROXY_TEST_KEY_X}def");
+    assert_eq!(config.keys[1].key, "${1BAD}");
+    assert_eq!(config.keys[2].key, "$NIMAPROXY_TEST_KEY_X");
+}
+
+#[test]
+fn test_two_placeholders_resolve_independently() {
+    let _guard = ENV_TEST_LOCK.lock();
+    std::env::set_var("NIMAPROXY_TEST_KEY_ONE", "nvapi-resolved-secret-one");
+    std::env::set_var("NIMAPROXY_TEST_KEY_TWO", "nvapi-resolved-secret-two");
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "${NIMAPROXY_TEST_KEY_ONE}"
+
+[[keys]]
+key = "${NIMAPROXY_TEST_KEY_TWO}"
+"#,
+    );
+
+    let result = load(file.path().to_str().unwrap());
+    std::env::remove_var("NIMAPROXY_TEST_KEY_ONE");
+    std::env::remove_var("NIMAPROXY_TEST_KEY_TWO");
+
+    let config = result.unwrap();
+    assert_eq!(config.keys.len(), 2);
+    assert_eq!(config.keys[0].key, "nvapi-resolved-secret-one");
+    assert_eq!(config.keys[1].key, "nvapi-resolved-secret-two");
+}
+
+#[test]
+fn test_set_but_empty_variable_fails_closed() {
+    let _guard = ENV_TEST_LOCK.lock();
+    std::env::set_var("NIMAPROXY_TEST_KEY_EMPTY", "");
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "${NIMAPROXY_TEST_KEY_EMPTY}"
+label = "empty"
+"#,
+    );
+
+    let result = load(file.path().to_str().unwrap());
+    std::env::remove_var("NIMAPROXY_TEST_KEY_EMPTY");
+
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("NIMAPROXY_TEST_KEY_EMPTY"),
+        "error must name the variable: {err}"
+    );
+    assert!(
+        err.contains("empty"),
+        "error must say the variable is empty: {err}"
+    );
+    assert!(
+        !err.contains("${") && !err.contains('}'),
+        "error must not echo the placeholder text: {err}"
+    );
+}

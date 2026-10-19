@@ -1,0 +1,252 @@
+listen = "0.0.0.0:8080"
+target = "https://integrate.api.nvidia.com"
+
+[[keys]]
+key = "${NIMAPROXY_KEY_DOLTARES}"
+label = "doltares"
+
+# 2026-09-02: "ares" key parked - GET /v1/models works but every POST inference
+# returns 403 "Authorization failed". Rotate/re-entitle the key, then restore.
+# 2026-10-15 re-probe: ares still 403 on stepfun-ai/step-5-preview inference
+# (doltares/backup/extra all 200). Parked so rotation skips it rather than
+# serving it a request that cannot succeed.
+[[keys]]
+key = "${NIMAPROXY_KEY_ARES}"
+label = "ares"
+disabled = true
+
+[[keys]]
+key = "${NIMAPROXY_KEY_BACKUP}"
+label = "backup"
+
+[[keys]]
+key = "${NIMAPROXY_KEY_EXTRA}"
+label = "extra"
+
+# 2026-10-15: probed alongside the four above; returns 200 on
+# stepfun-ai/step-5-preview. Not present in the original 2026-09-02 pool.
+[[keys]]
+key = "${NIMAPROXY_KEY_OPERATOR_BRUSH}"
+label = "operator-brush"
+
+[racing]
+# Tuned from live nimaproxy traces on 2026-06-14.
+# Refreshed 2026-09-02 against the authenticated /v1/models catalog: dropped z-ai/glm-5.1,
+# stepfun-ai/step-3.7-flash, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m2.7,
+# deepseek-ai/deepseek-v4-flash (absent upstream); added openai/gpt-oss-120b,
+# openai/gpt-oss-20b, nvidia/nemotron-3-super-120b-a12b (each proven via live non-streaming
+# max_tokens=8 + streaming chat completions, 0.8s-3.5s). deepseek-ai/deepseek-v4-flash-0731,
+# deepseek-ai/deepseek-v4-pro-0813, and moonshotai/kimi-k3 were probed but timed out
+# (60-90s across 3 keys) and were not adopted. moonshotai/kimi-k2.6 dropped: still listed
+# upstream but 404 ("Function not found for account") on inference for every working key.
+enabled = true
+# 2026-10-15: step-5 only. The multi-model pool (nemotron/gpt-oss/minimax) was
+# last validated 2026-09-02 and served no stepfun entry; step-5 was never in it.
+models = [
+"stepfun-ai/step-5-preview",
+]
+max_parallel = 2
+# 2026-10-19: 15000 -> 25000. This key is NOT a racing-path timeout: it is read as
+# `max_timeout_ms` by timeouts.rs -> get_model_timeout_with_policy() and applies to
+# every model request, so it is the CEILING of the dynamic timeout AND the value
+# returned outright when the sample ring is below `dynamic_sample_floor`.
+#
+# The deployed pair was ceiling=15000 with floor=15000, so every branch of
+# dynamic_timeout_ms_with_policy() returned exactly 15000 and the "dynamic" timeout
+# was a hidden constant. That is the whole defect: it was not mis-tuned, it was pinned.
+#   remaining_samples < floor -> return max_timeout_ms                  = 15000
+#   normal path               -> min(p95+buffer, max).max(min)          = 15000
+#
+# Derived from the live ttfb distribution, not chosen: successes on the post-deploy
+# binary put 4.34% of first-byte times in [13,15)s, so the cutoff sat INSIDE the
+# distribution and censored its own tail. Exponential fit on ttfb>=9s (mean 12.1s,
+# lambda 0.0826/s) predicts the stall rate falls 10.65% -> 4.66%, recovering ~97 of the
+# 173 live 504s -- all of which are this class.
+#
+# Deliberately equal to min_dynamic_timeout_ms so that BOTH branches yield 25000. A
+# ceiling above the floor would make the low-sample branch return the ceiling instead,
+# undoing this change on a cold ring; raising the ceiling above 25000 is the lever to
+# restore upward adaptation, and is a separate, separately-measured decision.
+timeout_ms = 25000
+max_total_request_ms = 25000
+strategy = "complete"
+adaptive = true
+min_parallel = 2
+pressure_parallel = 2
+degraded_parallel = 2
+solo_fallback = true
+large_prompt_char_threshold = 12000
+large_prompt_parallel = 1
+model_check_interval_secs = 3600
+fast_models = [
+"stepfun-ai/step-5-preview",
+]
+fallback_models = [
+"stepfun-ai/step-5-preview",
+]
+
+[limits]
+# 2026-10-19: sized from Little's law against live traffic, then deliberately held BELOW
+# the derived peak. Measured on loop-depth-v4: mean slot-hold 20.8s (p50 9.4s, p95 101s,
+# max 117.9s), mean arrival 0.036/s, peak minute 0.883/s.
+#   mean concurrency needed  = 0.75   <- why the old cap looked fine on averages
+#   peak concurrency needed  = 18.4 at the mean hold, 89 at the p95 hold
+#
+# A cap of 8 is sized for neither, which is what overload_rejects = 150/1681 measures.
+#
+# The derived peak is NOT the right target, though, because the two failure modes
+# compete: overload_rejects is this proxy shedding load, rate_limit_count is the upstream
+# shedding it. Raising the window converts the first into the second rather than removing
+# either. That trade is already visible at the old cap -- rate_limit_count rose 4 -> 14
+# as traffic resumed, while max_in_flight_per_key was still 2.
+#
+# So this takes one conservative step: double the per-key allowance (2 -> 4, i.e. 16
+# total) to absorb short bursts, and treat the p95-hold case as load to shed. That case
+# cannot be covered at any setting (89 slots), so a larger cap would only deepen the
+# upstream's 429s. If rate_limit_count climbs, max_in_flight_per_key is the knob to pull
+# back first, because per-key concurrency is the dimension the upstream throttles on.
+max_upstream_in_flight = 16
+max_in_flight_per_key = 4
+# 5000ms is shorter than a single mean slot-hold (20.8s), so a queued request almost
+# never sees a slot free before it is rejected -- the reject is decided by arithmetic,
+# not by load. Waiting at least one mean hold lets queueing absorb a burst. This is the
+# part of the change with no countervailing cost: it converts hard rejects into waits
+# and raises upstream concurrency not at all.
+admission_wait_ms = 30000
+
+[timeouts]
+# 2026-10-19: 15000 -> 25000 to match timeout_ms. A floor below the configured cutoff
+# would re-clip the tail that raising timeout_ms just uncovered, so the two must move
+# together or the dynamic path silently undoes the change.
+min_dynamic_timeout_ms = 25000
+dynamic_sample_floor = 25
+
+[routing]
+strategy = "latency_aware"
+spike_threshold_ms = 12000
+models = [
+"stepfun-ai/step-5-preview",
+]
+
+
+[model_params."deepseek-ai/deepseek-v4-pro"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+stream = false
+chat_template_kwargs = { thinking = false }
+
+[model_params."nvidia/nemotron-3-ultra-550b-a55b"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+# reasoning_budget dropped 2026-09-02: NIM V2 model runner returns 400
+# "thinking_token_budget is not yet supported" when it is sent.
+stream = true
+chat_template_kwargs = { enable_thinking = true }
+
+# Same nemotron-3 family as nemotron-3-ultra-550b-a55b above; NVIDIA docs recommend
+# temperature=1.0/top_p=0.95 "across all tasks and serving backends" for this family.
+[model_params."nvidia/nemotron-3-super-120b-a12b"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+# reasoning_budget dropped 2026-09-02: NIM V2 model runner returns 400
+# "thinking_token_budget is not yet supported" when it is sent.
+stream = true
+chat_template_kwargs = { enable_thinking = true }
+
+# build.nvidia.com snippet defaults (temperature=1, top_p=1); supports configurable
+# reasoning_effort (low/medium/high).
+[model_params."openai/gpt-oss-120b"]
+temperature = 1.0
+top_p = 1.0
+max_tokens = 16384
+stream = false
+reasoning_effort = "medium"
+
+[model_params."openai/gpt-oss-20b"]
+temperature = 1.0
+top_p = 1.0
+max_tokens = 16384
+stream = false
+reasoning_effort = "medium"
+
+[model_params."deepseek-ai/deepseek-v4-flash"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+stream = false
+chat_template_kwargs = { thinking = true, reasoning_effort = "high" }
+
+[model_params."mistralai/mistral-medium-3.5-128b"]
+temperature = 0.7
+top_p = 1.0
+max_tokens = 16384
+stream = false
+reasoning_effort = "high"
+
+[model_params."z-ai/glm-5.1"]
+temperature = 1.0
+top_p = 1.0
+max_tokens = 16384
+stream = true
+seed = 42
+
+[model_params."stepfun-ai/step-5-preview"]
+# Max effort: step-5 accepts reasoning_effort low/medium/high (Messages API:
+# output_config.effort). Streaming on so racing can compare first-token latency.
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+stream = true
+reasoning_effort = "high"
+
+[model_params."stepfun-ai/step-3.7-flash"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 16384
+stream = false
+
+[model_params."moonshotai/kimi-k2.6"]
+temperature = 1.0
+top_p = 1.0
+max_tokens = 16384
+stream = false
+
+[model_params."qwen/qwen3.5-397b-a17b"]
+temperature = 0.6
+top_p = 0.95
+top_k = 20
+presence_penalty = 0.0
+repetition_penalty = 1.0
+max_tokens = 16384
+stream = false
+
+[model_params."minimaxai/minimax-m3"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 8192
+stream = false
+
+[model_params."minimaxai/minimax-m2.7"]
+temperature = 1.0
+top_p = 0.95
+max_tokens = 8192
+stream = false
+
+[model_compat]
+# NVIDIA NIM does NOT support 'developer' role - transform all models (default behavior)
+# Models that support tool messages (don't need transformation)
+# Special value "all" means all models support tool messages - no transformation needed
+supports_tool_messages = ["all"]
+
+[circuit_breaker]
+max_output_tokens = 32000
+max_repetitions = 5
+max_consecutive_assistant_turns = 10
+
+# Turn logging for observability
+[logging]
+enabled = true
+path = "/var/log/nimaproxy/turns.jsonl"
