@@ -25,8 +25,21 @@ pub(crate) fn no_key_response(state: &AppState) -> Response {
     state.gateway_metrics.record_no_key();
     (StatusCode::TOO_MANY_REQUESTS, "all API keys rate-limited").into_response()
 }
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn try_acquire_gateway_permits(
     state: &AppState,
+) -> Result<(UpstreamPermit, KeyLease), GatewayAcquireError> {
+    try_acquire_gateway_permits_excluding(state, None)
+}
+/// Acquire permits while skipping the key at `exclude`.
+///
+/// The retry loop passes the key that just stalled so the next attempt lands
+/// on a *different* key; see `KeyPool::next_key_with_permit_excluding` for
+/// why. `None` keeps the plain round-robin pick for first attempts and for
+/// callers that have no failed key to avoid.
+pub(crate) fn try_acquire_gateway_permits_excluding(
+    state: &AppState,
+    exclude: Option<usize>,
 ) -> Result<(UpstreamPermit, KeyLease), GatewayAcquireError> {
     // Acquire the KEY LEASE FIRST, then the global permit.
     //
@@ -42,7 +55,7 @@ pub(crate) fn try_acquire_gateway_permits(
     //
     // Ordering the key lease first means a failed acquisition costs nothing:
     // we only count an attempt once we actually hold a key and a permit.
-    match state.pool.next_key_with_permit() {
+    match state.pool.next_key_with_permit_excluding(exclude) {
         Ok(key_lease) => {
             let upstream_permit = state
                 .try_acquire_upstream()
@@ -71,11 +84,22 @@ pub(crate) fn try_acquire_gateway_permits(
 pub(crate) async fn acquire_gateway_permits(
     state: &AppState,
 ) -> Result<(UpstreamPermit, KeyLease), Response> {
+    acquire_gateway_permits_excluding(state, None).await
+}
+/// Acquire permits while skipping the key at `exclude`.
+///
+/// The retry loop passes the key that just stalled so the next attempt lands
+/// on a *different* key. `None` keeps the plain pick for first attempts.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn acquire_gateway_permits_excluding(
+    state: &AppState,
+    exclude: Option<usize>,
+) -> Result<(UpstreamPermit, KeyLease), Response> {
     let start = Instant::now();
     let wait = Duration::from_millis(state.admission_wait_ms);
     let sleep_step = Duration::from_millis(25);
     loop {
-        match try_acquire_gateway_permits(state) {
+        match try_acquire_gateway_permits_excluding(state, exclude) {
             Ok(permits) => return Ok(permits),
             Err(GatewayAcquireError::NoKeys) if state.pool.is_empty() => {
                 return Err(no_key_response(state));

@@ -684,3 +684,46 @@ fn test_cooling_and_auth_quarantine_are_distinguishable() {
     assert!(status[1].auth_failures > 0);
     assert_eq!(status[0].auth_failures, 0);
 }
+
+/// A retry must land on a *different* key than the one that just stalled.
+/// Plain round-robin cannot promise that: once the pool wraps, the next slot
+/// is the failed key again. The exclusion is what makes the retry
+/// same-prompt-as-fresh-on-another-key rather than same-prompt-same-key.
+#[test]
+fn test_excluding_returns_a_different_key() {
+    let keys = vec![make_key_entry("key0", "a"), make_key_entry("key1", "b")];
+    let pool = KeyPool::with_max_in_flight(keys, 2);
+
+    let first = pool.next_key_with_permit().unwrap();
+    let retry = pool
+        .next_key_with_permit_excluding(Some(first.idx))
+        .unwrap();
+    assert_ne!(
+        retry.idx, first.idx,
+        "a retry that excludes the stalled key must land on the other key"
+    );
+
+    // Repeated exclusions keep missing the failed key: 10 retries, 10 times
+    // the fresh key. (Each lease drops at the end of its iteration, so the
+    // permits are not exhausted.)
+    for _ in 0..10 {
+        let again = pool
+            .next_key_with_permit_excluding(Some(first.idx))
+            .unwrap();
+        assert_ne!(again.idx, first.idx);
+    }
+}
+
+/// A single-key pool cannot satisfy an exclusion, so it degrades to the
+/// unexcluded pick rather than refusing. Refusing would turn every stall
+/// into an admission failure (429/503), which is worse than retrying on the
+/// only key there is — and a stall never benches the key, so the lease is
+/// still legal.
+#[test]
+fn test_excluding_with_a_single_key_still_yields_a_lease() {
+    let keys = vec![make_key_entry("key0", "a")];
+    let pool = KeyPool::with_max_in_flight(keys, 2);
+
+    let retry = pool.next_key_with_permit_excluding(Some(0)).unwrap();
+    assert_eq!(retry.idx, 0);
+}

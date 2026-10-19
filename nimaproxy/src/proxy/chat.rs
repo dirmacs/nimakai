@@ -1,5 +1,5 @@
 use crate::loop_tracker::SESSION_HEADER;
-use crate::proxy::admission::acquire_gateway_permits;
+use crate::proxy::admission::acquire_gateway_permits_excluding;
 use crate::proxy::chat_helpers::{accept_header_for_body, non_streaming_usage};
 use crate::proxy::http::log_turn_request;
 use crate::proxy::messages::{
@@ -129,6 +129,12 @@ pub async fn chat_completions(
     };
     let n = state.pool.len().clamp(1, MAX_RETRIES);
     let mut last_auth_failure_response: Option<Response> = None;
+    // The key the previous attempt stalled on, if any. The next attempt
+    // excludes it at admission so a stall retry lands on a *different* key
+    // rather than round-robining back to the one that just went quiet.
+    // Retrying the identical prompt on a fresh key is the proxy-side half of
+    // the same-prompt-as-fresh rule; see docs/RETRY-GUIDANCE.md.
+    let mut failed_key_idx: Option<usize> = None;
     // Total wall-clock budget for this request's upstream attempts.
     //
     // Sized to admit exactly one retry: one window for the first attempt, one
@@ -161,10 +167,11 @@ pub async fn chat_completions(
     );
     let started = Instant::now();
     for attempt in 0..n {
-        let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
-            Ok(permits) => permits,
-            Err(response) => return response,
-        };
+        let (upstream_permit, key_lease) =
+            match acquire_gateway_permits_excluding(&state, failed_key_idx).await {
+                Ok(permits) => permits,
+                Err(response) => return response,
+            };
         let mut request_state = crate::proxy::request_state::RequestState::Admitted;
         let _upstream_permit = upstream_permit;
         let idx = key_lease.idx;
@@ -214,6 +221,7 @@ pub async fn chat_completions(
                 );
                 if may_retry {
                     state.pool.note_upstream_stall(idx);
+                    failed_key_idx = Some(idx);
                     log_turn_request(TurnRecord {
                         requested_model: original_model.to_string(),
                         responding_model: model_id.to_string(),
@@ -511,6 +519,7 @@ pub async fn chat_completions(
                         request_timeout_ms,
                     );
                     state.pool.note_upstream_stall(idx);
+                    failed_key_idx = Some(idx);
 
                     let may_retry = request_state.on_failure(false).can_retry(
                         attempt,
@@ -694,6 +703,7 @@ pub async fn chat_completions(
                             request_timeout_ms,
                         );
                         state.pool.note_upstream_stall(idx);
+                        failed_key_idx = Some(idx);
 
                         // The body-stall budget: this attempt consumed a
                         // first-byte window AND ran into the idle rail, so
