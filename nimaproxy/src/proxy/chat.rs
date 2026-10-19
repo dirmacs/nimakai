@@ -477,7 +477,7 @@ pub async fn chat_completions(
                 // generation that pauses to think between tokens is allowed a
                 // longer pause than a silent upstream is allowed before its
                 // first byte — that is why the idle window defaults wider
-                // (60 s vs 25 s).
+                // (180 s vs 25 s).
                 let resp_status = axum::http::StatusCode::from_u16(status.as_u16())
                     .unwrap_or(StatusCode::BAD_GATEWAY);
                 let content_type = resp

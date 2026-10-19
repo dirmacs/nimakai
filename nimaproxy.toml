@@ -122,12 +122,11 @@ min_dynamic_timeout_ms = 25000
 dynamic_sample_floor = 25
 # 2026-10-19: the mid-stream idle rail, split from the first-byte window
 # above. The first byte answers "is the upstream alive" (25 s); a gap
-# between chunks answers "did a live generation stall", and healthy gaps
-# are sub-second per turn-log analysis, so 60 s still catches every
-# pathological stall while tolerating a generation that pauses to think
-# between tokens. Same as the code default — pinned here so the deployed
-# value is visible next to the rail it was split from.
-mid_stream_idle_timeout_ms = 60000
+# between chunks answers "did a live generation stall". A/B measured
+# step-5-preview pausing 118 s / 148 s mid-generation then resuming to
+# [DONE] -- the 60 s value cut generations the upstream would have finished.
+# 180 s covers the measured max + headroom. Same as the code default.
+mid_stream_idle_timeout_ms = 180000
 
 [routing]
 strategy = "latency_aware"
