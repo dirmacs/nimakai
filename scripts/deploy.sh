@@ -17,7 +17,8 @@
 # Docker port publishing could never reach it. With --network host the
 # container's loopback IS the host's loopback, so curl can verify it.
 # The live container needs no --port flag: it uses the mounted config's
-# listen address, and keeps the declarative spec in docker-compose.yml.
+# listen address. The declarative spec for the service lives in the infra
+# repo (dirmacs/infra, stacks/nimaproxy/) -- see docker-compose.yml.RETIRED.
 #
 # NEVER added here: `docker system prune`, image deletion, or touching any
 # container other than the running container and the short-lived candidate.
@@ -197,4 +198,4 @@ else
     echo "Deploy complete: fresh install of ${IMAGE} in ${CONTAINER} (no previous container)."
     echo "Rollback: docker stop ${CONTAINER} && docker rm ${CONTAINER}"
 fi
-echo "Remember to bump the image tag in docker-compose.yml to ${NEW_TAG} so the spec stays current."
+echo "Remember to bump the image tag in the infra repo's nimaproxy stack (dirmacs/infra, stacks/nimaproxy/) to ${NEW_TAG} so the spec stays current."
