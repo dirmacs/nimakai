@@ -116,6 +116,13 @@ struct SseTapInner {
     finish_reason: Mutex<Option<String>>,
     /// Sum of characters in `choices[0].delta.content` across frames.
     content_chars: AtomicU64,
+    /// Sum of characters in `choices[0].delta.reasoning_content` across
+    /// frames. What splits a zero-content clean EOF into reasoning-abandon
+    /// (reasoning present, content absent) vs true-empty (neither): a
+    /// thinking model that emitted its whole trace and then stopped without
+    /// content is a different operator action from one that emitted nothing
+    /// at all.
+    reasoning_chars: AtomicU64,
     /// Number of `choices[0].delta.tool_calls` entries seen across frames.
     ///
     /// Counts fragment entries, not logical calls: a single call whose
@@ -289,6 +296,11 @@ impl SseTap {
                     .content_chars
                     .fetch_add(content.chars().count() as u64, Ordering::Relaxed);
             }
+            if let Some(reasoning) = delta.reasoning_content.as_ref() {
+                self.inner
+                    .reasoning_chars
+                    .fetch_add(reasoning.chars().count() as u64, Ordering::Relaxed);
+            }
             if let Some(tool_calls) = delta.tool_calls.as_ref() {
                 self.inner
                     .tool_call_count
@@ -336,6 +348,12 @@ impl SseTap {
 
     pub fn content_chars(&self) -> u64 {
         self.inner.content_chars.load(Ordering::Relaxed)
+    }
+
+    /// Sum of characters in `choices[0].delta.reasoning_content` across
+    /// frames. 0 when the upstream emitted no reasoning deltas.
+    pub fn reasoning_chars(&self) -> u64 {
+        self.inner.reasoning_chars.load(Ordering::Relaxed)
     }
 
     /// Number of `choices[0].delta.tool_calls` entries seen across frames.
@@ -426,6 +444,7 @@ impl SseTap {
         SseOutcome {
             finish_reason: self.finish_reason(),
             content_chars: self.content_chars(),
+            reasoning_chars: self.reasoning_chars(),
             tool_call_count: self.tool_call_count(),
             tool_call_distinct: self.tool_call_distinct(),
             stream_ended_cleanly: self.saw_done(),
@@ -444,6 +463,9 @@ impl SseTap {
 pub struct SseOutcome {
     pub finish_reason: Option<String>,
     pub content_chars: u64,
+    /// Sum of characters in `choices[0].delta.reasoning_content` across
+    /// frames. 0 when the upstream emitted no reasoning deltas.
+    pub reasoning_chars: u64,
     /// Number of `choices[0].delta.tool_calls` entries seen across frames —
     /// fragment entries, not logical calls. A single call whose `arguments`
     /// stream over many frames counts once per frame here; see
@@ -603,6 +625,13 @@ struct SseChoice {
 struct SseDelta {
     #[serde(default)]
     content: Option<String>,
+    /// The key the live NIM SSE frames carry for thinking-model traces (the
+    /// proxy's own request sanitizer strips exactly this key from assistant
+    /// messages in `messages.rs`, and no other reasoning key appears anywhere
+    /// in the repo's frames or fixtures). No `reasoning` alias: a second key
+    /// would double-count a frame that carries both.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<serde_json::Value>>,
 }
@@ -625,6 +654,49 @@ mod tests {
         format!(
             "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"{content}\"}},\"finish_reason\":\"{finish}\"}}]}}\n\n"
         )
+    }
+
+    fn reasoning_frame(reasoning: &str, finish: &str) -> String {
+        format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"reasoning_content\":\"{reasoning}\"}},\"finish_reason\":\"{finish}\"}}]}}\n\n"
+        )
+    }
+
+    /// A stream that emits reasoning but no content must show up as exactly
+    /// that: reasoning chars counted, content chars zero. This is the split
+    /// that separates reasoning-abandon (a thinking model that emitted its
+    /// whole trace and then stopped) from true-empty (content zero AND
+    /// reasoning zero) on a zero-content clean EOF.
+    #[tokio::test]
+    async fn reasoning_only_stream_counts_reasoning_not_content() {
+        let body = format!(
+            "{}{}{}data: [DONE]\n\n",
+            reasoning_frame("Let me think", ""),
+            reasoning_frame(" step by step", ""),
+            reasoning_frame("", "stop")
+        );
+        let outcome = feed(&[&body]).await;
+        // "Let me think" + " step by step" = 25 characters; the empty final
+        // frame contributes nothing.
+        assert_eq!(outcome.reasoning_chars, 25);
+        assert_eq!(outcome.content_chars, 0);
+        assert_eq!(outcome.finish_reason.as_deref(), Some("stop"));
+        assert!(outcome.stream_ended_cleanly);
+    }
+
+    /// Content and reasoning accumulate independently: a mixed stream counts
+    /// each delta key into its own counter, never cross-contaminating.
+    #[tokio::test]
+    async fn mixed_content_and_reasoning_accumulate_independently() {
+        let body = format!(
+            "{}{}{}data: [DONE]\n\n",
+            reasoning_frame("thinking", ""),
+            frame("answer", ""),
+            frame("", "stop")
+        );
+        let outcome = feed(&[&body]).await;
+        assert_eq!(outcome.reasoning_chars, 8);
+        assert_eq!(outcome.content_chars, 6);
     }
 
     /// A frame split across two chunk boundaries must still parse, so a

@@ -905,6 +905,7 @@ pub async fn chat_completions(
                                 duration_ms: started_stream.elapsed().as_millis(),
                                 finish_reason: outcome.finish_reason,
                                 content_chars: outcome.content_chars,
+                                reasoning_chars: outcome.reasoning_chars,
                                 stream_ended_cleanly: outcome.stream_ended_cleanly,
                                 chunk_count: outcome.chunk_count,
                                 body_bytes: outcome.body_bytes,
