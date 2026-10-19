@@ -66,7 +66,11 @@ nimbledeps/
 nimaproxy-bin
 
 # nimaproxy secrets
-nimaproxy.toml
+# The repo-root /nimaproxy.toml is TRACKED ON PURPOSE: it carries ${VAR} placeholders,
+# never key material. Real keys are supplied through the environment at deploy time.
+# A crate-local copy is a developer convenience and MAY hold literal keys, so it stays
+# ignored, as do the racing variants below.
+/nimaproxy/nimaproxy.toml
 
 # Build artifacts
 /target/

@@ -15,7 +15,8 @@ nimakai proxy stop
 ```
 
 - `libnimaproxy.so` must be in the same directory as nimakai or `LD_LIBRARY_PATH` must be set
-- Config file with API keys required (see nimaproxy section below)
+- Config file with API keys required — supply them as `NIMAPROXY_KEY_*` environment
+  variables referenced from the config as `key = "${NIMAPROXY_KEY_...}"` (see nimaproxy section below)
 - PID file at `/tmp/nimaproxy.pid` with format "PID:PORT"
 
 ## Architecture
@@ -44,13 +45,11 @@ tests/          — 18 test files; `nimble test` runs 17 isolated suites, while
 ```text
 nimaproxy/
   Cargo.toml               lib + bin + tests
-  nimaproxy.toml           Config (NOT committed - contains API keys)
-  nimaproxy.toml.example   Template
-  .gitignore               Excludes nimaproxy.toml
+  nimaproxy.toml.example   Template (all optional keys)
   src/
     lib.rs                 Exports modules + AppState
     main.rs                Binary entry point
-    config.rs              TOML config parsing + unit tests
+    config/                TOML config parsing (keys, racing) + unit tests
     key_pool.rs            Key rotation, rate-limit tracking + unit tests
     model_stats.rs         Per-model latency tracking + unit tests
     model_router.rs        Latency-aware model selection + unit tests

@@ -435,7 +435,10 @@ impl Config {
 pub fn load(path: &str) -> Result<Config, String> {
     let raw =
         fs::read_to_string(path).map_err(|e| format!("cannot read config '{}': {}", path, e))?;
-    toml::from_str(&raw).map_err(|e| format!("invalid config '{}': {}", path, e))
+    let mut config: Config =
+        toml::from_str(&raw).map_err(|e| format!("invalid config '{}': {}", path, e))?;
+    keys::resolve_key_env(&mut config.keys)?;
+    Ok(config)
 }
 
 #[cfg(test)]

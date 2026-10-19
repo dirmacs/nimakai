@@ -4,6 +4,15 @@ All notable changes to nimakai are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **API keys can come from the environment.** `[[keys]].key` now accepts a `${VAR}` reference,
+  resolved from the environment at config load, so `nimaproxy.toml` no longer has to hold
+  credentials and can be tracked in git. A referenced variable that is unset or empty is a hard
+  startup error — a blank key would otherwise be leased and fail per-request. Literal keys keep
+  working unchanged. Deployments that adopt `${VAR}` must supply the variables in the proxy's
+  environment.
+
 ## [0.15.7] - 2026-09-02
 
 ### Fixed
