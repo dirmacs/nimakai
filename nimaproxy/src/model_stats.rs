@@ -1519,6 +1519,59 @@ mod getter_tests {
     }
 
     #[test]
+    fn test_policy_floor_equal_to_max_pins_timeout_to_that_constant() {
+        // When `min_dynamic_timeout_ms == timeout_ms` the clamp collapses to a constant:
+        // every branch returns that value, whatever the sampled latency is. That is the
+        // deployed configuration (both 25000), and it is what pins a first-byte stall to
+        // the configured timeout -- deliberate, not an accident of two equal settings.
+        let pinned = 25_000u64;
+
+        // (a) No samples at all: the low-sample branch returns max outright. It BYPASSES
+        //     the floor, so it is the branch a floor-only change would silently miss.
+        let store = ModelStatsStore::new(3000.0);
+        assert_eq!(
+            store.get_model_timeout_with_policy("low-sample", pinned, pinned, 25),
+            pinned
+        );
+
+        // (b) A model with no recorded stats returns max.
+        assert_eq!(
+            store.get_model_timeout_with_policy("never-seen", pinned, pinned, 25),
+            pinned
+        );
+
+        // (c) Once sampling is satisfied, p95+buffer is capped by max and then floored by
+        //     min. Both are `pinned`, so the result is still exactly `pinned`.
+        for _ in 0..30 {
+            store.record("fast", 500.0, true);
+        }
+        assert_eq!(
+            store.get_model_timeout_with_policy("fast", pinned, pinned, 10),
+            pinned
+        );
+
+        // (d) And it stays pinned when p95 is far above max, where only the cap applies.
+        for _ in 0..30 {
+            store.record("slow", 90_000.0, true);
+        }
+        assert_eq!(
+            store.get_model_timeout_with_policy("slow", pinned, pinned, 10),
+            pinned
+        );
+
+        // Discriminating control: the same call is NOT constant when min < max, so the
+        // equalities above carry information rather than being trivially true.
+        let control = ModelStatsStore::new(3000.0);
+        for _ in 0..30 {
+            control.record("fast", 500.0, true);
+        }
+        assert_eq!(
+            control.get_model_timeout_with_policy("fast", 25_000, 8_000, 10),
+            8_000
+        );
+    }
+
+    #[test]
     fn test_racing_candidates_empty() {
         let store = ModelStatsStore::new(3000.0);
         let candidates: Vec<String> = vec![];
