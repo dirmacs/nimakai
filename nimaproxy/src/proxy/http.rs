@@ -752,6 +752,9 @@ pub struct StreamCompletion {
     pub duration_ms: u128,
     pub finish_reason: Option<String>,
     pub content_chars: u64,
+    /// Sum of `choices[0].delta.reasoning_content` characters across frames.
+    /// 0 when the upstream emitted no reasoning deltas.
+    pub reasoning_chars: u64,
     pub stream_ended_cleanly: bool,
     pub chunk_count: u64,
     pub body_bytes: u64,
@@ -819,6 +822,7 @@ pub(crate) fn log_turn_completion(
     record.request_id = completion.request_id.clone();
     record.finish_reason = completion.finish_reason.clone();
     record.content_chars = Some(completion.content_chars);
+    record.reasoning_chars = Some(completion.reasoning_chars);
     record.stream_ended_cleanly = Some(completion.stream_ended_cleanly);
     record.chunk_count = Some(completion.chunk_count);
     record.body_bytes = Some(completion.body_bytes);
@@ -1067,6 +1071,7 @@ mod tests {
             duration_ms: 100,
             finish_reason: None,
             content_chars: 10,
+            reasoning_chars: 0,
             stream_ended_cleanly: cleanly,
             chunk_count: 2,
             body_bytes: 20,

@@ -118,6 +118,16 @@ pub struct TurnLog {
     #[serde(default)]
     pub content_chars: Option<u64>,
 
+    /// Characters of `delta.reasoning_content` forwarded to the client.
+    /// `Some(0)` on a completion record whose stream carried no reasoning
+    /// deltas; `None` where the tap never ran (first-byte records,
+    /// non-streaming turns, records predating the field). What splits a
+    /// zero-content clean EOF into reasoning-abandon
+    /// (`content_chars: Some(0)`, `reasoning_chars: Some(n > 0)`) vs
+    /// true-empty (content zero AND reasoning zero).
+    #[serde(default)]
+    pub reasoning_chars: Option<u64>,
+
     /// Whether the stream reached `data: [DONE]`. `false` means it ended
     /// without one, i.e. it was truncated.
     #[serde(default)]
@@ -362,6 +372,7 @@ impl TurnLog {
             record_kind: Self::RECORD_KIND_TTFB.to_string(),
             finish_reason: None,
             content_chars: None,
+            reasoning_chars: None,
             stream_ended_cleanly: None,
             chunk_count: None,
             body_bytes: None,

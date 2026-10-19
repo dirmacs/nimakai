@@ -781,3 +781,64 @@ async fn guard_aborted_stream_records_guard_stall_end_cause() {
         "the guard aborted this stream, so the record must say so"
     );
 }
+
+/// A `data:` frame carrying only `reasoning_content`, no `content`.
+fn reasoning_frame(reasoning: &str, finish: &str) -> String {
+    format!(
+        "data: {{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"{MODEL}\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"reasoning_content\":\"{reasoning}\"}},\"finish_reason\":\"{finish}\"}}]}}\n\n"
+    )
+}
+
+/// A stream with reasoning but no content must record exactly that: the
+/// completion record shows `content_chars: Some(0)` with
+/// `reasoning_chars: Some(n > 0)`. This is the reasoning-abandon arm of the
+/// Class B split — a thinking model that emitted its trace and then stopped
+/// without content.
+///
+/// The reverse assertion matters too: an ordinary content stream records
+/// `reasoning_chars: Some(0)`, not `None`, because the tap ran. `None` is
+/// reserved for "the tap never ran" (first-byte records, non-streaming
+/// turns), so a query can tell "no reasoning emitted" from "unobserved".
+#[tokio::test]
+async fn reasoning_only_stream_records_reasoning_abandon_split() {
+    let (_server, url) = mock_upstream(&format!(
+        "{}{}{}data: [DONE]\n\n",
+        reasoning_frame("Let me think", ""),
+        reasoning_frame(" step by step", ""),
+        frame("", "stop")
+    ))
+    .await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (_, request_id) = log.turn(state, turn_body()).await;
+
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(completion.content_chars, Some(0));
+    // "Let me think" + " step by step" = 25 characters.
+    assert_eq!(completion.reasoning_chars, Some(25));
+    assert_eq!(completion.stream_ended_cleanly, Some(true));
+    assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+}
+
+/// A content-only stream records `reasoning_chars: Some(0)`: the tap ran and
+/// saw no reasoning deltas. The true-empty shape is both counters at
+/// `Some(0)` — present but zero — which is distinct from `None`
+/// ("unobserved") on both.
+#[tokio::test]
+async fn content_only_stream_records_zero_reasoning_not_none() {
+    let (_server, url) =
+        mock_upstream(&format!("{}data: [DONE]\n\n", frame("answer", "stop"))).await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (_, request_id) = log.turn(state, turn_body()).await;
+
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(completion.content_chars, Some(6));
+    assert_eq!(
+        completion.reasoning_chars,
+        Some(0),
+        "the tap ran, so reasoning_chars is Some(0), not None"
+    );
+}
