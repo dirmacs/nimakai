@@ -1111,3 +1111,38 @@ label = "empty"
         "error must not echo the placeholder text: {err}"
     );
 }
+
+#[test]
+fn test_validate_dynamic_timeout_pair_rejects_inverted() {
+    let err = validate_dynamic_timeout_pair(30_000, 25_000, 25).unwrap_err();
+    assert!(
+        err.contains("min_dynamic_timeout_ms"),
+        "error must name the floor key: {err}"
+    );
+    assert!(
+        err.contains("timeout_ms"),
+        "error must name the ceiling key: {err}"
+    );
+    assert!(
+        err.contains("30000") && err.contains("25000"),
+        "error must carry both values: {err}"
+    );
+}
+
+#[test]
+fn test_validate_dynamic_timeout_pair_accepts_floor_below_ceiling() {
+    assert!(validate_dynamic_timeout_pair(8_000, 25_000, 10).is_ok());
+}
+
+#[test]
+fn test_validate_dynamic_timeout_pair_accepts_deliberate_pin() {
+    // EQUALITY is accepted, not exempted: the canonical config pins
+    // 25000/25000 so both timeout arms yield 25000, and every all-defaults
+    // config resolves to 8000/8000 — including the minimal configs the six
+    // `ffi_tests` lifecycle tests boot the real binary on. The
+    // equality-collapse behavior is pinned by
+    // `model_stats::test_policy_floor_equal_to_max_pins_timeout_to_that_constant`;
+    // this guard owns only the strict inversion.
+    assert!(validate_dynamic_timeout_pair(25_000, 25_000, 25).is_ok());
+    assert!(validate_dynamic_timeout_pair(8_000, 8_000, 10).is_ok());
+}

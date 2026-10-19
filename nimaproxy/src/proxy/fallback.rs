@@ -9,6 +9,7 @@ use crate::proxy::messages::{
     transform_message_roles,
 };
 use crate::proxy::racing::{racing_deadline_response, timeout_before_deadline};
+use crate::proxy::timeouts::request_shape_summary;
 use crate::proxy::timeouts::request_turn_summary;
 use crate::proxy::timeouts::{record_model_timeout, timeout_for_model};
 use crate::proxy::upstream_errors::{is_hard_model_error, sse_body_error};
@@ -75,6 +76,7 @@ pub(crate) async fn solo_model_fallback(
                 return racing_deadline_response(&state);
             };
             let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&req_body);
+            let (request_has_tools, request_max_tokens) = request_shape_summary(&req_body);
             let t0 = Instant::now();
             let result = timeout(
                 Duration::from_millis(send_timeout_ms),
@@ -115,6 +117,8 @@ pub(crate) async fn solo_model_fallback(
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: true,
                         error: Some(msg.clone()),
@@ -146,6 +150,8 @@ pub(crate) async fn solo_model_fallback(
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: true,
                         error: Some(msg.clone()),
@@ -203,6 +209,8 @@ pub(crate) async fn solo_model_fallback(
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: true,
                         error: Some(msg.clone()),
@@ -234,6 +242,8 @@ pub(crate) async fn solo_model_fallback(
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: true,
                         error: Some(msg.clone()),
@@ -272,6 +282,8 @@ pub(crate) async fn solo_model_fallback(
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: true,
                         error: Some(embedded_msg.clone()),
@@ -330,6 +342,8 @@ pub(crate) async fn solo_model_fallback(
                 response_message_count: 1,
                 has_tool_calls,
                 tool_call_count,
+                request_has_tools,
+                request_max_tokens,
                 key_label: key_label.as_deref().map(|s| s.to_string()),
                 is_racing: true,
                 error: if ok {

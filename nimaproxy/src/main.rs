@@ -109,6 +109,22 @@ async fn main() {
     }
     cfg.keys.retain(|k| !k.disabled);
 
+    // Fail closed on an inverted dynamic-timeout pair: a floor above the
+    // racing ceiling makes the low-sample and saturated timeout arms disagree
+    // (the Oct-19 defect family). This lives in main(), not load(): load() is
+    // called by tests and tooling that must keep reading old configs, while
+    // refusal to START is a main() decision. Equality is accepted — the
+    // canonical 25000/25000 pin and all-defaults 8000/8000 configs resolve
+    // equal, and the `ffi_tests` lifecycle tests boot this binary on such a
+    // minimal config — so only a strict inversion refuses to start.
+    let min_dyn = cfg.min_dynamic_timeout_ms();
+    let race_ms = cfg.racing_timeout_ms();
+    let floor = cfg.dynamic_sample_floor();
+    if let Err(e) = config::validate_dynamic_timeout_pair(min_dyn, race_ms, floor) {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    }
+
     if cfg.logging_enabled() {
         let log_path = cfg.logging_path();
         match turn_log::init_logger(&log_path, true) {

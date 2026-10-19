@@ -8,7 +8,8 @@ use crate::proxy::messages::{
     normalize_assistant_messages, sanitize_tool_calls, transform_message_roles,
 };
 use crate::proxy::timeouts::{
-    prompt_chars, record_model_timeout, request_turn_summary, timeout_for_model,
+    prompt_chars, record_model_timeout, request_shape_summary, request_turn_summary,
+    timeout_for_model,
 };
 use crate::proxy::upstream_errors::{is_hard_model_error, is_transient_race_error, sse_body_error};
 use crate::turn_log::TurnRecord;
@@ -229,6 +230,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
             Err(_) => continue,
         };
         let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&req_body);
+        let (request_has_tools, request_max_tokens) = request_shape_summary(&req_body);
         let target = state.target.clone();
         let client = state.client.clone();
         let state_clone = state.clone();
@@ -367,6 +369,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                             response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
+                            request_has_tools, request_max_tokens,
                             key_label: key_label.as_deref().map(|s| s.to_string()),
                             is_racing: true,
                             error: Some(body_str[..body_str.len().min(400)].to_string()),
@@ -421,6 +424,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                     response_message_count: 1,
                                     has_tool_calls,
                                     tool_call_count,
+                                    request_has_tools, request_max_tokens,
                                     key_label: key_label.as_deref().map(|s| s.to_string()),
                                     is_racing: true,
                                     error: Some(msg.clone()),
@@ -449,6 +453,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
+                                request_has_tools, request_max_tokens,
                                 key_label: key_label.as_deref().map(|s| s.to_string()),
                                 is_racing: true,
                                 error: Some(e.to_string()),
@@ -484,6 +489,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
+                                request_has_tools, request_max_tokens,
                                 key_label: key_label.as_deref().map(|s| s.to_string()),
                                 is_racing: true,
                                 error: Some(timeout_error.clone()),
@@ -512,6 +518,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
+                                request_has_tools, request_max_tokens,
                                 key_label: key_label.as_deref().map(|s| s.to_string()),
                                 is_racing: true,
                                 error: Some(embedded_msg.clone()),
@@ -554,6 +561,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools, request_max_tokens,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: true,
                         error: if status.is_success() {
@@ -597,6 +605,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools, request_max_tokens,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: true,
                         error: Some(e.to_string()),
@@ -632,6 +641,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools, request_max_tokens,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: true,
                         error: Some(timeout_error.clone()),
