@@ -147,6 +147,36 @@ pub(crate) fn request_turn_summary(body: &Bytes) -> (usize, bool, usize) {
     }
     (messages.len(), has_tool_role || tool_count > 0, tool_count)
 }
+
+/// Request-shape signals for the turn record: whether the request carried
+/// tools, and the effective `max_tokens` the upstream will apply.
+///
+/// Returns `(request_has_tools, request_max_tokens)`. `request_has_tools` is
+/// `None` when the body has no `tools` key (or it is not an array) and
+/// `Some(false)` for an explicitly empty array, so "client said no tools"
+/// stays distinguishable from "shape unknown". `request_max_tokens` is the
+/// integer `max_tokens` value when one fits in an `i32` — negatives
+/// preserved, since the upstream decides their meaning — and `None` for a
+/// missing, non-integer, or overflowing value.
+///
+/// Callers pass the POST-`resolve_model` body: `resolve_model` injects
+/// per-model `max_tokens` defaults via `apply_model_params`, so this reads
+/// the effective value, not the raw client value. Fail-soft like
+/// [`request_turn_summary`]: malformed JSON yields `(None, None)`.
+pub(crate) fn request_shape_summary(body: &Bytes) -> (Option<bool>, Option<i32>) {
+    let Ok(json) = serde_json::from_slice::<Value>(body) else {
+        return (None, None);
+    };
+    let has_tools = json
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|a| !a.is_empty());
+    let max_tokens = json
+        .get("max_tokens")
+        .and_then(|m| m.as_i64())
+        .and_then(|v| i32::try_from(v).ok());
+    (has_tools, max_tokens)
+}
 pub(crate) fn prompt_chars(body: &Bytes) -> usize {
     serde_json::from_slice::<Value>(body)
         .ok()
@@ -286,5 +316,41 @@ mod tests {
             fingerprint.is_some(),
             "a later textful user message must be used"
         );
+    }
+
+    /// A body carrying both `tools` and `max_tokens` reports both, so a
+    /// tool-using turn with an explicit cap is fully described.
+    #[test]
+    fn request_shape_summary_reports_tools_and_cap() {
+        let body =
+            Bytes::from_static(br#"{"model":"m","tools":[{"type":"function"}],"max_tokens":4096}"#);
+        assert_eq!(request_shape_summary(&body), (Some(true), Some(4096)));
+    }
+
+    /// Missing keys yield `(None, None)` — "shape unknown", not "no tools".
+    #[test]
+    fn request_shape_summary_missing_keys_are_none() {
+        let body = Bytes::from_static(br#"{"model":"m","messages":[]}"#);
+        assert_eq!(request_shape_summary(&body), (None, None));
+    }
+
+    /// An explicitly empty `tools` array is `Some(false)`: the client said
+    /// no tools, which differs from a body that never mentioned them.
+    #[test]
+    fn request_shape_summary_empty_tools_is_some_false() {
+        let body = Bytes::from_static(br#"{"model":"m","tools":[]}"#);
+        let (has_tools, max_tokens) = request_shape_summary(&body);
+        assert_eq!(has_tools, Some(false));
+        assert_eq!(max_tokens, None);
+    }
+
+    /// Negative caps are preserved (the upstream decides their meaning) while
+    /// values outside `i32` range degrade to `None` rather than wrapping.
+    #[test]
+    fn request_shape_summary_negative_and_overflow_caps() {
+        let body = Bytes::from_static(br#"{"model":"m","max_tokens":-1}"#);
+        assert_eq!(request_shape_summary(&body).1, Some(-1));
+        let body = Bytes::from_static(br#"{"model":"m","max_tokens":9999999999}"#);
+        assert_eq!(request_shape_summary(&body).1, None);
     }
 }

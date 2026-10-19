@@ -230,6 +230,18 @@ pub struct TurnLog {
     /// relates to a loop summary. `None` for per-request records.
     #[serde(default)]
     pub loop_ended_by: Option<String>,
+
+    /// Whether the request carried a non-empty top-level `tools` array.
+    /// `None` when the key is absent or the body was unparseable, so "no
+    /// tools mentioned" stays distinguishable from "explicitly no tools".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_has_tools: Option<bool>,
+
+    /// Effective `max_tokens` for the request: the client value after
+    /// model-default injection, NOT the raw client value. `None` when no
+    /// integer cap applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_max_tokens: Option<i32>,
 }
 
 /// Default `record_kind` for records written before the field existed.
@@ -283,6 +295,11 @@ pub struct TurnRecord {
     /// [`LoopTracker::begin`], so the round count stays correct even though
     /// those records cannot name the loop.
     pub loop_key: Option<LoopKey>,
+    /// Whether the request carried a non-empty top-level `tools` array.
+    pub request_has_tools: Option<bool>,
+    /// Effective `max_tokens` for the request: the client value after
+    /// model-default injection, NOT the raw client value.
+    pub request_max_tokens: Option<i32>,
 }
 
 impl TurnLog {
@@ -391,6 +408,8 @@ impl TurnLog {
             loop_tool_calls_distinct: None,
             loop_last_finish_reason: None,
             loop_ended_by: None,
+            request_has_tools: record.request_has_tools,
+            request_max_tokens: record.request_max_tokens,
         }
     }
 }
@@ -707,6 +726,8 @@ mod tests {
             request_tokens: None,
             loop_key: None,
             response_tokens: None,
+            request_has_tools: None,
+            request_max_tokens: None,
         });
 
         assert_eq!(turn.requested_model, "auto");
@@ -741,6 +762,8 @@ mod tests {
                 request_tokens: None,
                 loop_key: None,
                 response_tokens: None,
+                request_has_tools: None,
+                request_max_tokens: None,
             }
         }
 
@@ -799,6 +822,8 @@ mod tests {
             request_tokens: None,
             loop_key: None,
             response_tokens: None,
+            request_has_tools: None,
+            request_max_tokens: None,
         });
         let b = TurnLog::new(TurnRecord {
             requested_model: "auto".to_string(),
@@ -816,6 +841,8 @@ mod tests {
             request_tokens: None,
             loop_key: None,
             response_tokens: None,
+            request_has_tools: None,
+            request_max_tokens: None,
         });
         assert!(a.request_id.is_some(), "request_id must be populated");
         assert!(b.request_id.is_some(), "request_id must be populated");
@@ -843,6 +870,8 @@ mod tests {
             request_tokens: None,
             loop_key: None,
             response_tokens: None,
+            request_has_tools: None,
+            request_max_tokens: None,
         });
 
         turn.request_messages = vec![
@@ -896,6 +925,8 @@ mod tests {
             request_tokens: None,
             loop_key: None,
             response_tokens: None,
+            request_has_tools: None,
+            request_max_tokens: None,
         });
 
         let json = serde_json::to_string(&turn).unwrap();
@@ -923,6 +954,8 @@ mod tests {
             request_tokens: None,
             loop_key: None,
             response_tokens: None,
+            request_has_tools: None,
+            request_max_tokens: None,
         });
         assert_eq!(turn.loop_key, None);
     }
@@ -953,6 +986,8 @@ mod tests {
             request_tokens: None,
             loop_key: Some(key.clone()),
             response_tokens: None,
+            request_has_tools: None,
+            request_max_tokens: None,
         });
         let json = serde_json::to_string(&turn).unwrap();
         let back: TurnLog = serde_json::from_str(&json).unwrap();
@@ -983,6 +1018,8 @@ mod tests {
             request_tokens: None,
             loop_key: None,
             response_tokens: None,
+            request_has_tools: None,
+            request_max_tokens: None,
         })
     }
 

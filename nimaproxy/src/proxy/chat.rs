@@ -8,8 +8,8 @@ use crate::proxy::messages::{
 use crate::proxy::racing::race_models;
 use crate::proxy::retry::RetryPolicy;
 use crate::proxy::timeouts::{
-    conversation_identity, record_model_timeout, request_turn_summary, sanitize_session,
-    timeout_for_model,
+    conversation_identity, record_model_timeout, request_shape_summary, request_turn_summary,
+    sanitize_session, timeout_for_model,
 };
 use crate::turn_log::{LoopKey, TurnRecord};
 use crate::AppState;
@@ -71,6 +71,10 @@ pub async fn chat_completions(
         return response;
     }
     let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&body);
+    // Parsed from the POST-resolve_model body: resolve_model injects
+    // per-model max_tokens defaults via apply_model_params, so only the
+    // resolved body carries the effective value the upstream sees.
+    let (request_has_tools, request_max_tokens) = request_shape_summary(&body);
     // Session/loop tracking. The session id is client-supplied (x-nima-session)
     // or derived from the conversation's first user message; if neither is
     // available this request is not part of a tracked loop.
@@ -233,6 +237,8 @@ pub async fn chat_completions(
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.as_deref().map(str::to_string),
                         is_racing: false,
                         error: Some(format!(
@@ -255,6 +261,8 @@ pub async fn chat_completions(
                     response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
+                    request_has_tools,
+                    request_max_tokens,
                     key_label: key_label.as_deref().map(str::to_string),
                     is_racing: false,
                     error: Some(format!("upstream timeout after {}ms", request_timeout_ms)),
@@ -291,6 +299,8 @@ pub async fn chat_completions(
                     response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
+                    request_has_tools,
+                    request_max_tokens,
                     key_label: key_label.as_deref().map(str::to_string),
                     is_racing: false,
                     error: Some(e.to_string()),
@@ -360,6 +370,8 @@ pub async fn chat_completions(
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.as_deref().map(str::to_string),
                         is_racing: false,
                         error: Some(format!(
@@ -427,6 +439,8 @@ pub async fn chat_completions(
                             response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
+                            request_has_tools,
+                            request_max_tokens,
                             key_label: key_label.as_deref().map(str::to_string),
                             is_racing: false,
                             error: Some(error_excerpt),
@@ -540,6 +554,8 @@ pub async fn chat_completions(
                             response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
+                            request_has_tools,
+                            request_max_tokens,
                             key_label: key_label.as_deref().map(str::to_string),
                             is_racing: false,
                             error: Some(format!(
@@ -562,6 +578,8 @@ pub async fn chat_completions(
                         response_message_count: 1,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.as_deref().map(str::to_string),
                         is_racing: false,
                         error: Some(format!(
@@ -727,6 +745,8 @@ pub async fn chat_completions(
                                 response_message_count: 1,
                                 has_tool_calls,
                                 tool_call_count,
+                                request_has_tools,
+                                request_max_tokens,
                                 key_label: key_label.as_deref().map(str::to_string),
                                 is_racing: false,
                                 error: Some(format!(
@@ -749,6 +769,8 @@ pub async fn chat_completions(
                             response_message_count: 1,
                             has_tool_calls,
                             tool_call_count,
+                            request_has_tools,
+                            request_max_tokens,
                             key_label: key_label.as_deref().map(str::to_string),
                             is_racing: false,
                             error: Some(format!(
@@ -823,6 +845,8 @@ pub async fn chat_completions(
                     response_message_count: 1,
                     has_tool_calls,
                     tool_call_count,
+                    request_has_tools,
+                    request_max_tokens,
                     key_label: key_label.as_deref().map(str::to_string),
                     is_racing: false,
                     error: None,
@@ -875,6 +899,8 @@ pub async fn chat_completions(
                         message_count,
                         has_tool_calls,
                         tool_call_count,
+                        request_has_tools,
+                        request_max_tokens,
                         key_label: key_label.clone(),
                         is_racing: false,
                         loop_key: loop_key.clone(),

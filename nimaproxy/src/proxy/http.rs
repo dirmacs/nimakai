@@ -448,6 +448,9 @@ pub async fn completions(
                         response_message_count: 1,
                         has_tool_calls: false,
                         tool_call_count: 0,
+                        // Embeddings requests carry no tools or max_tokens.
+                        request_has_tools: None,
+                        request_max_tokens: None,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: false,
                         error: Some(format!(
@@ -650,6 +653,9 @@ pub async fn embeddings(
                         response_message_count: 1,
                         has_tool_calls: false,
                         tool_call_count: 0,
+                        // Embeddings requests carry no tools or max_tokens.
+                        request_has_tools: None,
+                        request_max_tokens: None,
                         key_label: key_label.as_deref().map(|s| s.to_string()),
                         is_racing: false,
                         error: Some(format!(
@@ -738,6 +744,11 @@ pub struct TurnContext {
     pub key_label: Option<String>,
     pub is_racing: bool,
     pub loop_key: Option<crate::turn_log::LoopKey>,
+    /// Whether the request carried a non-empty top-level `tools` array.
+    pub request_has_tools: Option<bool>,
+    /// Effective `max_tokens` for the request: the client value after
+    /// model-default injection, NOT the raw client value.
+    pub request_max_tokens: Option<i32>,
 }
 
 /// Structural outcome of a forwarded SSE stream, as carried into a turn record.
@@ -811,6 +822,8 @@ pub(crate) fn log_turn_completion(
         response_message_count: 1,
         has_tool_calls: turn.has_tool_calls,
         tool_call_count: turn.tool_call_count,
+        request_has_tools: turn.request_has_tools,
+        request_max_tokens: turn.request_max_tokens,
         key_label: turn.key_label.clone(),
         is_racing: turn.is_racing,
         loop_key: turn.loop_key.clone(),
@@ -902,6 +915,8 @@ pub(crate) fn build_loop_record(
         response_message_count: 0,
         has_tool_calls: false,
         tool_call_count: 0,
+        request_has_tools: None,
+        request_max_tokens: None,
         key_label: None,
         is_racing: false,
         loop_key: Some(crate::turn_log::LoopKey {
@@ -1059,6 +1074,8 @@ mod tests {
             message_count: 1,
             has_tool_calls: false,
             tool_call_count: 0,
+            request_has_tools: None,
+            request_max_tokens: None,
             key_label: None,
             is_racing: false,
             loop_key: None,
@@ -1122,5 +1139,56 @@ mod tests {
         let snap = metrics.snapshot();
         assert_eq!(snap.truncated_streams, 0);
         assert_eq!(snap.timeout_count, 0);
+    }
+
+    /// The request-shape fields survive the `TurnRecord` -> `TurnLog`
+    /// boundary: `Some` values are written, `None` values are omitted from
+    /// the JSON (so old readers keep parsing), and JSON lacking both keys
+    /// — as written before the fields existed — reads back as `None`.
+    #[test]
+    fn test_request_shape_fields_round_trip_through_turn_log() {
+        use crate::turn_log::{TurnLog, TurnRecord};
+        fn record(has_tools: Option<bool>, max_tokens: Option<i32>) -> TurnRecord {
+            TurnRecord {
+                requested_model: "m".to_string(),
+                responding_model: "m".to_string(),
+                latency_ms: 1,
+                success: true,
+                status_code: 200,
+                request_message_count: 1,
+                response_message_count: 1,
+                has_tool_calls: false,
+                tool_call_count: 0,
+                key_label: None,
+                is_racing: false,
+                error: None,
+                request_tokens: None,
+                response_tokens: None,
+                loop_key: None,
+                request_has_tools: has_tools,
+                request_max_tokens: max_tokens,
+            }
+        }
+        let json = serde_json::to_string(&TurnLog::new(record(Some(true), Some(32000)))).unwrap();
+        assert!(json.contains("\"request_has_tools\":true"), "{json}");
+        assert!(json.contains("\"request_max_tokens\":32000"), "{json}");
+        let json = serde_json::to_string(&TurnLog::new(record(None, None))).unwrap();
+        assert!(!json.contains("request_has_tools"), "{json}");
+        assert!(!json.contains("request_max_tokens"), "{json}");
+        // A blob as written before the fields existed: no shape keys at all.
+        // Built from a live record so the fixture carries every field a real
+        // old blob had; only the two new keys are stripped.
+        let old_value: serde_json::Value =
+            serde_json::to_value(TurnLog::new(record(None, None))).unwrap();
+        for key in ["request_has_tools", "request_max_tokens"] {
+            assert!(
+                old_value.get(key).is_none(),
+                "None fields must serialize absent"
+            );
+        }
+        let old_json = serde_json::to_string(&old_value).unwrap();
+        let old: TurnLog = serde_json::from_str(&old_json).unwrap();
+        assert_eq!(old.request_has_tools, None);
+        assert_eq!(old.request_max_tokens, None);
     }
 }

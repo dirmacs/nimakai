@@ -460,6 +460,47 @@ impl Config {
     }
 }
 
+/// Refuse an inverted dynamic-timeout pair before the proxy starts.
+///
+/// When `min_dynamic_timeout_ms` EXCEEDS the racing `timeout_ms` ceiling, the
+/// two arms of `dynamic_timeout_ms_with_policy` disagree: the low-sample arm
+/// (`ring_len < sample_floor -> return max`) returns the ceiling, while the
+/// saturated arm (`min(p95 + buffer, max).max(min)`) is floored to the higher
+/// floor, so the timeout flips between two constants as the sample ring fills
+/// — an inversion, not a tuning choice. The Oct-19 defect class is the wider
+/// family this belongs to: any floor at or above the ceiling stops the
+/// timeout being dynamic.
+///
+/// EQUALITY is deliberately accepted, not exempted: the canonical
+/// nimaproxy.toml pins 25000/25000 (floor 25) so that BOTH branches yield
+/// 25000, and every all-defaults config resolves to 8000/8000. Refusing `>=`
+/// would fail closed on the repo's own config and on the six `ffi_tests`
+/// lifecycle tests, which boot the real binary on a minimal config via
+/// `posix_spawn` (measured 2026-10-19: 6/6 fail under `>=`, suite green under
+/// `>`). The equality-collapse behavior itself is already pinned by
+/// `model_stats::test_policy_floor_equal_to_max_pins_timeout_to_that_constant`,
+/// so this guard owns only the strict inversion, which no test pins.
+///
+/// PLACEMENT is load-bearing: the check runs in `main()` (refusal to START)
+/// and never in `load()`, which tests and tooling call to keep reading old
+/// configs. Do not move any refusal into `load()`.
+pub fn validate_dynamic_timeout_pair(
+    min_dynamic_timeout_ms: u64,
+    racing_timeout_ms: u64,
+    dynamic_sample_floor: usize,
+) -> Result<(), String> {
+    if min_dynamic_timeout_ms > racing_timeout_ms {
+        return Err(format!(
+            "invalid timeouts: min_dynamic_timeout_ms ({}) > racing timeout_ms ({}): \
+             the floor exceeds the ceiling, so the low-sample branch returns the ceiling \
+             while the saturated branch returns the floor \
+             (dynamic_sample_floor={}); set min_dynamic_timeout_ms at or below racing timeout_ms",
+            min_dynamic_timeout_ms, racing_timeout_ms, dynamic_sample_floor
+        ));
+    }
+    Ok(())
+}
+
 pub fn load(path: &str) -> Result<Config, String> {
     let raw =
         fs::read_to_string(path).map_err(|e| format!("cannot read config '{}': {}", path, e))?;
