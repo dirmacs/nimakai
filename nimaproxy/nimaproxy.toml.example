@@ -115,6 +115,10 @@ label = "key4"
 # [timeouts]
 # min_dynamic_timeout_ms = 15000
 # dynamic_sample_floor = 25
+# Maximum tolerated gap between two chunks of one response (ms). Defaults to
+# 180000 (180 s): live step-5-preview generations pause 118-148 s mid-stream
+# then resume to [DONE], so the rail must be wider than the first-byte window.
+# mid_stream_idle_timeout_ms = 180000
 
 # ── NVIDIA Catalog Inference Defaults ─────────────────────────────────────
 # These values mirror the build.nvidia.com snippets for the current catalog
