@@ -180,11 +180,14 @@ pub async fn chat_completions(
     // hoisted value stays correct for the retry that follows it.
     let upstream_url = format!("{}/v1/chat/completions", state.target);
     let mut accept_header = accept_header_for_body(&body);
-    // The loop admits one re-attempt past the key count: a single-key pool
-    // must still get the single retry the budget admits (a stall is retryable
-    // whenever nothing reached the client, even on the same key). Multi-key
-    // pools are unaffected — `n` already exceeds 1 there — and the budget
-    // check inside each `can_retry` still caps the total client wait.
+    // The loop admits one re-attempt past the key count, reserved for
+    // budget-gated stall retries: a single-key pool must still get the
+    // single retry the budget admits (a stall is retryable whenever nothing
+    // reached the client, even on the same key). The 429/401/400 branches
+    // break out of the loop once every key has been tried — they retry on
+    // the NEXT key only, never the same one. Multi-key pools are unaffected
+    // (`n` already exceeds 1), and the budget check inside each `can_retry`
+    // still caps the total client wait.
     let attempts = n.max(2);
     for attempt in 0..attempts {
         let (upstream_permit, key_lease) =
@@ -337,6 +340,12 @@ pub async fn chat_completions(
                         .unwrap_or(60);
                     state.pool.mark_rate_limited(idx, retry_after);
                     eprintln!("[nimaproxy] key {} rate-limited {}s", idx, retry_after);
+                    // A 429 retries on the NEXT key, never the same one: the
+                    // key just entered cooldown, so a same-key re-attempt
+                    // would burn the full admission wait and return "all API
+                    // keys rate-limited" instead of reaching the tail. The
+                    // loop's extra attempt exists only for budget-gated stall
+                    // retries; once every key has been tried, fall to the tail.
                     if attempt + 1 >= n {
                         break;
                     }
@@ -400,6 +409,10 @@ pub async fn chat_completions(
                         request_tokens: None,
                         response_tokens: None,
                     });
+                    // Same-key re-attempt is pointless here: the key was just
+                    // quarantined, so attempt 1 would stall in admission and
+                    // return before the tail's verbatim-401 forwarding. Fall
+                    // to the tail once every key has been tried.
                     if attempt + 1 >= n {
                         break;
                     }
@@ -444,6 +457,9 @@ pub async fn chat_completions(
                             }
                         }
                         // Continue retry with the next key and, for auto routing, a freshly resolved model.
+                        // Next-key only: the loop's extra attempt is reserved
+                        // for budget-gated stall retries, not for re-sending a
+                        // rejected body on the same key.
                         if attempt + 1 >= n {
                             break;
                         }
@@ -473,6 +489,8 @@ pub async fn chat_completions(
                             request_tokens: None,
                             response_tokens: None,
                         });
+                        // Next-key only, as above: re-sending a structurally
+                        // rejected body on the same key cannot succeed.
                         if attempt + 1 >= n {
                             break;
                         }
