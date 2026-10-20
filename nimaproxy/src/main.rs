@@ -4,6 +4,7 @@ use nimaproxy::{
     config, model_refresh, AppState, AppStateParams, ModelRouter, ModelStatsStore, RuntimeControls,
     Strategy,
 };
+use std::sync::Arc;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -238,6 +239,7 @@ async fn main() {
         min_dynamic_timeout_ms: cfg.min_dynamic_timeout_ms(),
         dynamic_sample_floor: cfg.dynamic_sample_floor(),
         mid_stream_idle_timeout_ms: cfg.mid_stream_idle_timeout_ms(),
+        first_byte_timeout_ms: cfg.first_byte_timeout_ms(),
         auth_failure_cooldown_secs: cfg.auth_failure_cooldown_secs(),
     };
     if let Some(ids) = &upstream_ids {
@@ -294,9 +296,7 @@ async fn main() {
     );
 
     if !pruned_models.is_empty() {
-        if let Ok(mut guard) = state.pruned_models.lock() {
-            *guard = pruned_models.clone();
-        }
+        state.pruned_models.store(Arc::new(pruned_models));
     }
 
     // A session's LAST turn has no successor request to close it, so the

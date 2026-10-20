@@ -42,17 +42,25 @@ pub fn validate_model_exists(model: &str, state: &AppState) -> Result<(), String
     if model.is_empty() || model == "auto" {
         return Ok(());
     }
-    let configured_models = state.configured_models();
-    if !configured_models.is_empty() {
-        if configured_models.iter().any(|m| m == model) {
-            return Ok(());
-        }
-        return Err(format!("model '{}' not found in configured models", model));
+    // Cheap emptiness check without allocating the configured-model Vec:
+    // `configured_models()` is empty exactly when all three sources are empty.
+    let no_models_configured = state
+        .router
+        .as_ref()
+        .map(|router| router.models.is_empty())
+        .unwrap_or(true)
+        && state.racing_models.is_empty()
+        && state.available_models.load().is_empty();
+    if no_models_configured {
+        // No routing configured - accept any model (passthrough to NVIDIA)
+        // This preserves backward compatibility: when no models are configured,
+        // passthrough mode allows any model through
+        return Ok(());
     }
-    // No routing configured - accept any model (passthrough to NVIDIA)
-    // This preserves backward compatibility: when no models are configured,
-    // passthrough mode allows any model through
-    Ok(())
+    if state.is_model_configured(model) {
+        return Ok(());
+    }
+    Err(format!("model '{}' not found in configured models", model))
 }
 pub(crate) fn normalize_requested_model(model: &str) -> &str {
     if model == "nimaproxy/auto" {
@@ -683,4 +691,66 @@ pub(crate) fn mistral_validation_error(model_id: &str, body: &Bytes) -> Option<R
         }
     }
     None
+}
+
+#[cfg(test)]
+mod validate_model_membership_tests {
+    use super::validate_model_exists;
+    use crate::config::ModelCompat;
+    use crate::model_stats::ModelStatsStore;
+    use crate::{AppState, AppStateParams};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Empty (no router, no racing models, no available models) state: the
+    /// passthrough configuration.
+    fn empty_state() -> Arc<AppState> {
+        AppState::new(AppStateParams {
+            keys: vec![],
+            target: "https://test.api.nvidia.com".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 8000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: crate::loop_idle_timeout(),
+        })
+    }
+
+    /// A model that IS configured is accepted via the membership path.
+    #[test]
+    fn test_validate_model_exists_membership_hit() {
+        let state = empty_state();
+        state
+            .available_models
+            .store(Arc::new(vec!["openai/gpt-4".to_string()]));
+        assert!(validate_model_exists("openai/gpt-4", &state).is_ok());
+    }
+
+    /// A model that is NOT configured is rejected, with the exact error text
+    /// callers (and users) depend on.
+    #[test]
+    fn test_validate_model_exists_membership_miss_err_text() {
+        let state = empty_state();
+        state
+            .available_models
+            .store(Arc::new(vec!["openai/gpt-4".to_string()]));
+        let err = validate_model_exists("anthropic/claude", &state)
+            .expect_err("unconfigured model must be rejected");
+        assert_eq!(
+            err,
+            "model 'anthropic/claude' not found in configured models"
+        );
+    }
+
+    /// With nothing configured at all, passthrough accepts any model.
+    #[test]
+    fn test_validate_model_exists_passthrough_empty_accepts_any() {
+        let state = empty_state();
+        assert!(validate_model_exists("any/model-name", &state).is_ok());
+        assert!(validate_model_exists("meta/llama-3.1-405b", &state).is_ok());
+    }
 }

@@ -130,6 +130,7 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
@@ -172,6 +173,7 @@ fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
@@ -231,6 +233,7 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
@@ -851,6 +854,12 @@ async fn test_proxy_model_params_do_not_enable_stream_when_omitted() {
     mock.assert();
 }
 
+/// A timed-out direct request returns 504 within one budget window.
+///
+/// The stall is retryable even on this single-key pool (the loop admits one
+/// re-attempt past the key count, and nothing reached the client), so the
+/// model records two attempts: the retry fires and stalls again, and only
+/// then does the handler return the terminal 504.
 #[tokio::test]
 async fn test_direct_chat_request_uses_configured_timeout() {
     use std::time::{Duration, Instant};
@@ -908,7 +917,7 @@ async fn test_direct_chat_request_uses_configured_timeout() {
     let snapshot = state.model_stats.snapshot();
     let slow = snapshot.iter().find(|s| s.id == "slow-model").unwrap();
     assert_eq!(slow.success, 0);
-    assert_eq!(slow.total, 1);
+    assert_eq!(slow.total, 2);
 }
 
 /// A timed-out upstream call must be retried on another key, and the total
@@ -2122,6 +2131,7 @@ fn make_racing_state_two_keys_fast(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 8000,
             auth_failure_cooldown_secs: 900,
         },

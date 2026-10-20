@@ -212,6 +212,11 @@ impl SseTap {
             }
         }
 
+        // One lock acquisition per chunk: `partial` is borrowed for the whole
+        // scan, so a chunk carrying many lines neither re-locks per line nor
+        // allocates a `String` per line. `observe_line` and everything below it
+        // only touch other fields, so holding this guard across them cannot
+        // deadlock.
         let mut partial = self.inner.partial.lock();
         // SSE lines are separated by LF; CRLF is stripped per line below, so a
         // body that uses either ending parses identically.
@@ -222,25 +227,33 @@ impl SseTap {
             // learn anything from it.
             Err(_) => return,
         };
-        let mut buf = std::mem::take(&mut *partial);
-        buf.push_str(text);
+        // Appending in place keeps the buffer's capacity across chunks, so a
+        // steady stream of small chunks does not reallocate.
+        partial.push_str(text);
 
-        while let Some(pos) = buf.find('\n') {
-            // +1 keeps the newline out of the line, so a CR at the end of a
+        // Walk the complete lines with a cursor instead of draining after each
+        // one: `String::drain` shifts the remainder, so draining inside the
+        // loop is quadratic in the number of lines in the chunk.
+        let mut consumed = 0;
+        while let Some(pos) = partial[consumed..].find('\n') {
+            let end = consumed + pos;
+            // `end` keeps the newline out of the line, so a CR at the end of a
             // CRLF pair is trimmed by `trim_end` rather than being left inside
             // the field name.
-            let line = buf[..pos].trim_end_matches('\r').to_string();
-            buf.drain(..pos + 1);
-            drop(partial);
-            self.observe_line(&line);
-            partial = self.inner.partial.lock();
+            let line = partial[consumed..end].trim_end_matches('\r');
+            self.observe_line(line);
+            consumed = end + 1;
         }
 
-        if buf.len() > MAX_PARTIAL_LINE {
-            // Never a well-formed SSE frame; drop it rather than growing.
-            buf.clear();
+        if consumed > 0 {
+            // Drop the consumed prefix exactly once per chunk.
+            partial.drain(..consumed);
         }
-        *partial = buf;
+
+        if partial.len() > MAX_PARTIAL_LINE {
+            // Never a well-formed SSE frame; drop it rather than growing.
+            partial.clear();
+        }
     }
 
     /// Parse one complete SSE line.
@@ -816,6 +829,45 @@ mod tests {
         assert_eq!(outcome.tool_call_distinct, 2);
         assert_eq!(outcome.content_chars, 6);
         assert_eq!(outcome.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    /// A stream split at a chunk boundary must be observed exactly like the
+    /// same stream arriving in one chunk: the incremental split is a buffering
+    /// detail, so the tap's state must not depend on how the upstream framed
+    /// the bytes.
+    #[tokio::test]
+    async fn split_feed_matches_single_call_feed() {
+        // A frame whose payload is cut mid-line by the first chunk, then a
+        // second chunk carrying several complete lines plus a usage frame.
+        let first = "data: {\"choices\":[{\"delta\":{\"content\":\"He";
+        let rest = "llo\"},\"finish_reason\":\"stop\"}]}\n\n"
+            .to_string()
+            + "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0}]},\"finish_reason\":\"\"}]}\n\n"
+            + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":11,\"total_tokens\":16}}\n\n"
+            + "data: [DONE]\n\n";
+
+        let split = feed(&[first, rest.as_str()]).await;
+        let joined = format!("{first}{rest}");
+        let whole = feed(&[joined.as_str()]).await;
+
+        assert_eq!(split.prompt_tokens, Some(5));
+        assert_eq!(split.completion_tokens, Some(11));
+        assert_eq!(split.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(split.content_chars, 5);
+        assert_eq!(split.tool_call_count, 1);
+        assert!(split.stream_ended_cleanly);
+
+        // Chunk counting is the only field the split is allowed to move, so
+        // compare every other structural field for identity.
+        assert_eq!(split.prompt_tokens, whole.prompt_tokens);
+        assert_eq!(split.completion_tokens, whole.completion_tokens);
+        assert_eq!(split.finish_reason, whole.finish_reason);
+        assert_eq!(split.content_chars, whole.content_chars);
+        assert_eq!(split.tool_call_count, whole.tool_call_count);
+        assert_eq!(split.stream_ended_cleanly, whole.stream_ended_cleanly);
+        assert_eq!(split.body_bytes, whole.body_bytes);
+        assert_eq!(split.chunk_count, 2);
+        assert_eq!(whole.chunk_count, 1);
     }
 
     /// Byte and chunk counters let the completion record say how much was

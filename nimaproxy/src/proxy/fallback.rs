@@ -62,6 +62,16 @@ pub(crate) async fn solo_model_fallback(
             return response;
         }
         let n = state.pool.len().clamp(1, MAX_RETRIES);
+        // All four are pure functions of loop-invariant inputs:
+        // `request_turn_summary` and `request_shape_summary` parse the request
+        // body, the URL is a format of `state.target`, and
+        // `accept_header_for_body` re-parses that same request body to read one
+        // bool. `req_body` is never reassigned inside the retry loop, so they
+        // are computed once per model and reused by every attempt.
+        let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&req_body);
+        let (request_has_tools, request_max_tokens) = request_shape_summary(&req_body);
+        let upstream_url = format!("{}/v1/chat/completions", state.target);
+        let accept_header = accept_header_for_body(&req_body);
         for _ in 0..n {
             let (upstream_permit, key_lease) = match acquire_gateway_permits(&state).await {
                 Ok(permits) => permits,
@@ -75,17 +85,15 @@ pub(crate) async fn solo_model_fallback(
             else {
                 return racing_deadline_response(&state);
             };
-            let (message_count, has_tool_calls, tool_call_count) = request_turn_summary(&req_body);
-            let (request_has_tools, request_max_tokens) = request_shape_summary(&req_body);
             let t0 = Instant::now();
             let result = timeout(
                 Duration::from_millis(send_timeout_ms),
                 state
                     .client
-                    .post(format!("{}/v1/chat/completions", state.target))
+                    .post(upstream_url.as_str())
                     .header("Authorization", format!("Bearer {}", key_lease.key))
                     .header("Content-Type", "application/json")
-                    .header("Accept", accept_header_for_body(&req_body))
+                    .header("Accept", accept_header)
                     .body(req_body.clone())
                     .send(),
             )

@@ -12,6 +12,7 @@ pub mod turn_log;
 
 pub use proxy::messages::validate_model_exists;
 
+use arc_swap::ArcSwap;
 pub use config::{load as config_load, Config, KeyEntry, ModelParams, RoutingConfig};
 pub use key_pool::{KeyAcquireError, KeyLease, KeyPool};
 pub use model_router::{ModelRouter, Strategy};
@@ -73,11 +74,11 @@ pub struct AppState {
     pub racing_solo_fallback: bool,
     pub racing_max_total_request_ms: u64,
     pub racing_cursor: Mutex<usize>,
-    pub available_models: Mutex<Vec<String>>,
+    pub available_models: ArcSwap<Vec<String>>,
     /// Model ids pruned from the configured lists at startup (and, in the future, by the
     /// periodic recheck task) because they were absent from the upstream `/v1/models` catalog.
     /// Populated by `main.rs` after construction; exposed via `/stats`.
-    pub pruned_models: Mutex<Vec<String>>,
+    pub pruned_models: ArcSwap<Vec<String>>,
     pub model_params: HashMap<String, ModelParams>,
     pub model_compat: config::ModelCompat,
     pub max_upstream_in_flight: usize,
@@ -90,6 +91,8 @@ pub struct AppState {
     /// because a live generation pausing between tokens is not a dead
     /// upstream. See [`config::Config::mid_stream_idle_timeout_ms`].
     pub mid_stream_idle_timeout_ms: u64,
+    /// First-byte (TTFB) window override in ms; `None` = per-model dynamic.
+    pub first_byte_timeout_ms: Option<u64>,
     /// Cooldown (seconds) applied to a key after an upstream 401/403 (auth failure) on any
     /// inference path. `0` disables auth-failure quarantine. See `config::auth_failure_cooldown_secs`.
     pub auth_failure_cooldown_secs: u64,
@@ -122,6 +125,7 @@ pub struct RuntimeControls {
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
     pub mid_stream_idle_timeout_ms: u64,
+    pub first_byte_timeout_ms: Option<u64>,
     pub auth_failure_cooldown_secs: u64,
 }
 
@@ -144,6 +148,7 @@ impl Default for RuntimeControls {
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
             mid_stream_idle_timeout_ms: 180_000,
+            first_byte_timeout_ms: None,
             auth_failure_cooldown_secs: 900,
         }
     }
@@ -442,8 +447,8 @@ impl AppState {
             racing_solo_fallback: controls.racing_solo_fallback,
             racing_max_total_request_ms: controls.racing_max_total_request_ms,
             racing_cursor: Mutex::new(0),
-            available_models: Mutex::new(available_models),
-            pruned_models: Mutex::new(Vec::new()),
+            available_models: ArcSwap::from_pointee(available_models),
+            pruned_models: ArcSwap::from_pointee(Vec::new()),
             model_params,
             model_compat,
             max_upstream_in_flight: controls.max_upstream_in_flight.max(1),
@@ -456,6 +461,7 @@ impl AppState {
             // floor lives in the config accessor), and sub-second windows
             // are what the stall tests run against.
             mid_stream_idle_timeout_ms: controls.mid_stream_idle_timeout_ms,
+            first_byte_timeout_ms: controls.first_byte_timeout_ms,
             auth_failure_cooldown_secs: controls.auth_failure_cooldown_secs,
             loop_tracker: Arc::new(loop_tracker::LoopTracker::new(loop_idle_timeout)),
             upstream_permits: Arc::new(Semaphore::new(controls.max_upstream_in_flight.max(1))),
@@ -497,8 +503,29 @@ impl AppState {
     }
 
     pub fn configured_models(&self) -> Vec<String> {
-        let available = self.available_models.lock().unwrap();
+        let available = self.available_models.load();
         collect_configured_models(self.router.as_ref(), &self.racing_models, &available)
+    }
+
+    /// Membership check equivalent to `configured_models().contains(model)` that
+    /// never allocates the model `Vec`: the `available_models` snapshot is loaded
+    /// lock-free and membership is tested in place across router models, racing
+    /// models and available models, in the same order `configured_models` would
+    /// have built.
+    ///
+    /// Dedup semantics are irrelevant for a boolean answer, so `push_unique`'s
+    /// duplicate filtering is not replicated.
+    pub fn is_model_configured(&self, model: &str) -> bool {
+        if let Some(router) = self.router.as_ref() {
+            if router.models.iter().any(|m| m == model) {
+                return true;
+            }
+        }
+        if self.racing_models.iter().any(|m| m == model) {
+            return true;
+        }
+        let available = self.available_models.load();
+        available.iter().any(|m| m == model)
     }
 
     pub fn routing_enabled(&self) -> bool {
@@ -1159,6 +1186,117 @@ label = "test"
         assert_eq!(state.racing_timeout_ms, 5000);
         assert_eq!(state.racing_strategy, "round_robin");
         assert_eq!(state.target, "http://localhost:8080");
+    }
+
+    /// Build an AppState with only the timeout knobs varied, everything else
+    /// default. Returns the state and the model the windows are read for.
+    fn state_with_windows(first_byte: Option<u64>, idle: u64) -> (Arc<AppState>, String) {
+        let model = "nvidia/nemotron-3b".to_string();
+        let keys = vec![KeyEntry {
+            key: NVIDIA_API_KEY.to_string(),
+            label: Some("test-key".to_string()),
+            disabled: false,
+        }];
+        let controls = RuntimeControls {
+            first_byte_timeout_ms: first_byte,
+            mid_stream_idle_timeout_ms: idle,
+            ..RuntimeControls::default()
+        };
+        let state = AppState::new_with_controls(
+            AppStateParams {
+                keys,
+                target: "http://localhost:8080".to_string(),
+                router: None,
+                model_stats: ModelStatsStore::new(100.0),
+                racing_models: vec![model.clone()],
+                racing_max_parallel: 3,
+                racing_timeout_ms: 5000,
+                racing_strategy: "round_robin".to_string(),
+                model_params: HashMap::new(),
+                model_compat: config::ModelCompat::default(),
+                loop_idle_timeout: crate::loop_idle_timeout(),
+            },
+            controls,
+        );
+        (state, model)
+    }
+
+    /// Both knobs unset: each window resolves to the same per-model dynamic
+    /// value, which is the pre-change (shared-window) behavior exactly.
+    #[test]
+    fn test_windows_unset_first_byte_is_dynamic_idle_is_default() {
+        let (state, model) = state_with_windows(None, 180_000);
+        let dynamic = crate::proxy::timeouts::timeout_for_model(&state, &model);
+        assert_eq!(
+            crate::proxy::timeouts::first_byte_timeout_for_model(&state, &model),
+            dynamic
+        );
+        assert_eq!(
+            crate::proxy::timeouts::idle_timeout_for_model(&state, &model),
+            180_000
+        );
+    }
+
+    /// Setting the first-byte knob alone must move only the TTFB window.
+    #[test]
+    fn test_first_byte_knob_leaves_idle_window_dynamic() {
+        let (state, model) = state_with_windows(Some(12000), 180_000);
+        assert_eq!(
+            crate::proxy::timeouts::first_byte_timeout_for_model(&state, &model),
+            12000
+        );
+        assert_eq!(
+            crate::proxy::timeouts::idle_timeout_for_model(&state, &model),
+            180_000
+        );
+    }
+
+    /// Setting the idle knob alone must move only the mid-stream window.
+    #[test]
+    fn test_idle_knob_leaves_first_byte_window_dynamic() {
+        let (state, model) = state_with_windows(None, 60000);
+        let dynamic = crate::proxy::timeouts::timeout_for_model(&state, &model);
+        assert_eq!(
+            crate::proxy::timeouts::first_byte_timeout_for_model(&state, &model),
+            dynamic
+        );
+        assert_eq!(
+            crate::proxy::timeouts::idle_timeout_for_model(&state, &model),
+            60000
+        );
+    }
+
+    /// ArcSwap readers never observe a torn state: concurrent loads during a
+    /// store see either the full old list or the full new list, never a mix.
+    /// (Races on `racing_wins` stay behind a Mutex precisely so increments are
+    /// never lost; only the write-rare model lists use ArcSwap.)
+    #[test]
+    fn test_available_models_swap_reads_are_atomic() {
+        use std::thread;
+        let (state, _) = state_with_windows(None, 180_000);
+        state
+            .available_models
+            .store(Arc::new(vec!["model-a".to_string()]));
+        let writer = {
+            let state = Arc::clone(&state);
+            thread::spawn(move || {
+                for _ in 0..200 {
+                    state
+                        .available_models
+                        .store(Arc::new(vec!["model-a".to_string(), "model-b".to_string()]));
+                }
+            })
+        };
+        for _ in 0..200 {
+            let snap = state.available_models.load();
+            // Either snapshot is whole: model-a is always present (never
+            // dropped by a torn read); model-b appears only with model-a.
+            assert!(snap.iter().any(|m| m == "model-a"));
+        }
+        writer.join().unwrap();
+        let final_snap = state.available_models.load();
+        assert!(final_snap.iter().any(|m| m == "model-a"));
+        assert!(final_snap.iter().any(|m| m == "model-b"));
     }
 
     /// Test pid_file_path with override path

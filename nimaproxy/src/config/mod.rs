@@ -165,6 +165,10 @@ pub struct TimeoutsConfig {
     /// [`Config::mid_stream_idle_timeout_ms`] for why the default is wider
     /// than the first-byte rail.
     pub mid_stream_idle_timeout_ms: Option<u64>,
+    /// Window for the FIRST upstream byte (time-to-first-byte). `None` keeps
+    /// the per-model dynamic window, which is what the retry budget is sized
+    /// against, so an unset value is today's behavior exactly.
+    pub first_byte_timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -374,6 +378,13 @@ impl Config {
             .and_then(|t| t.mid_stream_idle_timeout_ms)
             .filter(|&ms| ms != 0)
             .unwrap_or(180_000)
+    }
+
+    /// First-byte window override. `None` means "use the per-model dynamic
+    /// window" — the AppState resolution below is what turns that into a
+    /// concrete number, so an unset knob leaves behavior byte-identical.
+    pub fn first_byte_timeout_ms(&self) -> Option<u64> {
+        self.timeouts.as_ref().and_then(|t| t.first_byte_timeout_ms)
     }
 
     pub fn routing_models(&self) -> Vec<String> {

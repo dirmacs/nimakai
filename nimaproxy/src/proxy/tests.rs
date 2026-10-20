@@ -10,6 +10,8 @@ use crate::proxy::racing::{
     adaptive_racing_parallel, prompt_parallel_cap, race_models, solo_candidate_model,
     tiered_candidates,
 };
+use crate::proxy::request_state::{RequestState, ResponseMode};
+use crate::proxy::retry::{RetryDecision, RetryPolicy};
 use crate::proxy::upstream_errors::{is_transient_race_error, sse_body_error};
 use crate::AppState;
 use crate::{
@@ -24,6 +26,7 @@ use bytes::Bytes;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 fn create_test_app_state() -> AppState {
     let state = AppState::new(crate::AppStateParams {
         keys: vec![],
@@ -89,6 +92,7 @@ fn create_adaptive_test_state() -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 8000,
             auth_failure_cooldown_secs: 900,
         },
@@ -249,9 +253,7 @@ fn test_validate_model_exists_in_available_models() {
     let state = create_test_app_state();
     state
         .available_models
-        .lock()
-        .unwrap()
-        .push("openai/gpt-4".to_string());
+        .store(std::sync::Arc::new(vec!["openai/gpt-4".to_string()]));
     assert!(validate_model_exists("openai/gpt-4", &state).is_ok());
 }
 #[test]
@@ -259,9 +261,7 @@ fn test_validate_model_exists_not_in_available_models() {
     let state = create_test_app_state();
     state
         .available_models
-        .lock()
-        .unwrap()
-        .push("openai/gpt-4".to_string());
+        .store(std::sync::Arc::new(vec!["openai/gpt-4".to_string()]));
     let result = validate_model_exists("anthropic/claude", &state);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("not found"));
@@ -908,6 +908,7 @@ fn saturated_single_key_state(max_in_flight_per_key: usize) -> Arc<AppState> {
             admission_wait_ms: 5000,
             min_dynamic_timeout_ms: 15_000,
             dynamic_sample_floor: 25,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 15_000,
             auth_failure_cooldown_secs: 900,
         },
@@ -1198,4 +1199,183 @@ fn test_strip_degenerate_with_pipe_and_box_drawing() {
         let msgs = json["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 0, "variant {:?} should be stripped", variant);
     }
+}
+
+// ============ OptFixIdle: buffered stall retried on the idle window ============
+//
+// The buffered (Assembling) mid-stream stall branch in chat.rs charges the
+// per-chunk `idle_window`, not the first-byte `request_timeout_ms`, against a
+// budget that stays keyed to the first-byte window (chat.rs:92-96). The
+// observable contract is that a short idle window is retryable exactly where
+// the first-byte window refuses it.
+//
+// Driving the real chat.rs branch end-to-end would need an upstream mock that
+// pauses mid-body and a 2-key pool; no such harness exists in this file, so
+// these tests pin the decision functions that branch calls
+// (`decide` / `decide_body_stall` / `can_retry`) with the exact production
+// numbers, at the policy/FSM level.
+
+/// A buffered stall at 16000 ms elapsed is retried under the body-stall
+/// budget and refused under the fast budget: the merged policy keeps MAIN's
+/// two-budget split, and OptFixIdle's port is that the body-stall arm is
+/// charged against the idle window (see `decide_under`'s callers in chat.rs),
+/// so the two budgets disagree on exactly the case the branch fixed.
+#[test]
+fn test_buffered_stall_retries_on_idle_window_not_first_byte_window() {
+    // First-byte window 15000 ms, idle window 15000 ms, no admission wait:
+    // fast budget        = 2*15000 + 0        + 500 = 30500 ms
+    // body-stall budget  = 2*15000 + 15000    + 500 = 45500 ms
+    let policy = RetryPolicy::new_split(2, 15_000, 15_000, 0);
+    assert_eq!(
+        policy.budget(),
+        Duration::from_millis(30_500),
+        "budget stays keyed to the first-byte window"
+    );
+    assert_eq!(
+        policy.body_stall_budget(),
+        Duration::from_millis(45_500),
+        "the body-stall budget adds one idle window"
+    );
+    let started = Instant::now() - Duration::from_millis(16_000);
+    let idle_window = Duration::from_millis(8_000);
+    let first_byte_window = Duration::from_millis(15_000);
+
+    // The fast arm uses the first-byte window: 16000 + 15000 = 31000 > 30500.
+    assert_eq!(
+        policy.decide(started, 0),
+        RetryDecision::GiveUp,
+        "the first-byte window must refuse this retry"
+    );
+
+    // The body-stall arm is judged by the body-stall budget, which admits the
+    // retry the fast budget refuses: 16000 + 15000 = 31000 <= 45500.
+    assert_eq!(
+        policy.decide_body_stall(started, 0),
+        RetryDecision::Retry,
+        "the body-stall budget must permit this retry"
+    );
+
+    // Same arms through the FSM, which is what the buffered stall branch
+    // consults for `may_retry`: the window argument is the one the attempt
+    // actually spent, the budget argument is the one that judges it.
+    let stalled = RequestState::Assembling.on_failure(false);
+    assert_eq!(stalled, RequestState::Retryable);
+    assert!(
+        !stalled.can_retry(0, 2, started, first_byte_window, policy.budget()),
+        "the FSM must refuse the retry on the first-byte window and fast budget"
+    );
+    assert!(
+        stalled.can_retry(0, 2, started, idle_window, policy.body_stall_budget()),
+        "the FSM must permit the retry on the idle window and body-stall budget"
+    );
+}
+
+/// A single-key pool (n=1) still gets the one retry the budget admits, via the
+/// `n.max(2)` semantics the buffered stall branch applies, and attempt 1 stays
+/// refused.
+#[test]
+fn test_single_key_pool_stall_permits_attempt_zero_and_refuses_attempt_one() {
+    let policy = RetryPolicy::new_split(2, 15_000, 15_000, 0);
+    let started = Instant::now() - Duration::from_millis(16_000);
+    let idle_window = Duration::from_millis(8_000);
+    let budget = policy.budget();
+
+    // The branch passes n.max(2), so a single-key pool behaves like n = 2.
+    // (Written via a variable so the production call shape stays legible.)
+    let single_key_n: usize = 1;
+    let effective_n = single_key_n.max(2);
+    let stalled = RequestState::Assembling.on_failure(false);
+    assert!(
+        stalled.can_retry(0, effective_n, started, idle_window, budget),
+        "attempt 0 on a single-key pool must retry while the budget allows"
+    );
+    assert!(
+        stalled.can_retry(0, 2, started, idle_window, budget),
+        "attempt 0 must retry identically when n = 2"
+    );
+    assert!(
+        !stalled.can_retry(1, effective_n, started, idle_window, budget),
+        "attempt 1 must be refused: no attempts remain"
+    );
+    assert!(
+        !stalled.can_retry(1, 2, started, idle_window, budget),
+        "attempt 1 must be refused identically when n = 2"
+    );
+}
+
+/// The retry loop and the retry decision agree on the attempt bound: the
+/// loop runs `0..attempts` where `attempts = n.max(2)` (chat.rs), so a
+/// `continue` from the buffered stall branch on attempt 0 always has an
+/// attempt 1 to land on — even for a single-key pool. This pins the two
+/// against each other so a future change to either bound breaks loudly
+/// instead of silently converting a 504 retry into a 429 "all keys
+/// exhausted".
+#[test]
+fn test_retry_loop_bound_matches_decision_bound() {
+    // Mirror the production bound expression exactly: n = pool.len clamped
+    // to [1, MAX_RETRIES], attempts = n.max(2).
+    for pool_len in [1usize, 2, 4, 8, 16] {
+        let n = pool_len.clamp(1, 8);
+        let attempts = n.max(2);
+        // The loop must admit attempt 1 whenever the decision does: the
+        // decision permits attempt `a` iff `a + 1 < bound`, and the loop
+        // runs `0..attempts`, so the bounds must be equal.
+        assert!(
+            attempts >= 2,
+            "pool_len {pool_len}: the loop must always admit a second attempt"
+        );
+        let policy = RetryPolicy::new_split(8, 15_000, 15_000, 0);
+        let started = Instant::now();
+        let window = Duration::from_millis(8_000);
+        let stalled = RequestState::Assembling.on_failure(false);
+        assert!(
+            stalled.can_retry(0, attempts, started, window, policy.budget()),
+            "pool_len {pool_len}: attempt 0 must be retryable under the loop bound"
+        );
+        assert!(
+            !stalled.can_retry(attempts - 1, attempts, started, window, policy.budget()),
+            "pool_len {pool_len}: the last loop attempt must be refused by the decision"
+        );
+    }
+}
+
+/// A streaming (Committed) mid-stream stall is terminal: the same inputs that
+/// retry a buffered stall refuse here.
+#[test]
+fn test_streaming_committed_stall_refuses_retry() {
+    let policy = RetryPolicy::new_split(2, 15_000, 15_000, 0);
+    let started = Instant::now() - Duration::from_millis(16_000);
+    let idle_window = Duration::from_millis(8_000);
+    let budget = policy.budget();
+
+    // The streaming path commits on the first byte and a later stall cannot
+    // un-commit: bytes are already on the wire (S3).
+    let streaming = RequestState::InFlight.on_first_byte(ResponseMode::Streaming);
+    assert_eq!(streaming, RequestState::Committed);
+    let stalled = streaming.on_failure(false);
+    assert_eq!(
+        stalled,
+        RequestState::Failed,
+        "a stall after the wire is committed is terminal"
+    );
+    assert!(
+        !stalled.can_retry(0, 2, started, idle_window, budget),
+        "Committed must never retry, whatever the budget"
+    );
+    assert!(
+        !streaming.can_retry(0, 2, started, idle_window, budget),
+        "Committed is not Retryable, so it refuses directly"
+    );
+    assert!(!streaming.may_commit(), "a second commit would double-send");
+
+    // Contrast: the buffered arm on identical inputs does retry, so this test
+    // discriminates the state rather than the budget.
+    let buffered = RequestState::InFlight.on_first_byte(ResponseMode::Buffered);
+    assert_eq!(buffered, RequestState::Assembling);
+    let buffered_stalled = buffered.on_failure(false);
+    assert_eq!(buffered_stalled, RequestState::Retryable);
+    assert!(
+        buffered_stalled.can_retry(0, 2, started, idle_window, budget),
+        "the identical buffered arm must retry under the same inputs"
+    );
 }

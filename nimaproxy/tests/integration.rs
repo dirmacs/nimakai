@@ -788,13 +788,10 @@ fn test_model_validation_rejects_invalid_model() {
         loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
-    {
-        let mut available = state.available_models.lock().unwrap();
-        *available = vec![
-            "google/gemma-3-27b-it".to_string(),
-            "qwen/qwen3.5-397b-a17b".to_string(),
-        ];
-    }
+    state.available_models.store(std::sync::Arc::new(vec![
+        "google/gemma-3-27b-it".to_string(),
+        "qwen/qwen3.5-397b-a17b".to_string(),
+    ]));
 
     let result = validate_model_exists("google/gemma-3-27b-it", &state);
     assert!(result.is_ok(), "valid model should pass");
@@ -829,10 +826,9 @@ fn test_model_validation_allows_auto_and_empty() {
         loop_idle_timeout: nimaproxy::loop_idle_timeout(),
     });
 
-    {
-        let mut available = state.available_models.lock().unwrap();
-        *available = vec!["some-model".to_string()];
-    }
+    state
+        .available_models
+        .store(std::sync::Arc::new(vec!["some-model".to_string()]));
 
     let result = validate_model_exists("auto", &state);
     assert!(result.is_ok(), "auto should always pass");
