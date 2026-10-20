@@ -335,3 +335,58 @@ The experiment touches the live config and needs owner approval. Staging state:
 - [ ] Owner go: add `first_byte_timeout_ms = 15000`, restart, record the analysis floor timestamp
 
 **Do NOT start the 24 h window until all five boxes are checked.**
+
+---
+
+## 8. Rev 2.1 addendum — live-config budget correction (2026-10-20, pre-evaluation)
+
+**Status:** derivation correction only. No threshold, minimum, invariant, or
+rollback trigger changes. Issued ~1 h after the window opened (floor
+2026-10-20T18:43:50Z) and before any criterion is evaluated, per the §6
+revision rule.
+
+**What rev 2 got wrong:** §1.3/§2 used code-default constant values for keys
+the live config actually sets. The live config
+(`/opt/nimaproxy-config/nimaproxy.toml`, backup sha256 `0d8245d2…`) sets:
+
+| Knob | Rev 2 assumed | Live value | Locator |
+|---|---|---|---|
+| `[limits] admission_wait_ms` | 1500 (code default, `config/mod.rs:331`) | **30000** | live config `:115` |
+| `[timeouts] min_dynamic_timeout_ms` | 8000 (doc default) | **25000** | live config `:121` |
+| `[timeouts] dynamic_sample_floor` | 10 (doc default) | **25** | live config `:122` |
+| `[racing] timeout_ms` | 8000 (code default) | **25000** | live config `:70` |
+
+**Corrected derivation** (formula unchanged: `retry.rs:87-95`
+`budget = 2×first_byte + admission + 500`; `body = budget + idle`;
+`chat.rs:166-171` passes live `state.admission_wait_ms`):
+
+| | first_byte | idle | admission | fast = 2×fb + adm + 500 | body-stall = fast + idle |
+|---|---:|---:|---:|---:|---:|
+| Baseline (pre-window) | 25000 (dynamic) | 180000 | 30000 | **80500 ms** (rev 2 said 52000) | **260500 ms** (rev 2 said 232000) |
+| Experiment | 15000 | 180000 | 30000 | **60500 ms** (rev 2 said 32000) | **240500 ms** (rev 2 said 212000) |
+
+**What this changes in the prose:**
+
+* §2 "thin headroom" paragraph: the worst-case second-attempt fit is
+  `elapsed 15 s + 15 s = 30 s ≤ 60.5 s`, not `≤ 32 s`. The slack is
+  **30500 ms, not 2000 ms** — the retry-fires bar (§3.1, ≥97%) is *easier*
+  to clear than rev 2 argued, because the live admission term dominates.
+  The ≥95% expectation and the ≥97% bar stand (a bar does not move because
+  the slack is wider than described).
+* §2 "2× multiplier" sentence: with a 30000 ms admission term the budget is
+  no longer ~2× the window; the client-wait cap is 60500 ms, ~4× the
+  15000 ms window. The experiment still bounds the cut's effect to the
+  first-byte rail; it does not re-litigate the live admission setting.
+* §5.2 step 4: post-rollback verification reads fast budget
+  `2×dynamic + 30000 + 500`, not `2×dynamic + 1500 + 500`.
+* The dynamic-floor rows (§5.3: 8000 floor, sample floor 10) describe code
+  defaults, not live behavior; the live dynamic path is floor 25000 /
+  samples 25. The deletion-not-pin argument is unaffected (it compares
+  absent-key against pinned-key on the same live config).
+
+**Why the run stays valid:** the error is in the *described* constants, not
+in the manipulated variable. The window cut (25000 → 15000), the config
+mechanism (one key + restart), the floor discipline, and every pass/fail
+bar are exactly as pre-registered. The corrected slack only widens the
+margin on the ≥97% retry-firing bar; it cannot manufacture a false pass on
+any other criterion.
