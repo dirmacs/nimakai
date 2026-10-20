@@ -164,4 +164,42 @@ mod tests {
         let body = br#"{"usage":{"prompt_tokens":7}}"#;
         assert_eq!(non_streaming_usage(body), (Some(7), None));
     }
+
+    /// The hoisted-Accept contract behind the per-attempt loop.
+    ///
+    /// The retry loop computes the Accept header once, before the first
+    /// attempt, from the request body, and reuses that value on every later
+    /// attempt. The DEGRADED path is the one place the request body is
+    /// reassigned, and it recomputes the header from the new body immediately
+    /// after the reassignment (so it dominates both the mistral early-return
+    /// and the `continue` into the next attempt). A recomputation there is
+    /// therefore indistinguishable from a per-attempt recomputation, which is
+    /// what makes the hoist behavior-preserving: this test pins both halves of
+    /// that equivalence, using the same shapes the loop produces (a non-stream
+    /// body before, and a reassigned stream body after).
+    #[test]
+    fn hoisted_accept_matches_per_attempt_recompute_across_body_reassignment() {
+        // Initial request body, as the loop sees it before any attempt.
+        let body =
+            Bytes::from_static(br#"{"model":"auto","messages":[{"role":"user","content":"hi"}]}"#);
+        // What the loop would send per attempt if it recomputed every time.
+        let per_attempt = accept_header_for_body(&body);
+        // What the loop sends now that the value is hoisted before the loop.
+        let mut hoisted = accept_header_for_body(&body);
+        assert_eq!(hoisted, per_attempt);
+        assert_eq!(hoisted, "application/json");
+
+        // DEGRADED reassignment: the router resolves `auto` to a concrete model
+        // whose params turn the request into a stream.
+        let next_body = Bytes::from_static(
+            br#"{"model":"mistral-large","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        );
+        // The loop recomputes right after `body = next_body`...
+        let recomputed = accept_header_for_body(&next_body);
+        hoisted = recomputed;
+        // ...so the next attempt sends the same header a per-attempt
+        // recomputation would have produced from the reassigned body.
+        assert_eq!(hoisted, accept_header_for_body(&next_body));
+        assert_eq!(hoisted, "text/event-stream");
+    }
 }

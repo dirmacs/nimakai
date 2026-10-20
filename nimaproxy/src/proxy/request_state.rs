@@ -109,7 +109,13 @@ impl RequestState {
         )
     }
 
-    /// Whether this state may begin another attempt.
+    /// Whether this state may begin another attempt, against an explicitly
+    /// supplied window and budget.
+    ///
+    /// The window and budget are parameters so the caller's own attempt
+    /// window — e.g. a buffered body-stall charged against the shorter idle
+    /// window rather than the full request timeout — is decided by the same
+    /// one implementation.
     ///
     /// L3: a retry is only legal from `Retryable`, and only while the retry
     /// budget has room for one more full window. A retry from `Committed` is
@@ -208,6 +214,39 @@ mod tests {
         // Attempts exhausted.
         assert!(
             !r.can_retry(7, 8, started, window, budget),
+            "no attempts remain"
+        );
+    }
+
+    /// The same disagreement one level down: a caller-supplied window smaller
+    /// than the full timeout must be able to retry while the caller's budget
+    /// still has room, and refuse once it does not.
+    ///
+    /// This is the case the window parameter exists for: the buffered
+    /// body-stall branch charges the *idle* window, not the first-byte window
+    /// the request opened with, so the same budget admits a retry the
+    /// wider window would refuse.
+    #[test]
+    fn test_can_retry_lets_a_smaller_window_retry() {
+        let r = RequestState::Retryable;
+        let started = Instant::now() - Duration::from_millis(16_000);
+        let budget = Duration::from_millis(30_500);
+
+        // 16000 + 15000 = 31000 > 30500: the full window no longer fits.
+        assert!(
+            !r.can_retry(0, 8, started, Duration::from_millis(15_000), budget),
+            "the full timeout window must not fit the budget"
+        );
+
+        // 16000 + 8000 = 24000 <= 30500: the shorter idle window still fits.
+        assert!(
+            r.can_retry(0, 8, started, Duration::from_millis(8_000), budget),
+            "a smaller window must retry where the full window refuses"
+        );
+
+        // Attempts still bound the decision even when the window fits.
+        assert!(
+            !r.can_retry(7, 8, started, Duration::from_millis(8_000), budget),
             "no attempts remain"
         );
     }

@@ -130,6 +130,7 @@ fn make_solo_fallback_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
@@ -172,6 +173,7 @@ fn make_short_deadline_solo_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
@@ -231,6 +233,7 @@ fn make_racing_with_unused_fallback_state(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 1000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 1000,
             auth_failure_cooldown_secs: 900,
         },
@@ -851,6 +854,12 @@ async fn test_proxy_model_params_do_not_enable_stream_when_omitted() {
     mock.assert();
 }
 
+/// A timed-out direct request returns 504 within one budget window.
+///
+/// The stall is retryable even on this single-key pool (the loop admits one
+/// re-attempt past the key count, and nothing reached the client), so the
+/// model records two attempts: the retry fires and stalls again, and only
+/// then does the handler return the terminal 504.
 #[tokio::test]
 async fn test_direct_chat_request_uses_configured_timeout() {
     use std::time::{Duration, Instant};
@@ -908,7 +917,7 @@ async fn test_direct_chat_request_uses_configured_timeout() {
     let snapshot = state.model_stats.snapshot();
     let slow = snapshot.iter().find(|s| s.id == "slow-model").unwrap();
     assert_eq!(slow.success, 0);
-    assert_eq!(slow.total, 1);
+    assert_eq!(slow.total, 2);
 }
 
 /// A timed-out upstream call must be retried on another key, and the total
@@ -2122,6 +2131,7 @@ fn make_racing_state_two_keys_fast(api_url: String) -> Arc<AppState> {
             admission_wait_ms: 0,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
+            first_byte_timeout_ms: None,
             mid_stream_idle_timeout_ms: 8000,
             auth_failure_cooldown_secs: 900,
         },
@@ -2271,6 +2281,132 @@ async fn test_auth_failure_403_all_keys_returns_upstream_body_unchanged() {
     assert!(!statuses[1].active);
     assert_eq!(statuses[0].auth_failures, 1);
     assert_eq!(statuses[1].auth_failures, 1);
+}
+
+/// Single-key 401: the client must see the verbatim upstream 401, not a 429.
+///
+/// Regression for the `attempts = n.max(2)` loop widening: the extra attempt
+/// is reserved for budget-gated stall retries. A 401 quarantines the only
+/// key, so a same-key re-attempt would stall in admission and return "all
+/// API keys rate-limited" before the tail's verbatim forwarding. The 401
+/// branch breaks out of the loop once every key has been tried, so the
+/// single-key case falls straight to the tail.
+#[tokio::test]
+async fn test_single_key_401_forwards_verbatim_not_429() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let error_body = serde_json::json!({"error": {"message": "Unauthorized: key revoked", "code": "invalid_api_key"}});
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(401)
+        .with_header("content-type", "application/json")
+        .with_body(error_body.to_string())
+        .expect(1)
+        .create();
+
+    let key_entries = vec![KeyEntry {
+        key: "test-key".to_string(),
+        label: Some("key-0".to_string()),
+        disabled: false,
+    }];
+    let state = AppState::new(AppStateParams {
+        keys: key_entries,
+        target: server.url(),
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+    });
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    mock.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+    let resp_body = to_bytes(resp.into_body(), 65_536).await.unwrap();
+    let resp_json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    assert_eq!(
+        resp_json, error_body,
+        "single-key 401 must reach the tail's verbatim forwarding, not a 429"
+    );
+}
+
+/// Single-key 429: the client must see the immediate tail 429 without burning
+/// the admission wait on a pointless same-key re-attempt.
+#[tokio::test]
+async fn test_single_key_429_returns_tail_without_admission_wait() {
+    use mockito::Server;
+    use std::time::{Duration, Instant};
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect(1)
+        .create();
+
+    let key_entries = vec![KeyEntry {
+        key: "test-key".to_string(),
+        label: Some("key-0".to_string()),
+        disabled: false,
+    }];
+    let state = AppState::new(AppStateParams {
+        keys: key_entries,
+        target: server.url(),
+        router: None,
+        model_stats: ModelStatsStore::new(100.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 20000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+        loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+    });
+    let body = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let started = Instant::now();
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    let elapsed = started.elapsed();
+
+    mock.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        elapsed < Duration::from_millis(state.admission_wait_ms),
+        "single-key 429 must break to the tail, not burn the admission wait \
+         on a same-key re-attempt: {:?} vs admission_wait_ms {}",
+        elapsed,
+        state.admission_wait_ms
+    );
 }
 
 /// (d) A 403 on a racing leg must be treated as a key failure only: it must NOT be recorded

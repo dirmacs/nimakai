@@ -103,6 +103,39 @@ pub(crate) fn sanitize_session(session: &str) -> String {
 use crate::AppState;
 use bytes::Bytes;
 use serde_json::Value;
+
+/// Window for the FIRST upstream byte (time-to-first-byte).
+///
+/// This is the value the retry budget is sized against, so it stays keyed to
+/// the per-model dynamic window unless the operator overrides it with
+/// `timeouts.first_byte_timeout_ms`.
+pub(crate) fn first_byte_timeout_for_model(state: &AppState, model_id: &str) -> u64 {
+    match state.first_byte_timeout_ms {
+        Some(ms) => ms,
+        None => timeout_for_model(state, model_id),
+    }
+}
+
+/// Idle (inter-chunk) window for the mid-stream stall guard.
+///
+/// Independent of the first-byte window: a slow-but-alive generation can keep
+/// streaming without loosening the TTFB bound, and vice versa.
+///
+/// The configured rail is `mid_stream_idle_timeout_ms` (default 180 s, which
+/// #22 measured against a live upstream that pauses mid-generation). It is a
+/// `u64`, not an `Option`, so the "unset" state is the 180 s floor rather than
+/// the per-model dynamic window; a zero value is treated the same way here, so
+/// that a stream is never aborted on its second chunk by a misconfiguration.
+/// The dynamic fallback therefore applies only to the degenerate `0`, which is
+/// what the config accessor already filters out — it is kept here as a defence
+/// in depth so a hand-built `AppState` in a test cannot carry a zero rail.
+pub(crate) fn idle_timeout_for_model(state: &AppState, model_id: &str) -> u64 {
+    match state.mid_stream_idle_timeout_ms {
+        0 => timeout_for_model(state, model_id),
+        ms => ms,
+    }
+}
+
 pub(crate) fn timeout_for_model(state: &AppState, model_id: &str) -> u64 {
     state.model_stats.get_model_timeout_with_policy(
         model_id,

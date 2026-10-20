@@ -697,6 +697,62 @@ dynamic_sample_floor = 10
     assert_eq!(config.logging_path(), "/tmp/nimaproxy-turns.jsonl");
     assert_eq!(config.min_dynamic_timeout_ms(), 8000);
     assert_eq!(config.dynamic_sample_floor(), 10);
+    // Unset first-byte override stays unset: resolution to the per-model
+    // dynamic window happens in AppState. The idle rail always resolves
+    // (180 s default).
+    assert_eq!(config.first_byte_timeout_ms(), None);
+    assert_eq!(config.mid_stream_idle_timeout_ms(), 180_000);
+}
+
+#[test]
+fn test_first_byte_and_idle_window_overrides_configured() {
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "test"
+
+[timeouts]
+min_dynamic_timeout_ms = 8000
+dynamic_sample_floor = 10
+first_byte_timeout_ms = 12000
+mid_stream_idle_timeout_ms = 60000
+"#,
+    );
+    let config = load(file.path().to_str().unwrap()).unwrap();
+    assert_eq!(config.first_byte_timeout_ms(), Some(12000));
+    assert_eq!(config.mid_stream_idle_timeout_ms(), 60000);
+}
+
+#[test]
+fn test_first_byte_override_alone_leaves_idle_unset() {
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "test"
+
+[timeouts]
+first_byte_timeout_ms = 12000
+"#,
+    );
+    let config = load(file.path().to_str().unwrap()).unwrap();
+    assert_eq!(config.first_byte_timeout_ms(), Some(12000));
+    assert_eq!(config.mid_stream_idle_timeout_ms(), 180_000);
+}
+
+#[test]
+fn test_idle_override_alone_leaves_first_byte_unset() {
+    let file = write_temp_config(
+        r#"
+[[keys]]
+key = "test"
+
+[timeouts]
+mid_stream_idle_timeout_ms = 60000
+"#,
+    );
+    let config = load(file.path().to_str().unwrap()).unwrap();
+    assert_eq!(config.mid_stream_idle_timeout_ms(), 60000);
+    assert_eq!(config.first_byte_timeout_ms(), None);
 }
 
 #[test]

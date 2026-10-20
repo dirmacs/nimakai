@@ -8,8 +8,8 @@ use crate::proxy::messages::{
 use crate::proxy::racing::race_models;
 use crate::proxy::retry::RetryPolicy;
 use crate::proxy::timeouts::{
-    conversation_identity, record_model_timeout, request_shape_summary, request_turn_summary,
-    sanitize_session, timeout_for_model,
+    conversation_identity, first_byte_timeout_for_model, idle_timeout_for_model,
+    record_model_timeout, request_shape_summary, request_turn_summary, sanitize_session,
 };
 use crate::turn_log::{LoopKey, TurnRecord};
 use crate::AppState;
@@ -165,12 +165,31 @@ pub async fn chat_completions(
     // because 16546 + 15000 > 30500.
     let retry_policy = RetryPolicy::new_split(
         n,
-        timeout_for_model(&state, &model_id),
-        state.mid_stream_idle_timeout_ms,
+        first_byte_timeout_for_model(&state, &model_id),
+        idle_timeout_for_model(&state, &model_id),
         state.admission_wait_ms,
     );
     let started = Instant::now();
-    for attempt in 0..n {
+    // Both the upstream URL and the Accept header are pure functions of
+    // loop-invariant inputs (`state.target` and the request body), so they are
+    // computed once here rather than per attempt: the URL string was rebuilt
+    // (and re-allocated) on every retry, and `accept_header_for_body` runs a
+    // full serde re-parse of the request body on every retry just to read one
+    // bool. The DEGRADED path below is the only place `body` is reassigned, and
+    // it recomputes the Accept header immediately after the reassignment so the
+    // hoisted value stays correct for the retry that follows it.
+    let upstream_url = format!("{}/v1/chat/completions", state.target);
+    let mut accept_header = accept_header_for_body(&body);
+    // The loop admits one re-attempt past the key count, reserved for
+    // budget-gated stall retries: a single-key pool must still get the
+    // single retry the budget admits (a stall is retryable whenever nothing
+    // reached the client, even on the same key). The 429/401/400 branches
+    // break out of the loop once every key has been tried — they retry on
+    // the NEXT key only, never the same one. Multi-key pools are unaffected
+    // (`n` already exceeds 1), and the budget check inside each `can_retry`
+    // still caps the total client wait.
+    let attempts = n.max(2);
+    for attempt in 0..attempts {
         let (upstream_permit, key_lease) =
             match acquire_gateway_permits_excluding(&state, failed_key_idx).await {
                 Ok(permits) => permits,
@@ -181,15 +200,15 @@ pub async fn chat_completions(
         let idx = key_lease.idx;
         let key_label = key_lease.label.clone();
         let t0 = Instant::now();
-        let request_timeout_ms = timeout_for_model(&state, &model_id);
+        let request_timeout_ms = first_byte_timeout_for_model(&state, &model_id);
         let result = timeout(
             std::time::Duration::from_millis(request_timeout_ms),
             state
                 .client
-                .post(format!("{}/v1/chat/completions", state.target))
+                .post(upstream_url.as_str())
                 .header("Authorization", format!("Bearer {}", key_lease.key))
                 .header("Content-Type", "application/json")
-                .header("Accept", accept_header_for_body(&body))
+                .header("Accept", accept_header)
                 .body(body.clone())
                 .send(),
         )
@@ -218,7 +237,7 @@ pub async fn chat_completions(
                 // to the original 504, so failure paths are unchanged.
                 let may_retry = request_state.on_failure(false).can_retry(
                     attempt,
-                    n,
+                    attempts,
                     started,
                     std::time::Duration::from_millis(request_timeout_ms),
                     retry_policy.budget(),
@@ -321,6 +340,15 @@ pub async fn chat_completions(
                         .unwrap_or(60);
                     state.pool.mark_rate_limited(idx, retry_after);
                     eprintln!("[nimaproxy] key {} rate-limited {}s", idx, retry_after);
+                    // A 429 retries on the NEXT key, never the same one: the
+                    // key just entered cooldown, so a same-key re-attempt
+                    // would burn the full admission wait and return "all API
+                    // keys rate-limited" instead of reaching the tail. The
+                    // loop's extra attempt exists only for budget-gated stall
+                    // retries; once every key has been tried, fall to the tail.
+                    if attempt + 1 >= n {
+                        break;
+                    }
                     continue;
                 }
                 // Auth failure: this key itself is bad (revoked/invalid), not the request.
@@ -381,6 +409,13 @@ pub async fn chat_completions(
                         request_tokens: None,
                         response_tokens: None,
                     });
+                    // Same-key re-attempt is pointless here: the key was just
+                    // quarantined, so attempt 1 would stall in admission and
+                    // return before the tail's verbatim-401 forwarding. Fall
+                    // to the tail once every key has been tried.
+                    if attempt + 1 >= n {
+                        break;
+                    }
                     continue;
                 }
                 // Non-2xx bodies must be inspected BEFORE the response is
@@ -416,11 +451,18 @@ pub async fn chat_completions(
                                 resolve_model(original_body.clone(), &state);
                             model_id = next_model_id;
                             body = next_body;
+                            accept_header = accept_header_for_body(&body);
                             if let Some(response) = mistral_validation_error(&model_id, &body) {
                                 return response;
                             }
                         }
                         // Continue retry with the next key and, for auto routing, a freshly resolved model.
+                        // Next-key only: the loop's extra attempt is reserved
+                        // for budget-gated stall retries, not for re-sending a
+                        // rejected body on the same key.
+                        if attempt + 1 >= n {
+                            break;
+                        }
                         continue;
                     }
                     if body_str.contains("Invalid assistant message")
@@ -447,6 +489,11 @@ pub async fn chat_completions(
                             request_tokens: None,
                             response_tokens: None,
                         });
+                        // Next-key only, as above: re-sending a structurally
+                        // rejected body on the same key cannot succeed.
+                        if attempt + 1 >= n {
+                            break;
+                        }
                         continue;
                     }
                     // An unrecognised 400 is forwarded verbatim so the caller
@@ -506,7 +553,7 @@ pub async fn chat_completions(
                     .bytes_stream()
                     .map_err(|e| std::io::Error::other(e.to_string()));
                 let window = Duration::from_millis(request_timeout_ms);
-                let idle_window = Duration::from_millis(state.mid_stream_idle_timeout_ms);
+                let idle_window = Duration::from_millis(idle_timeout_for_model(&state, &model_id));
 
                 request_state = crate::proxy::request_state::RequestState::InFlight;
                 // Bound the wait for the FIRST byte. This is the only part that
@@ -537,7 +584,7 @@ pub async fn chat_completions(
 
                     let may_retry = request_state.on_failure(false).can_retry(
                         attempt,
-                        n,
+                        attempts,
                         started,
                         std::time::Duration::from_millis(request_timeout_ms),
                         retry_policy.budget(),
@@ -718,7 +765,7 @@ pub async fn chat_completions(
                             &state,
                             &model_id,
                             key_label.as_deref(),
-                            request_timeout_ms,
+                            idle_window.as_millis() as u64,
                         );
                         state.pool.note_upstream_stall(idx);
                         failed_key_idx = Some(idx);
@@ -728,9 +775,9 @@ pub async fn chat_completions(
                         // its retry is admitted under the wider ceiling.
                         let may_retry = request_state.on_failure(false).can_retry(
                             attempt,
-                            n,
+                            attempts,
                             started,
-                            std::time::Duration::from_millis(request_timeout_ms),
+                            idle_window,
                             retry_policy.body_stall_budget(),
                         );
                         if may_retry {
@@ -751,7 +798,7 @@ pub async fn chat_completions(
                                 is_racing: false,
                                 error: Some(format!(
                                     "upstream body stalled after {}ms; retrying on another key",
-                                    state.mid_stream_idle_timeout_ms
+                                    idle_window.as_millis()
                                 )),
                                 request_tokens: None,
                                 response_tokens: None,
@@ -775,17 +822,14 @@ pub async fn chat_completions(
                             is_racing: false,
                             error: Some(format!(
                                 "upstream body stalled after {}ms",
-                                state.mid_stream_idle_timeout_ms
+                                idle_window.as_millis()
                             )),
                             request_tokens: None,
                             response_tokens: None,
                         });
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
-                            format!(
-                                "upstream body stalled after {}ms",
-                                state.mid_stream_idle_timeout_ms
-                            ),
+                            format!("upstream body stalled after {}ms", idle_window.as_millis()),
                         )
                             .into_response();
                     }
