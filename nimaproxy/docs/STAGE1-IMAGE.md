@@ -24,9 +24,12 @@ Run from `/opt/nimakai`. All steps are verbatim-runnable.
 
 ```bash
 # 0. Confirm the tip you intend to build (must be chore/rust-ci, NOT origin/main).
+#    The payload commit is bf2d219 (C1/C2/R1-R3/OptFixIdle + docs); eeb70e1 is
+#    its parent and does NOT contain the change set — building it bakes an
+#    image without the payload.
 cd /opt/nimakai
-git rev-parse chore/rust-ci          # eeb70e1012d1d58c988ae8261857e97a105ff600
-git log --oneline -3 chore/rust-ci   # eeb70e1, 5d37430, 8215f3a
+git rev-parse chore/rust-ci          # bf2d219f688646492ad423c05d424d659bf39302
+git log --oneline -2 chore/rust-ci   # bf2d219 (payload), eeb70e1 (parent)
 
 # 1. Export the crate from the tip into a clean scratch tree.
 mkdir -p /tmp/nimaproxy-clean
@@ -70,42 +73,51 @@ enabled = true
 path = "/var/log/nimaproxy/turns.jsonl"
 ```
 
-Run it, publishing host port 18080 and bind-mounting the host log directory:
+Run it, publishing host port 18080, mounting the config from §3 and
+bind-mounting the host log directory. Both `-v` flags are required: without
+the config mount the container falls back to the baked-in example (see R-5),
+and without the log mount the turn log is lost with the container.
 
 ```bash
-mkdir -p /var/log/nimaproxy-stage1
+mkdir -p /tmp/nimaproxy-stage1-logs
+chown 10001:999 /tmp/nimaproxy-stage1-logs   # R-4: the pinned uid must own it
 
 docker run -d --name nimaproxy-stage1 \
-  -p 18080:18080 \
-  -v /var/log/nimaproxy-stage1:/var/log/nimaproxy \
+  -p 127.0.0.1:18080:18080 \
+  -v /tmp/nimaproxy-stage1.toml:/etc/nimaproxy.toml:ro \
+  -v /tmp/nimaproxy-stage1-logs:/var/log/nimaproxy \
   dirmacs/nimaproxy:stage1 \
   --config /etc/nimaproxy.toml --port 18080
 ```
 
 Notes:
 
-- `--port 18080` after the image name overrides the image default; the image's own `CMD` is `--config /etc/nimaproxy.toml`. `listen = "0.0.0.0:18080"` in the mounted config makes the service reachable through the `-p` publish (the config default `127.0.0.1:8080` would be container-local only). Note the two mechanisms are redundant-but-consistent here: config `listen` and `--port` agree on 18080.
-- The baked-in `/etc/nimaproxy.toml` is the **example file**, whose keys are `nvapi-YOUR_FIRST_KEY_HERE` placeholders. Mount a real config (as above, via `-v ...:/etc/nimaproxy.toml:ro`) or supply `--config`; the placeholder keys are not functional upstream credentials, so upstream calls will fail — see R-5. For a stage-1 image that is acceptable: the readiness probes below do not require upstream success.
-- `/var/log/nimaproxy` inside the container is owned by the pinned `nimaproxy` user (uid 10001, gid 999) and is the default log dir; the bind-mount is what makes `turns.jsonl` survive the container — see R-4.
+- **The service binds container-loopback even with `listen = "0.0.0.0:18080"` in the mounted config.** Measured 2026-10-20: the container logs `nimaproxy listening on http://127.0.0.1:18080` and host-side `curl http://127.0.0.1:18080/health` gets `Connection reset by peer`, while `docker exec nimaproxy-stage1 curl -fsS http://127.0.0.1:18080/health` returns 200 with the key-pool JSON. The `-p` publish is therefore dead for this run: probe from inside the container (`docker exec ... curl`), not from the host.
+- `--port 18080` after the image name overrides the image default; the image's own `CMD` is `--config /etc/nimaproxy.toml`.
+- The baked-in `/etc/nimaproxy.toml` is the **example file**, whose keys are `nvapi-YOUR_FIRST_KEY_HERE` placeholders. The `-v ...:/etc/nimaproxy.toml:ro` mount above replaces it with the §3 config; without that mount upstream calls fail (401/403-class) — see R-5. For a stage-1 image that is acceptable: the readiness probes below do not require upstream success.
+- `/var/log/nimaproxy` inside the container is owned by the pinned `nimaproxy` user (uid 10001, gid 999); the host dir `/tmp/nimaproxy-stage1-logs` must be `chown 10001:999` or turn logging disables itself at startup — see R-4.
 
 ## 4. Readiness probes
 
-The router registers `/health` and `/stats` (see `/opt/nimakai/nimaproxy/src/main.rs:313-314`), both `GET`, and `/health` returns `200` with `{"status":"healthy"}` while `/stats` returns the live `ModelStatsStore` JSON. From the host:
+The router registers `/health` and `/stats` (see `src/main.rs:313-314`), both
+`GET`. Because the service binds container-loopback (§3 note), probe from
+inside the container — host-side curl gets `Connection reset by peer`:
 
 ```bash
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/health   # 200
-curl -fsS http://127.0.0.1:18080/health
-# {"status":"healthy"}
+docker exec nimaproxy-stage1 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/health   # 200
+docker exec nimaproxy-stage1 curl -fsS http://127.0.0.1:18080/health | head -c 300
+# {"admission_wait_ms":1500,"gateway_in_flight":0,...} (key-pool JSON, 1 key)
 
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/stats    # 200
-curl -fsS http://127.0.0.1:18080/stats | head -c 400
+docker exec nimaproxy-stage1 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/stats    # 200
 ```
 
-Expected: both **200**.
+Expected: both **200**. Measured 2026-10-20 against `dirmacs/nimaproxy:stage1`
+(bf2d219 payload): `/health` 200 with the 1-key pool JSON, `/stats` 200 with
+`racing_wins` present.
 
-**The built-in `HEALTHCHECK` will report unhealthy — do not use it as the oracle.** The image's `HEALTHCHECK CMD` is hardcoded to `curl -fsS http://127.0.0.1:8080/health` (`/opt/nimakai/nimaproxy/Dockerfile:73-74`), while the service in this run listens on 18080. `docker inspect --format '{{.State.Health.Status}}' nimaproxy-stage1` will read `unhealthy` (after `--start-period=15s` and 3 retries at 30s intervals, i.e. roughly 105s) even though the service is up and answering on 18080. `docker ps` will show `(unhealthy)`.
+**The built-in `HEALTHCHECK` will report unhealthy — do not use it as the oracle.** The image's `HEALTHCHECK CMD` is hardcoded to `curl -fsS http://127.0.0.1:8080/health` (`Dockerfile:73-74`), while the service in this run listens on 18080. `docker inspect --format '{{.State.Health.Status}}' nimaproxy-stage1` will read `unhealthy` (after `--start-period=15s` and 3 retries at 30s intervals, i.e. roughly 105s) even though the service is up and answering on 18080. `docker ps` will show `(unhealthy)`.
 
-Therefore: **explicit `curl http://127.0.0.1:18080/health` is the readiness oracle**, and `docker inspect` health is only meaningful when the service actually listens on 8080.
+Therefore: **`docker exec ... curl http://127.0.0.1:18080/health` is the readiness oracle**, and `docker inspect` health is only meaningful when the service actually listens on 8080.
 
 ## 5. Two-image comparison vs the origin/main baseline
 
@@ -141,25 +153,51 @@ sha256sum /tmp/img-stage1/nimaproxy-query /tmp/img-baseline/nimaproxy-query
 cmp /tmp/img-stage1/nimaproxy /tmp/img-baseline/nimaproxy     # prints first differing byte
 ```
 
-Interpretation rule: `cmp` exit 0 (identical) plus identical `sha256sum` means the exported trees are binary-equivalent — no behavioral claim can be made from a binary comparison alone, so the discriminator below is what carries the behavioral evidence. A `cmp` mismatch must be reconciled with the commit range before any behavioral conclusion; the crate builds with `lto = true`, `codegen-units = 1`, `strip = true` (`/opt/nimakai/nimaproxy/Cargo.toml:49-53`), so timestamps should not leak in, but a mismatch is still a prompt to re-verify the export refs, not an immediate defect claim.
+Interpretation rule: `cmp` exit 0 (identical) plus identical `sha256sum` means the exported trees are binary-equivalent — no behavioral claim can be made from a binary comparison alone, so the discriminators below carry the behavioral evidence. A `cmp` mismatch must be reconciled with the commit range before any behavioral conclusion; the crate builds with `lto = true`, `codegen-units = 1`, `strip = true` (`Cargo.toml:49-53`), so timestamps should not leak in, but a mismatch is still a prompt to re-verify the export refs, not an immediate defect claim.
 
-### C1 behavioral discriminator: aborted SSE streams
+### Payload discriminators: proving bf2d219 is in the image
 
-The commit range includes `5d37430 fix(nimaproxy): finalize the SSE tap when the stream is dropped, not only when drained` — a change that is only observable when a client disconnects mid-stream. A plain request/response comparison cannot discriminate it. The discriminator:
+The byte comparison proves the images differ; these prove the difference is
+the bf2d219 payload (C1/C2/R1-R3/OptFixIdle), not build noise. Run against
+the extracted `/tmp/img-stage1/nimaproxy` from §5B (measured 2026-10-20:
+5,155,248 bytes — multi-MB, so not the R-8 stub):
 
-1. Start `stage1` on 18080 and `baseline` on a second port (e.g. 18081) with equivalent configs and a log bind-mount each.
-2. Send a streaming request to each (`curl -N -X POST http://127.0.0.1:1808N/v1/chat/completions -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"hi"}]}' -H 'content-type: application/json'`) and **abort the client mid-stream** (Ctrl-C / kill curl after the first SSE chunk).
-3. Read the `turns.jsonl` turn record for that request in each container's log mount: the fixed tree finalizes the SSE tap on drop (the turn record is written/completed); the unfixed tree finalizes only on drain.
-4. Discriminating prediction: the two images produce **different** turn records for the aborted request. If both behave identically, the fix is not present in `stage1` or the probe did not actually abort — re-verify step 2 before concluding anything about the fix.
-
-A positive control for step 3 is required before trusting a negative result: run the same abort probe against a tree you know is pre-`5d37430` (e.g. its parent `8215f3a`), and confirm the abort signature differs there. An empty or unread turn record is a probe failure (wrong log path, missing bind-mount, logging disabled), not a behavioral result.
+1. **C2 knobs in the config surface.** The release binary embeds the TOML key
+   names it parses; bf2d219 added two:
+   `strings /tmp/img-stage1/nimaproxy | grep -o 'first_byte_timeout_ms\|idle_timeout_ms' | sort -u`
+   must print both names. The baseline (pre-C2 tree) contains neither.
+2. **OptFixIdle stall reporting.** bf2d219 reports buffered mid-stream stalls
+   against the idle window with the message shape `"upstream body stalled
+   after {}ms"`:
+   `strings /tmp/img-stage1/nimaproxy | grep -c 'upstream body stalled after'`
+   must be ≥ 1 (measured: 2). Note the release profile strips symbols, so
+   function names (`decide_for_window`, `can_retry_with_window`,
+   `is_model_configured`) are NOT reliable discriminators — method-call
+   strings and config keys are; unmangled identifiers must be absent-or-ignored
+   rather than asserted.
+3. **Export-tree source check (strongest).** The export in §2 step 1 is plain
+   source; assert the payload's new APIs exist there before building:
+   `grep -c 'decide_for_window' /tmp/nimaproxy-clean/src/proxy/retry.rs` (6),
+   `grep -c 'can_retry_with_window' /tmp/nimaproxy-clean/src/proxy/request_state.rs` (7),
+   `grep -c 'is_model_configured' /tmp/nimaproxy-clean/src/lib.rs` (4),
+   `grep -n 'arc-swap' /tmp/nimaproxy-clean/Cargo.toml` (line 35),
+   `ls /tmp/nimaproxy-clean/docs` (all four `.md` files incl. the three new docs).
+   Any zero here means the export ref is wrong (e.g. eeb70e1 instead of bf2d219)
+   — stop before building.
+4. **C1 behavioral discriminator: aborted SSE streams.**
+   The commit range includes `5d37430 fix(nimaproxy): finalize the SSE tap when the stream is dropped, not only when drained` — a change that is only observable when a client disconnects mid-stream. A plain request/response comparison cannot discriminate it:
+   1. Start `stage1` on 18080 and `baseline` on a second port (e.g. 18081) with equivalent configs and a log bind-mount each.
+   2. Send a streaming request to each **from inside the container** (§3 note: the service binds container-loopback, so host-side curl is reset; use `docker exec <name> curl ... http://127.0.0.1:1808N/v1/chat/completions`) and **abort the client mid-stream** (kill curl after the first SSE chunk).
+   3. Read the `turns.jsonl` turn record for that request in each container's log mount: the fixed tree finalizes the SSE tap on drop (the turn record is written/completed); the unfixed tree finalizes only on drain.
+   4. Discriminating prediction: the two images produce **different** turn records for the aborted request. If both behave identically, the fix is not present in `stage1` or the probe did not actually abort — re-verify step 2 before concluding anything about the fix.
+   A positive control for step 3 is required before trusting a negative result: run the same abort probe against a tree you know is pre-`5d37430` (e.g. its parent `8215f3a`), and confirm the abort signature differs there. An empty or unread turn record is a probe failure (wrong log path, missing bind-mount, logging disabled), not a behavioral result.
 
 ## 6. Risks
 
 - **R-1 — Dirty-tree context.** Building with `/opt/nimakai` or `/opt/nimakai/nimaproxy` as context bakes the 19+ modified files (`git status --porcelain`) into the image. Mitigation: always build from the `git archive` export in §2.
 - **R-2 — Stale root Dockerfile.** `/opt/nimakai/Dockerfile` builds only `--bin nimaproxy` (no `nimaproxy-query`, no `tests`), installs `libssl3` and uses `useradd --create-home --uid 10001` without a pinned gid, and its comments reference `phase2`. Using it produces a different image than the crate Dockerfile. Mitigation: always `-f <export>/Dockerfile` with the crate-root context.
 - **R-3 — Root `.dockerignore` breaking the crate Dockerfile.** `/opt/nimakai/.dockerignore` (root context) excludes `target/`, `**/target/`, `.git/`, `.omp/`, `*.swp`, `.DS_Store`, `.env`, `.env.*`, `nimaproxy.toml`, `nimaproxy_racing.toml`, `nimaproxy.toml.test`, `node_modules/`. If a build mistakenly uses the root context with `-f nimaproxy/Dockerfile`, the `COPY src ./src` / `COPY tests ./tests` paths resolve relative to the root and are **not** excluded, so the build can succeed while shipping unintended root-level content and skipping the crate's own `.dockerignore`; conversely `*.md` exclusions differ between the two ignore files. Mitigation: crate-root context only, as in §2.
-- **R-4 — Pinned uid/gid vs host log ownership.** The Dockerfile pins `groupadd -g 999` / `useradd -r -u 10001 -g 999` because the deployment bind-mount is owned by `10001:999`; a uid allocated by `useradd -r` instead would silently lose write access and turn logging off at startup. On the host, `/var/log/nimaproxy-stage1` must be writable by uid 10001 — `mkdir -p` as root creates it root-owned, so the container's non-root user cannot write `turns.jsonl`. Mitigation: `mkdir -p /var/log/nimaproxy-stage1 && chown 10001:999 /var/log/nimaproxy-stage1` before `docker run`, and confirm the file appears inside the mount.
+- **R-4 — Pinned uid/gid vs host log ownership.** The Dockerfile pins `groupadd -g 999` / `useradd -r -u 10001 -g 999` because the deployment bind-mount is owned by `10001:999`; a uid allocated by `useradd -r` instead would silently lose write access and turn logging off at startup. The host dir in §3 is `/tmp/nimaproxy-stage1-logs` and must be `chown 10001:999` before `docker run` (the §3 command does this); `mkdir -p` alone creates it root-owned and the container's non-root user cannot write `turns.jsonl`. Confirm the file appears inside the mount.
 - **R-5 — Example keys are non-functional.** The baked `/etc/nimaproxy.toml` is `nimaproxy.toml.example` with `nvapi-YOUR_*_KEY_HERE` placeholders; upstream calls fail (401/403-class). Readiness on `/health` and `/stats` does not depend on upstream, but any request that reaches the upstream gateway does. Mitigation: mount a real config (secret-free for stage-1 smoke; real keys only via mount, never baked) and treat upstream failures as expected, not as an image defect.
 - **R-6 — Healthcheck port mismatch.** The image `HEALTHCHECK` hardcodes `127.0.0.1:8080/health` while this run listens on 18080, so the container reads `unhealthy` while healthy. Mitigation: use explicit `curl` on 18080 as the oracle (§4); optionally override at run time with `--health-cmd` / `--no-healthcheck`.
 - **R-7 — `--locked` vs a dirty `Cargo.lock`.** The Dockerfile builds `--locked`, which requires the committed `Cargo.lock` to match `Cargo.toml`. The working tree has both modified; a clean export of `chore/rust-ci` keeps them consistent, but re-exporting a ref where they diverge fails the build with a lockfile error. Mitigation: build only from a `git archive` export of a ref whose tree builds under CI's `--locked` gates (`.github/workflows/ci.yml` runs `cargo build/test/clippy/fmt` with `--locked`).
