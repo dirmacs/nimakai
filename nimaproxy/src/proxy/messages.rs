@@ -170,6 +170,13 @@ pub(crate) fn normalize_assistant_messages(json: &mut Value) {
                 continue;
             };
             obj.remove("tool_call_id");
+            // Both reasoning keys are stripped: `reasoning` is the StepFun-native
+            // field, `reasoning_content` is the NVIDIA NIM field (confirmed live
+            // 2026-10-21 on step-5-preview: direct non-stream responses carry
+            // `reasoning_content` with a full trace, e.g. A1's 43-token Hello).
+            // Neither may round-trip into history: the model would imitate its
+            // own trace as content. Only `reasoning_content` appears on the SSE
+            // path (see SseDelta), so the tap needs no `reasoning` alias.
             obj.remove("reasoning");
             obj.remove("reasoning_content");
             let has_tool_calls = obj

@@ -244,6 +244,18 @@ The client ratio p95 ≤ 13.31× criterion is evaluated on that matched set only
 If either minimum is not met at 24 h, extend the window; do not evaluate the criteria on a smaller
 slice.
 
+> 2026-10-21 07:28Z annotation (step-5 model-card tuning staged, NOT deployed):
+> a separate tuning change (max_tokens 16384→32768, top_k=0, breaker
+> 32000→36000, docs/comments) is baked into the repo checkout and staged in
+> `/opt/nimaproxy-config/nimaproxy.toml`, but the container was deliberately
+> NOT restarted: §1.2 "everything else stays" + §4.4's post-restart clock
+> forbid mid-window restarts. The live proxy still serves max_tokens=16384.
+> Deploy (restart) is parked for owner re-go at window close (~18:44Z),
+> AFTER the §3/§5 evaluation. Live-file edits preserved
+> `first_byte_timeout_ms = 15000` (line 134). This change is TTFB-neutral by
+> construction (timeout knob untouched), but the restart itself would reset
+> the 24h clock — hence the hold.
+
 ### 4.5 Confound control
 
 A6 §1/§3 shows the per-hour client gap is driven by **session concurrency and proxy TTFB p50**, not

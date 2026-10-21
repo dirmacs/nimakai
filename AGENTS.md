@@ -72,10 +72,12 @@ nimaproxy/
 ## Racing (Speculative Execution)
 
 V3 feature: fires N parallel requests to N models, returns first response.
-Trades extra token budget for min(P50 latency). v0.15.6 keeps the production
-healthy ceiling at 2 racers with MiniMax M3, GLM 5.1, and Step 3.7 as the
-stress-tested fast tier, and falls back to a
-single best model when fewer than two viable racers/key slots exist.
+Trades extra token budget for min(P50 latency).
+
+> 2026-10-21: production is step-5-only (`stepfun-ai/step-5-preview` in all
+> three lists) since 2026-10-15. The 8-model pool below is the historical
+> shape, kept as a config example — it is NOT the live pool. Single-model
+> racing short-circuits (racing.rs requires ≥2 models for the race path).
 
 ```toml
 [racing]
@@ -149,18 +151,13 @@ models = [
 ]
 ```
 
-Available racing models (current active pool, 8 total): minimaxai/minimax-m3, z-ai/glm-5.1, stepfun-ai/step-3.7-flash, moonshotai/kimi-k2.6, qwen/qwen3.5-397b-a17b, minimaxai/minimax-m2.7, nvidia/nemotron-3-ultra-550b-a55b, deepseek-ai/deepseek-v4-flash
-
-Current pool model params mirror build.nvidia.com snippets: DeepSeek Pro/Flash
-use `temperature=1.0`, `top_p=0.95`, `max_tokens=16384` with nested
-`chat_template_kwargs` (`thinking`, and Flash `reasoning_effort=high`);
-Nemotron 3 Ultra uses `temperature=1.0`, `top_p=0.95`, `max_tokens=16384`,
-`reasoning_budget=16384`, and `chat_template_kwargs.enable_thinking=true`;
-Mistral Medium 3.5 uses `temperature=0.7`, `top_p=1.0`, `reasoning_effort=high`;
-GLM 5.1 uses `top_p=1.0` and `seed=42`; its NVIDIA snippet streams, but
-nimaproxy requires callers to explicitly request `"stream": true`. Qwen 3.5
-397B uses `temperature=0.6`, `top_k=20`, `presence_penalty=0`,
-`repetition_penalty=1`; MiniMax M3 and M2.7 use `max_tokens=8192`.
+Live pool (2026-10-15 → present): `stepfun-ai/step-5-preview` only, in
+`[racing] models`, `fast_models`, `fallback_models`, and `[routing] models`.
+Live params (`nimaproxy.toml [model_params."stepfun-ai/step-5-preview"]`):
+`temperature=1.0`, `top_p=0.95`, `top_k=0`, `max_tokens=32768`,
+`reasoning_effort="high"` — all validated live against NVIDIA on 2026-10-21
+(see the config comments for probe evidence). Other `[model_params.*]`
+sections are retained for catalog fidelity but serve no traffic.
 
 ## Metrics Reference
 
