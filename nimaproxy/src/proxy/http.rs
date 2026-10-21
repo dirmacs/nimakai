@@ -459,6 +459,11 @@ pub async fn completions(
                         )),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: this record is
+                        // written before any stream is observed, and the
+                        // request failed anyway. `None` keeps "no tool calls"
+                        // and "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     continue;
                 }
@@ -664,6 +669,11 @@ pub async fn embeddings(
                         )),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: this record is
+                        // written before any stream is observed, and the
+                        // request failed anyway. `None` keeps "no tool calls"
+                        // and "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     continue;
                 }
@@ -809,7 +819,50 @@ pub(crate) fn log_turn_completion(
     loop_tracker: &crate::loop_tracker::LoopTracker,
     metrics: &crate::GatewayMetrics,
 ) {
-    use crate::turn_log::{classify, log_turn as log_turn_event, TurnLog};
+    use crate::turn_log::log_turn as log_turn_event;
+    let record = build_completion_record(turn, completion);
+    if !completion.stream_ended_cleanly {
+        // The stall counter (`timeout_count`) is the no-bytes path in the
+        // request handler; this is the mid-stream cutoff, which arrives here
+        // as a 200 with success=false. Separate mechanisms, separate numbers.
+        metrics.record_truncated_stream();
+    }
+    if let Some(loop_key) = &turn.loop_key {
+        // Enrich the round this completion belongs to with the real outcome.
+        // `begin` already counted the round (even if it 504'd and never
+        // reported), so `record_round` only enriches and bumps
+        // `completed_rounds`.
+        loop_tracker.record_round(
+            &loop_key.session_id,
+            crate::loop_tracker::RoundOutcome {
+                model_ms: completion.duration_ms as u64,
+                success: completion.stream_ended_cleanly,
+                finish_reason: completion.finish_reason.clone(),
+                tool_call_fragments: completion.tool_call_count,
+                tool_calls_distinct: completion.tool_call_distinct,
+            },
+            chrono::Utc::now(),
+        );
+    }
+    log_turn_event(&record);
+}
+
+/// Build the `completion` record for a finished stream.
+///
+/// Split out from [`log_turn_completion`] so the record's CONTENT can be
+/// asserted without the process-wide turn logger: `init_logger` is a
+/// `OnceLock`, so two tests that each initialize it collide (the second gets
+/// `AlreadyExists`) and a test that writes through the global cannot be run
+/// beside any other test that does. This is the same split
+/// [`build_loop_record`] already uses for the loop summary.
+///
+/// The response-side tool-call count is the point of the split: it is known
+/// only here, where the stream has ended.
+pub(crate) fn build_completion_record(
+    turn: &TurnContext,
+    completion: &StreamCompletion,
+) -> crate::turn_log::TurnLog {
+    use crate::turn_log::{classify, TurnLog};
     let mut record = TurnLog::new(TurnRecord {
         requested_model: turn.requested_model.clone(),
         responding_model: turn.responding_model.clone(),
@@ -830,6 +883,13 @@ pub(crate) fn log_turn_completion(
         error: completion.abort_reason.clone(),
         request_tokens: completion.prompt_tokens,
         response_tokens: completion.completion_tokens,
+        // The only place the response side is known: the stream has ended, so
+        // the tap's de-duplicated logical-call count is final. `None` would
+        // mean "not observed", which is not true here. The paired first-byte
+        // record keeps `None` because the response has not happened yet at
+        // first-byte time; the two share `request_id`, so a query reads the
+        // count off either half of the pair.
+        response_tool_calls: Some(completion.tool_call_distinct),
     });
     record.record_kind = TurnLog::RECORD_KIND_COMPLETION.to_string();
     record.request_id = completion.request_id.clone();
@@ -857,30 +917,7 @@ pub(crate) fn log_turn_completion(
     if let Some(reason) = completion.abort_reason.as_ref() {
         record.error = Some(reason.clone());
     }
-    if !completion.stream_ended_cleanly {
-        // The stall counter (`timeout_count`) is the no-bytes path in the
-        // request handler; this is the mid-stream cutoff, which arrives here
-        // as a 200 with success=false. Separate mechanisms, separate numbers.
-        metrics.record_truncated_stream();
-    }
-    if let Some(loop_key) = &turn.loop_key {
-        // Enrich the round this completion belongs to with the real outcome.
-        // `begin` already counted the round (even if it 504'd and never
-        // reported), so `record_round` only enriches and bumps
-        // `completed_rounds`.
-        loop_tracker.record_round(
-            &loop_key.session_id,
-            crate::loop_tracker::RoundOutcome {
-                model_ms: completion.duration_ms as u64,
-                success: completion.stream_ended_cleanly,
-                finish_reason: completion.finish_reason.clone(),
-                tool_call_fragments: completion.tool_call_count,
-                tool_calls_distinct: completion.tool_call_distinct,
-            },
-            chrono::Utc::now(),
-        );
-    }
-    log_turn_event(&record);
+    record
 }
 
 /// Log a closed loop as a `loop` record.
@@ -927,6 +964,9 @@ pub(crate) fn build_loop_record(
         error: None,
         request_tokens: None,
         response_tokens: None,
+        // A loop summary is not a request and has no response of its own. The
+        // response-side counts already live in the dedicated `loop_*` fields.
+        response_tool_calls: None,
     });
     record.record_kind = TurnLog::RECORD_KIND_LOOP.to_string();
     record.loop_started_at = Some(summary.started_at);
@@ -1106,6 +1146,123 @@ mod tests {
         }
     }
 
+    /// A completion record carries the RESPONSE-side distinct tool-call count,
+    /// and only the completion record does. MEASURED DEFECT this fixes: on
+    /// 2026-10-20 traffic, 27.5% of completion rows carried request-side tool
+    /// history while the response made zero tool calls, and the only
+    /// per-request field available counted the request side — 63.9x
+    /// overstatement in the summed total, so every per-request tool-call rate
+    /// was wrong by that factor.
+    ///
+    /// The first-byte record keeps the field `None`: at first-byte time the
+    /// response has not happened, so a value there would be fabricated. The
+    /// two records share a `request_id`, so a query reads the count off either
+    /// half of the pair.
+    #[test]
+    fn test_completion_record_carries_the_response_side_tool_call_count() {
+        use crate::turn_log::TurnLog;
+
+        // The non-call class: the request carried tool history (request-side
+        // count 4 from two tool_calls entries plus two tool-role messages) and
+        // the response made no tool call.
+        let turn = TurnContext {
+            requested_model: "auto".to_string(),
+            responding_model: "m".to_string(),
+            message_count: 5,
+            has_tool_calls: true,
+            tool_call_count: 4,
+            request_has_tools: Some(true),
+            request_max_tokens: None,
+            key_label: None,
+            is_racing: false,
+            loop_key: None,
+        };
+        // A stream that made no tool call: zero distinct logical calls, and
+        // also zero fragments (nothing arrived at all).
+        let completion = StreamCompletion {
+            tool_call_distinct: 0,
+            tool_call_count: 0,
+            ..test_completion(true)
+        };
+
+        // The record is the evidence, and it is built by the pure builder so
+        // this test does not need the process-wide turn logger.
+        let written = build_completion_record(&turn, &completion);
+        assert_eq!(written.record_kind, TurnLog::RECORD_KIND_COMPLETION);
+        assert_eq!(
+            written.response_tool_calls,
+            Some(0),
+            "the non-call class must record 0 response-side calls"
+        );
+        assert_eq!(
+            written.tool_call_count, 4,
+            "the request-side field is unchanged and still overcounts"
+        );
+        // The serialized form must carry the key, so a reader sees 0 rather
+        // than an absent field it has to guess about.
+        let body = serde_json::to_string(&written).unwrap();
+        assert!(body.contains("\"response_tool_calls\":0"), "{body}");
+
+        // The first-byte record for the same turn keeps `None`: at first-byte
+        // time the response has not happened, so a value there would be
+        // fabricated.
+        let first_byte = TurnLog::new(crate::turn_log::TurnRecord {
+            requested_model: turn.requested_model.clone(),
+            responding_model: turn.responding_model.clone(),
+            latency_ms: 1,
+            success: true,
+            status_code: 200,
+            request_message_count: turn.message_count,
+            response_message_count: 1,
+            has_tool_calls: turn.has_tool_calls,
+            tool_call_count: turn.tool_call_count,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+            loop_key: None,
+            request_has_tools: Some(true),
+            request_max_tokens: None,
+            response_tool_calls: None,
+        });
+        assert_eq!(
+            first_byte.response_tool_calls, None,
+            "the first-byte record must not fabricate a response-side count"
+        );
+        assert_eq!(
+            first_byte.tool_call_count, 4,
+            "the request-side field keeps its historical value on the first-byte record"
+        );
+        let ttfb_body = serde_json::to_string(&first_byte).unwrap();
+        assert!(
+            !ttfb_body.contains("response_tool_calls"),
+            "an unobserved response must omit the key entirely, got {ttfb_body}"
+        );
+    }
+
+    /// A completion whose response made N distinct tool calls records N on the
+    /// per-request record — not the fragment count, which is larger by the
+    /// number of SSE frames each call's `arguments` arrived in.
+    #[test]
+    fn test_completion_record_carries_the_distinct_count_not_the_fragment_count() {
+        let turn = test_turn_context();
+        let completion = StreamCompletion {
+            // Three logical calls streamed over eleven fragment entries.
+            tool_call_count: 11,
+            tool_call_distinct: 3,
+            ..test_completion(true)
+        };
+
+        let written = build_completion_record(&turn, &completion);
+        assert_eq!(written.response_tool_calls, Some(3));
+        let body = serde_json::to_string(&written).unwrap();
+        assert!(
+            body.contains("\"response_tool_calls\":3"),
+            "the distinct count must be on the record, got {body}"
+        );
+    }
+
     /// A truncated stream increments `truncated_streams` and NOT
     /// `timeout_count`: the mid-stream cutoff (200, success=false) is a
     /// different mechanism from the no-bytes stall, and the numbers must say so.
@@ -1167,6 +1324,7 @@ mod tests {
                 loop_key: None,
                 request_has_tools: has_tools,
                 request_max_tokens: max_tokens,
+                response_tool_calls: None,
             }
         }
         let json = serde_json::to_string(&TurnLog::new(record(Some(true), Some(32000)))).unwrap();

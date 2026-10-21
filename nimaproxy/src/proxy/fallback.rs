@@ -132,6 +132,10 @@ pub(crate) async fn solo_model_fallback(
                         error: Some(msg.clone()),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     last_error = Some((StatusCode::BAD_GATEWAY, msg));
                     break;
@@ -165,6 +169,10 @@ pub(crate) async fn solo_model_fallback(
                         error: Some(msg.clone()),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
                     break;
@@ -224,6 +232,10 @@ pub(crate) async fn solo_model_fallback(
                         error: Some(msg.clone()),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     last_error = Some((StatusCode::BAD_GATEWAY, msg));
                     break;
@@ -257,6 +269,10 @@ pub(crate) async fn solo_model_fallback(
                         error: Some(msg.clone()),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
                     break;
@@ -297,6 +313,10 @@ pub(crate) async fn solo_model_fallback(
                         error: Some(embedded_msg.clone()),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     last_error = Some((
                         StatusCode::from_u16(embedded_code).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -361,6 +381,10 @@ pub(crate) async fn solo_model_fallback(
                 },
                 request_tokens: None,
                 response_tokens: None,
+                // The response side is not known here: a first-byte or failure record is
+                // written before any stream is observed. `None` keeps "no tool calls" and
+                // "not observed" distinguishable.
+                response_tool_calls: None,
             });
             if ok {
                 state.gateway_metrics.record_racing_win(&model_id);

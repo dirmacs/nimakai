@@ -74,7 +74,35 @@ pub struct TurnLog {
     pub has_tool_calls: bool,
 
     /// Tool call count
+    ///
+    /// REQUEST-SIDE, and it OVERCOUNTS what the model did in this turn: this is
+    /// [`request_turn_summary`](crate::proxy::timeouts::request_turn_summary)'s
+    /// count of the tool history the request CARRIED — every `role == "tool"`
+    /// message plus every entry of every message's `tool_calls` array. Measured
+    /// on 2026-10-20 traffic, 27.5% of completions carried tool history while
+    /// the response made zero tool calls, and the summed request-side count
+    /// overstated the real call count by 63.9x. Any "tool calls per request"
+    /// rate computed from this field is wrong by that factor.
+    ///
+    /// The value is kept exactly as it always was so historical queries stay
+    /// comparable; the response-side reading is
+    /// [`Self::response_tool_calls`].
     pub tool_call_count: usize,
+
+    /// Distinct logical tool calls the RESPONSE made, de-duplicated by the SSE
+    /// delta's `index`.
+    ///
+    /// This is the response-side reading: `Some(0)` when the response made no
+    /// tool call, even when the request carried tool history — the "non-call
+    /// class" that `tool_call_count` reports as non-zero. It is the only field
+    /// from which a per-request tool-call rate can be computed honestly.
+    ///
+    /// `None` where the response was never observed: first-byte records, the
+    /// failure paths, non-streaming turns, and records written before this
+    /// field existed. So `Some(0)` is "the response made no tool call" and
+    /// `None` is "not observed", which are different answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_tool_calls: Option<u64>,
 
     /// Error message if failed
     pub error: Option<String>,
@@ -300,6 +328,13 @@ pub struct TurnRecord {
     /// Effective `max_tokens` for the request: the client value after
     /// model-default injection, NOT the raw client value.
     pub request_max_tokens: Option<i32>,
+    /// Distinct logical tool calls the RESPONSE made, de-duplicated by the SSE
+    /// delta's `index`.
+    ///
+    /// `None` everywhere the response has not been observed yet: first-byte
+    /// records, the failure paths, and non-streaming turns. This is the
+    /// response-side reading; `tool_call_count` above is the request-side one.
+    pub response_tool_calls: Option<u64>,
 }
 
 impl TurnLog {
@@ -410,6 +445,7 @@ impl TurnLog {
             loop_ended_by: None,
             request_has_tools: record.request_has_tools,
             request_max_tokens: record.request_max_tokens,
+            response_tool_calls: record.response_tool_calls,
         }
     }
 }
@@ -728,6 +764,7 @@ mod tests {
             response_tokens: None,
             request_has_tools: None,
             request_max_tokens: None,
+            response_tool_calls: None,
         });
 
         assert_eq!(turn.requested_model, "auto");
@@ -764,6 +801,7 @@ mod tests {
                 response_tokens: None,
                 request_has_tools: None,
                 request_max_tokens: None,
+                response_tool_calls: None,
             }
         }
 
@@ -824,6 +862,7 @@ mod tests {
             response_tokens: None,
             request_has_tools: None,
             request_max_tokens: None,
+            response_tool_calls: None,
         });
         let b = TurnLog::new(TurnRecord {
             requested_model: "auto".to_string(),
@@ -843,6 +882,7 @@ mod tests {
             response_tokens: None,
             request_has_tools: None,
             request_max_tokens: None,
+            response_tool_calls: None,
         });
         assert!(a.request_id.is_some(), "request_id must be populated");
         assert!(b.request_id.is_some(), "request_id must be populated");
@@ -872,6 +912,7 @@ mod tests {
             response_tokens: None,
             request_has_tools: None,
             request_max_tokens: None,
+            response_tool_calls: None,
         });
 
         turn.request_messages = vec![
@@ -927,6 +968,7 @@ mod tests {
             response_tokens: None,
             request_has_tools: None,
             request_max_tokens: None,
+            response_tool_calls: None,
         });
 
         let json = serde_json::to_string(&turn).unwrap();
@@ -956,6 +998,7 @@ mod tests {
             response_tokens: None,
             request_has_tools: None,
             request_max_tokens: None,
+            response_tool_calls: None,
         });
         assert_eq!(turn.loop_key, None);
     }
@@ -988,6 +1031,7 @@ mod tests {
             response_tokens: None,
             request_has_tools: None,
             request_max_tokens: None,
+            response_tool_calls: None,
         });
         let json = serde_json::to_string(&turn).unwrap();
         let back: TurnLog = serde_json::from_str(&json).unwrap();
@@ -1020,6 +1064,7 @@ mod tests {
             response_tokens: None,
             request_has_tools: None,
             request_max_tokens: None,
+            response_tool_calls: None,
         })
     }
 
@@ -1367,5 +1412,147 @@ mod tests {
         assert_eq!(record.body_bytes, None);
         assert_eq!(record.failure_mode, None);
         assert_eq!(record.record_kind, TurnLog::RECORD_KIND_TTFB);
+    }
+
+    /// The regression test for the turn-log tool-call defect.
+    ///
+    /// MEASURED DEFECT (2026-10-20, 2345 completion rows): 27.5% of turns
+    /// carried tool history in the REQUEST while the RESPONSE made zero tool
+    /// calls, and the only per-request field that existed counted the request
+    /// side. Those 645 rows logged 58,344 tool calls that did not happen in
+    /// their turn, and the summed per-request count overstated the real call
+    /// count by 63.9x — so every "tool calls per request" rate derived from
+    /// `tool_call_count` was wrong by that factor.
+    ///
+    /// This test pins the property that was missing: a turn whose history
+    /// contains tool messages records 0 response-side calls while still
+    /// recording its request-side count.
+    #[test]
+    fn test_non_call_class_is_zero_on_the_response_side() {
+        use crate::proxy::timeouts::request_turn_summary;
+
+        // The agent-loop shape that produced the defect: an earlier turn
+        // called tools, so the conversation carries a `tool`-role result
+        // message AND an assistant message with a `tool_calls` array.
+        let body = br#"{"messages":[
+            {"role":"user","content":"what is the weather"},
+            {"role":"assistant","content":null,"tool_calls":[
+                {"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Oslo\"}"}},
+                {"id":"call_2","type":"function","function":{"name":"get_time","arguments":"{}"}}
+            ]},
+            {"role":"tool","tool_call_id":"call_1","content":"4C and raining"},
+            {"role":"tool","tool_call_id":"call_2","content":"14:05"},
+            {"role":"user","content":"thanks, summarise that"}
+        ]}"#;
+
+        let (message_count, has_tool_calls, tool_call_count) =
+            request_turn_summary(&bytes::Bytes::from_static(body));
+        // The request side is exactly the 2x-pairing signature measured on
+        // live traffic (one assistant `tool_calls` entry plus one `tool`-role
+        // message per logical call), and it is non-zero.
+        assert_eq!(message_count, 5);
+        assert!(has_tool_calls);
+        assert_eq!(tool_call_count, 4);
+
+        // The response made no tool call at all, so the completion record's
+        // response-side count is 0 — not 4, and not 8.
+        let turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "m".to_string(),
+            latency_ms: 800,
+            success: true,
+            status_code: 200,
+            request_message_count: message_count,
+            response_message_count: 1,
+            has_tool_calls,
+            tool_call_count,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+            loop_key: None,
+            request_has_tools: Some(true),
+            request_max_tokens: None,
+            response_tool_calls: Some(0),
+        });
+        assert_eq!(
+            turn.response_tool_calls,
+            Some(0),
+            "a response that made no tool call must record 0 response-side calls"
+        );
+        assert!(
+            turn.tool_call_count > 0,
+            "the request-side field keeps its historical (overcounting) value"
+        );
+
+        // And the field is written on the wire, so a log consumer can read it.
+        let json = serde_json::to_string(&turn).unwrap();
+        assert!(
+            json.contains("\"response_tool_calls\":0"),
+            "the response-side count must be on the record, got {json}"
+        );
+    }
+
+    /// A response that made N distinct tool calls records N — not the fragment
+    /// count, which overcounts by the number of SSE frames each call's
+    /// `arguments` arrived in, and not 2N from any request-side pairing.
+    #[test]
+    fn test_response_side_records_the_distinct_call_count() {
+        // Three logical calls whose arguments stream over 11 fragment frames
+        // in total: the tap de-duplicates them by the delta's `index`.
+        let distinct = 3u64;
+        let fragments = 11u64;
+
+        let turn = TurnLog::new(TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "m".to_string(),
+            latency_ms: 900,
+            success: true,
+            status_code: 200,
+            request_message_count: 1,
+            response_message_count: 1,
+            has_tool_calls: true,
+            tool_call_count: 0,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+            loop_key: None,
+            request_has_tools: Some(true),
+            request_max_tokens: None,
+            response_tool_calls: Some(distinct),
+        });
+        assert_eq!(turn.response_tool_calls, Some(3));
+        assert_ne!(
+            turn.response_tool_calls,
+            Some(fragments),
+            "the fragment count overcounts logical calls and must not be logged here"
+        );
+        let json = serde_json::to_string(&turn).unwrap();
+        assert!(json.contains("\"response_tool_calls\":3"), "{json}");
+    }
+
+    /// A log line written before this field existed — one with no
+    /// `response_tool_calls` key — must still deserialize, with the field
+    /// `None` rather than defaulted to a value that reads as a real zero.
+    #[test]
+    fn test_a_line_without_response_tool_calls_deserializes_as_none() {
+        let json = r#"{"timestamp":"2026-10-16T00:00:00Z","requested_model":"auto",
+            "responding_model":"m","latency_ms":10,"success":true,"status_code":200,
+            "has_tool_calls":true,"tool_call_count":6,"error":null,"is_racing":false,
+            "request_message_count":3,"response_message_count":1,"request_tokens":null,
+            "response_tokens":null,"racing_models_count":null,"racing_winner":null,
+            "request_messages":[],"response_message":null,"record_kind":"completion"}"#;
+        let record: TurnLog = serde_json::from_str(json).expect("an old line must still parse");
+        assert_eq!(
+            record.tool_call_count, 6,
+            "the request-side field is unchanged, so historical queries still work"
+        );
+        assert_eq!(
+            record.response_tool_calls, None,
+            "an absent key means 'not observed', never 0"
+        );
     }
 }

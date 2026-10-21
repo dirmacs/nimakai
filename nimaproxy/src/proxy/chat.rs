@@ -266,6 +266,10 @@ pub async fn chat_completions(
                         )),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     continue;
                 }
@@ -287,6 +291,10 @@ pub async fn chat_completions(
                     error: Some(format!("upstream timeout after {}ms", request_timeout_ms)),
                     request_tokens: None,
                     response_tokens: None,
+                    // The response side is not known here: a first-byte or failure record is
+                    // written before any stream is observed. `None` keeps "no tool calls" and
+                    // "not observed" distinguishable.
+                    response_tool_calls: None,
                 });
                 return (
                     StatusCode::GATEWAY_TIMEOUT,
@@ -325,6 +333,10 @@ pub async fn chat_completions(
                     error: Some(e.to_string()),
                     request_tokens: None,
                     response_tokens: None,
+                    // The response side is not known here: a first-byte or failure record is
+                    // written before any stream is observed. `None` keeps "no tool calls" and
+                    // "not observed" distinguishable.
+                    response_tool_calls: None,
                 });
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
@@ -408,6 +420,10 @@ pub async fn chat_completions(
                         )),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     // Same-key re-attempt is pointless here: the key was just
                     // quarantined, so attempt 1 would stall in admission and
@@ -488,6 +504,10 @@ pub async fn chat_completions(
                             error: Some(error_excerpt),
                             request_tokens: None,
                             response_tokens: None,
+                            // The response side is not known here: a first-byte or failure record is
+                            // written before any stream is observed. `None` keeps "no tool calls" and
+                            // "not observed" distinguishable.
+                            response_tool_calls: None,
                         });
                         // Next-key only, as above: re-sending a structurally
                         // rejected body on the same key cannot succeed.
@@ -611,6 +631,10 @@ pub async fn chat_completions(
                             )),
                             request_tokens: None,
                             response_tokens: None,
+                            // The response side is not known here: a first-byte or failure record is
+                            // written before any stream is observed. `None` keeps "no tool calls" and
+                            // "not observed" distinguishable.
+                            response_tool_calls: None,
                         });
                         continue;
                     }
@@ -635,6 +659,10 @@ pub async fn chat_completions(
                         )),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     return (
                         StatusCode::GATEWAY_TIMEOUT,
@@ -802,6 +830,10 @@ pub async fn chat_completions(
                                 )),
                                 request_tokens: None,
                                 response_tokens: None,
+                                // The response side is not known here: a first-byte or failure record is
+                                // written before any stream is observed. `None` keeps "no tool calls" and
+                                // "not observed" distinguishable.
+                                response_tool_calls: None,
                             });
                             continue;
                         }
@@ -826,6 +858,10 @@ pub async fn chat_completions(
                             )),
                             request_tokens: None,
                             response_tokens: None,
+                            // The response side is not known here: a first-byte or failure record is
+                            // written before any stream is observed. `None` keeps "no tool calls" and
+                            // "not observed" distinguishable.
+                            response_tool_calls: None,
                         });
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
@@ -896,6 +932,10 @@ pub async fn chat_completions(
                     error: None,
                     request_tokens: usage_tokens.0,
                     response_tokens: usage_tokens.1,
+                    // The response side is not known here: a first-byte or failure record is
+                    // written before any stream is observed. `None` keeps "no tool calls" and
+                    // "not observed" distinguishable.
+                    response_tool_calls: None,
                 });
                 let request_id =
                     crate::turn_log::with_logger(|logger| logger.last_request_id()).flatten();
