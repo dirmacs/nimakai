@@ -749,14 +749,6 @@ pub fn log_turn(turn: &TurnLog) -> Option<String> {
     }
 }
 
-/// Get reference to global logger if enabled
-pub fn with_logger<F, R>(f: F) -> Option<R>
-where
-    F: FnOnce(&TurnLogger) -> R,
-{
-    GLOBAL_LOGGER.get().map(f)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
