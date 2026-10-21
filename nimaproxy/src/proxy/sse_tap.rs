@@ -122,6 +122,13 @@ struct SseTapInner {
     /// thinking model that emitted its whole trace and then stopped without
     /// content is a different operator action from one that emitted nothing
     /// at all.
+    ///
+    /// A zero here does NOT mean "the model did not reason": NVIDIA serves
+    /// step-5-preview traces in `reasoning_content` on BOTH paths (SSE deltas
+    /// confirmed live 2026-10-21: 18/19 and 82/83 reasoning frames at 16k/32k
+    /// caps), but the non-streaming client response carries the trace in the
+    /// assembled JSON body, not in SSE deltas the tap can see. Zero on a
+    /// non-streamed turn is "unobserved", not "absent".
     reasoning_chars: AtomicU64,
     /// Number of `choices[0].delta.tool_calls` entries seen across frames.
     ///

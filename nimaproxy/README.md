@@ -69,6 +69,10 @@ cargo build --release
 
 ### Configuration
 
+> 2026-10-21: production serves `stepfun-ai/step-5-preview` only (all model
+> lists since 2026-10-15). The 8-model pool below is the historical config
+> shape — live params are in the table's step-5 row.
+
 Create `nimaproxy.toml`:
 
 ```toml
@@ -150,6 +154,7 @@ streams only when the caller explicitly sends `"stream": true`.
 
 | Model | max_tokens | temperature | top_p | Extra |
 | --- | ---: | ---: | ---: | --- |
+| `stepfun-ai/step-5-preview` ⭐ live | 32768 | 1.0 | 0.95 | `top_k=0`, `reasoning_effort=high`; all validated live 2026-10-21 |
 | `deepseek-ai/deepseek-v4-pro` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=false` |
 | `nvidia/nemotron-3-ultra-550b-a55b` | 16384 | 1.0 | 0.95 | `reasoning_budget=16384`, `chat_template_kwargs.enable_thinking=true`; NVIDIA snippet streams, caller must opt in |
 | `deepseek-ai/deepseek-v4-flash` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=true`, `chat_template_kwargs.reasoning_effort=high` |
@@ -226,6 +231,12 @@ with ~178s first-byte latency showing the planning burden that `required`
 never survives. Guidance: prefer `auto` for complex output shapes, or
 simplify the forced schema. The proxy forwards megabyte-scale tool-call
 streams without truncation (proven to 1.1MB), so size is not the constraint.
+
+2026-10-21 model-card audit: this is consistent with the published contract —
+build.nvidia.com/stepfun-ai/step-5-preview lists Structured Output as **Not
+supported** on NVIDIA (JSON Mode/Schema exist only on StepFun's native
+platform). Do not attempt `response_format: json_schema` against this proxy;
+prefer `tool_choice: auto` with simple schemas as above.
 
 
 ## Testing

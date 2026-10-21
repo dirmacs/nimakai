@@ -337,7 +337,7 @@ fails loudly rather than leasing a blank key. Literal keys still work unchanged.
 - Per-model stats tracking (TTFC, success rate, degradation detection)
 - `x-key-label` response header: tracks which key was used for rotation debugging
 
-**Model Routing (V2):**
+**Model Routing (V2)** (config shape; live pool is step-5-only since 2026-10-15 — see note below):
 
 ```toml
 [routing]
@@ -357,7 +357,7 @@ models = [
 
 When a request arrives with `"model": "auto"`, the proxy picks the best model from this list. Untried models (< 3 samples) get priority. Degraded models (≥3 consecutive failures or avg > spike_threshold_ms) are skipped. The production example uses a 12s latency threshold because current live NIM winners often respond in the 6-12s range while still maintaining availability.
 
-**Model Racing (Speculative Execution):**
+**Model Racing (Speculative Execution)** (config shape; live pool is step-5-only — racing short-circuits with <2 models):
 
 ```toml
 [racing]
@@ -410,7 +410,7 @@ min_dynamic_timeout_ms = 15000
 dynamic_sample_floor = 25
 ```
 
-**Per-Model NVIDIA Defaults:**
+**Per-Model NVIDIA Defaults** (catalog reference; only the step-5 row serves traffic):
 
 `nimaproxy` applies the build.nvidia.com inference defaults from
 `[model_params."<model>"]` before sending requests upstream. `stream=false`
@@ -420,6 +420,7 @@ fidelity, but the proxy streams only when the caller explicitly sends
 
 | Model | max_tokens | temperature | top_p | Extra |
 | --- | ---: | ---: | ---: | --- |
+| `stepfun-ai/step-5-preview` ⭐ live | 32768 | 1.0 | 0.95 | `top_k=0`, `reasoning_effort=high`; all validated live 2026-10-21 |
 | `deepseek-ai/deepseek-v4-pro` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=false` |
 | `nvidia/nemotron-3-ultra-550b-a55b` | 16384 | 1.0 | 0.95 | `reasoning_budget=16384`, `chat_template_kwargs.enable_thinking=true`; NVIDIA snippet streams, caller must opt in |
 | `deepseek-ai/deepseek-v4-flash` | 16384 | 1.0 | 0.95 | `chat_template_kwargs.thinking=true`, `chat_template_kwargs.reasoning_effort=high` |
@@ -432,10 +433,12 @@ fidelity, but the proxy streams only when the caller explicitly sends
 | `minimaxai/minimax-m2.7` | 8192 | 1.0 | 0.95 |  |
 
 Fires N parallel requests to N models, returns first response. Trades token
-budget for min(P50 latency). The production-oriented default keeps the healthy
-ceiling at `max_parallel=2` with MiniMax M3, GLM 5.1, and Step 3.7 as the
-stress-tested fast tier, and falls back
-to one model for large prompts or when fewer than two viable racers/key slots
+budget for min(P50 latency).
+
+> 2026-10-21: production serves `stepfun-ai/step-5-preview` only (all model
+> lists since 2026-10-15). The multi-model pools above are the historical
+> config shape. Live step-5 params: `temperature=1.0`, `top_p=0.95`,
+> `top_k=0`, `max_tokens=32768`, `reasoning_effort="high"`.
 exist. Keys and upstream slots are pre-allocated per race task, so saturated
 gateways wait briefly via `admission_wait_ms` and then return a local 503/429
 instead of forcing all callers into NVIDIA-side cooldowns.

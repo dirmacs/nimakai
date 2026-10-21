@@ -210,6 +210,14 @@ pub(crate) fn request_shape_summary(body: &Bytes) -> (Option<bool>, Option<i32>)
         .and_then(|v| i32::try_from(v).ok());
     (has_tools, max_tokens)
 }
+/// Serialized character count of all message `content` fields, used for the
+/// large-prompt racing threshold. `c.to_string()` serializes the whole value,
+/// so a multimodal content-parts array — including base64 image blobs — counts
+/// at full wire size, not token count. A single image turn therefore always
+/// exceeds the 12k threshold and races solo (parallel=1), which is the desired
+/// behavior: racing would 2x a ~400-token image for no latency win. Verified
+/// live 2026-10-21: a 1px image turn via proxy returned "Red" with 207 prompt
+/// tokens. Do NOT "fix" this to count text only without re-measuring.
 pub(crate) fn prompt_chars(body: &Bytes) -> usize {
     serde_json::from_slice::<Value>(body)
         .ok()

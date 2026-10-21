@@ -201,11 +201,19 @@ stream = true
 seed = 42
 
 [model_params."stepfun-ai/step-5-preview"]
-# Max effort: step-5 accepts reasoning_effort low/medium/high (Messages API:
-# output_config.effort). Streaming on so racing can compare first-token latency.
+# 2026-10-21 (model-card audit): builder settings temperature=1.0/top_p=0.95/
+# top_k=0 per build.nvidia.com/stepfun-ai/step-5-preview. top_k=0 validated
+# live: A/B x3 at 1024 budget, 6/6 stop/Hello, no behavioral delta vs omitted
+# (an empty length row at max_tokens=64 was reasoning overhead exhausting a
+# tiny budget, not a top_k defect; irrelevant at production budgets).
+# reasoning_effort=high validated live on NVIDIA (not just StepFun-native):
+# +10 prompt tokens, 88s vs 29s on identical plan prompt, deeper output.
+# max_tokens 16384 -> 32768: 26 measured finish_reason=length truncations, all
+# at exactly 16384, all tool-heavy (16-38 calls). Native max output is 64k.
 temperature = 1.0
 top_p = 0.95
-max_tokens = 16384
+top_k = 0
+max_tokens = 32768
 stream = true
 reasoning_effort = "high"
 
@@ -249,7 +257,13 @@ stream = false
 supports_tool_messages = ["all"]
 
 [circuit_breaker]
-max_output_tokens = 32000
+# 2026-10-21: 32000 -> 36000, moved WITH max_tokens 16384 -> 32768. The breaker
+# assigns (not accumulates) per-completion output tokens and degrades when the
+# count exceeds this value, so a legal full-length 32768 completion must not
+# self-degrade the model. 36000 = cap + headroom for the estimator's
+# bytes/4 fallback on bodies without usage. Chat path never writes these
+# counters (only legacy /v1/completions), but the bound must still be sane.
+max_output_tokens = 36000
 max_repetitions = 5
 max_consecutive_assistant_turns = 10
 
