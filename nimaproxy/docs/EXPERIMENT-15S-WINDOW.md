@@ -422,3 +422,167 @@ mechanism (one key + restart), the floor discipline, and every pass/fail
 bar are exactly as pre-registered. The corrected slack only widens the
 margin on the ≥97% retry-firing bar; it cannot manufacture a false pass on
 any other criterion.
+
+---
+
+# 9. Rev 2.2 addendum — post-window evaluation and rollback (2026-10-21)
+
+**Status:** evaluation closed early, **run CLOSED, verdict FAIL (the rollback bar fired)**. No threshold,
+minimum, invariant, or rollback trigger is changed by this revision. Issued per §6 after the window
+closed; the §3/§5 bars quoted below are the pre-registered rev 2.1 bars verbatim.
+
+All figures in this addendum are computed from one frozen slice of the turn log: 62,501 lines,
+sha256 `5686d37001fa6b827f1652edd7dc659e3b27e170051f9696943a88ca829ed2e5`, sliced by timestamp to
+`2026-10-20T18:43:50Z .. 2026-10-21T12:31:38Z` (the floor, and the moment the proxy was stopped
+for the rollback). The results artifact is `EXPERIMENT-15S-RESULTS.md`.
+
+## 9.1 Why the run closed early (17.80 h, not the §4.4 24 h minimum)
+
+The window ran from the floor `2026-10-20T18:43:50Z` to the rollback at `2026-10-21T12:31:38Z` —
+**17.80 h elapsed** — against §4.4's >=24 h minimum. Two of the three §4.4 minima were met: >=300
+`ttfb` rows (4228 in the slice) and >=20 stall attempts (309 in the slice). The >=24 h minimum was
+**not** met, and §4.4 says a slice below the minimum must not have its criteria evaluated.
+
+The run was closed anyway because the failing criteria were **already determined before the minimum
+was reached** — extending the window cannot change either verdict:
+
+* **T4 (retry firing, §5.1 trigger 4)** needs >=97% of 15 s stall rows to carry
+  `"; retrying on another key"`. Measured 285/309 = 92.2%. Closing the remaining gap needs the 24
+  non-retrying rows to be joined by 476 further all-perfect stall rows; at the observed rate of
+  16.7 stalls/h only about 109 stall rows arrive in the remaining time. Any realistic extension
+  widens the gap, because the non-retrying share is a property of the knob, not of sample size.
+* **T8 (terminal-504 share, §5.1 trigger 8)** needs the terminal-504 share of >=15 s attempts to stay
+  at or below the 43.9% baseline *with* a lower completion share. Measured 84.8% terminal-504 /
+  14.7% completion. Dragging terminal-504 down to <=43.9% needs 328 further >=15 s attempts with
+  zero 504s; only about 130 arrive.
+
+The verdict is therefore decided at 17.80 h. Recording the slice as closed-with-verdict is the only
+honest reading: an extension that cannot flip either failing bar would only delay the rollback that
+§5.1 already mandates, while leaving the failing knob live on the gateway. §9.5 records the >=24 h
+miss explicitly.
+
+## 9.2 §4.2 grammar correction: `request_id` is `{YYYYMMDDHHMMSS}.{pid}.{seq}`
+
+§4.2 states the grammar as `YYYYMMDDHHMMSS.<key-pool-idx>.<attempt-idx>` (3 dot-parts). That is
+wrong. The real format, from `turn_log.rs:405-410` (the lines moved when the failure-record fix below
+added its documentation; the format itself is unchanged):
+
+```rust
+let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+let request_id = Some(format!("{}.{}.{}",
+    Utc::now().format("%Y%m%d%H%M%S"), std::process::id(), seq));
+```
+
+So `request_id` = **`{YYYYMMDDHHMMSS}.{pid}.{seq}`**, where `seq` is a process-local counter that is
+**unique per record** — not per attempt, not per turn. There is no key-pool index and no attempt
+index anywhere in the id.
+
+**Consequence for §4.3's per-turn join.** §4.3 defines the per-turn join as "group by the first two
+dot-parts of `request_id`". Grouping by the first two dot-parts groups by `{second}.{pid}` — and
+because the pid is constant for the window, that is a **per-second time bucket**, not a turn.
+Measured on the slice:
+
+| grouping | distinct values over 4228 `ttfb` rows |
+|---|---:|
+| first dot-part (`YYYYMMDDHHMMSS`) | 3776 |
+| first two dot-parts (`{second}.{pid}`) | 3776 |
+| full `request_id` | 4228 |
+
+3776 first-parts and 3776 first-two-parts are identical because the pid never varies: both groupings
+collapse to the same 3776 per-second buckets, and neither one is a turn. Two attempts of the same
+client turn land in different buckets whenever they are more than one second apart, which is the
+normal case after a 15 s stall. The §4.3 per-turn join is therefore **not a join at all** — it is a
+time histogram, and every per-turn quantity §4.3 assigns to it (full-turn latency percentiles, the
+81-bound recovery rate, the salvage denominator) was measuring seconds, not turns.
+
+## 9.3 Schema gap: failure-path records carried `loop_key: None` by design
+
+`loop_key` (`{session_id, loop_seq, round_index}`) is the only real turn key in the log. On the
+slice:
+
+| record kind | rows | with `loop_key` | without |
+|---|---:|---:|---:|
+| `ttfb` | 4228 | 3911 | 317 |
+| `completion` | 3903 | 3903 | 0 |
+| `loop` | 1166 | 1166 | 0 |
+| **15 s stall rows** (subset of `ttfb`) | **309** | **0** | **309** |
+
+This was not a collection accident. Before the fix, the field's own documentation said so: error-path records intentionally kept
+`loop_key` `None`, because the round was already counted by `LoopTracker::begin` and the record
+cannot name its loop, and the reader-side contract repeated it. The fix has since replaced both
+with the opposite statement, so the pre-fix text is history rather than the current source. The stall rows — the entire population the two per-turn criteria are defined over — are
+failure-path rows, so **every stall row in the slice was unkeyed**, and the 317 unkeyed `ttfb` rows
+are exactly the failure paths.
+
+So the per-turn join had no key to join on. §4.3's intended key was never available.
+
+## 9.4 What is therefore unmeasurable from this run, and why that is not a threshold change
+
+Because the per-turn join is a time bucket (§9.2) and the stall population was unkeyed (§9.3):
+
+* **§3.1's 81-bound recovery bar is UNMEASURABLE from this run.** The 81-bound is a set of *turns*
+  (attempts that the 15 s window converts from success into stall, and the later attempts that
+  recover them). Neither the mis-grouped join nor the unkeyed stall rows can name a turn, so the
+  recovery numerator and denominator cannot be constructed from the log at all. This is stated as a
+  limitation of the run, not as a pass and not as a fail.
+* **§3.1's per-turn salvage rate is UNMEASURABLE**, same reason: its denominator is "turns containing
+  at least one stall attempt", which requires the turn key.
+* **The per-attempt join does work.** §4.3's per-attempt join (same full `request_id`, ttfb half <->
+  completion half) is unaffected by the grammar error, because the full id is unique per record and
+  both halves of one attempt carry the same one. Measured on the slice: 4228 distinct ttfb ids,
+  **3903 ids hold both halves**. That join is what the per-attempt metrics in the results artifact
+  are computed on.
+
+The fix for the schema gap is a **code change, not a threshold change**: failure-path records now
+carry their loop key, so a future window can compute the per-turn quantities from the log. It
+touches no §3 bar, no §4 minimum, no §3.2 invariant, and no §5.1 trigger. §6's rule — "a post-hoc
+change to any threshold invalidates the run and must be recorded as a new protocol revision, not an
+edit to this one" — is therefore **not violated**: this addendum is the new protocol revision, and it
+edits no bar. The unmeasurability is recorded as a property of the run's data, and the verdict rests
+entirely on the metrics that *were* measurable.
+
+## 9.5 §4.4 minima, as measured
+
+| Minimum | Bar | Measured | Met? |
+|---|---|---|---|
+| >=24 h post-restart | 24 h | **17.80 h** | **NO** — closed early, see §9.1 |
+| >=300 `ttfb` rows | 300 | 4228 | YES |
+| >=20 stall attempts | 20 | 309 | YES (the protocol's own floor for the >=97% bar to be decidable) |
+
+T4 was decidable: 309 stall rows is 15x the protocol's 20-row floor, so +/-1 row of granularity is
++/-0.32 pp and the 92.2% reading is 4.8 pp below the bar. The verdict does not hinge on the truncated
+window.
+
+## 9.6 The rollback taken
+
+§5.1 **trigger 4** (retry stops firing after a stall, <97%) and **trigger 8** (terminal-504 share
+rises above the 43.9% baseline with a lower completion share) both fired. Either alone fires the
+rollback; §5.2's 4-step rollback therefore applies in full:
+
+1. **Delete the key** — the line `first_byte_timeout_ms = 15000` was removed from the `[timeouts]`
+   section of the live config. It was **deleted, not pinned to 25000**: per §5.3 the key is an
+   *override*, and the pre-experiment baseline was measured with the key **absent** (the dynamic
+   `timeout_for_model()` value that happened to read 25000). Pinning it to 25000 would produce a
+   different system from the baseline one; deletion is the only rollback provably byte-identical to
+   the pre-experiment state.
+2. **Verify the file** — `grep -c first_byte_timeout_ms <config>` returns 0 and the `[timeouts]`
+   section parses as TOML; the file hash was recorded before and after so the change is auditable.
+3. **Restart** — the proxy was restarted so the config is re-read; the restart timestamp
+   `2026-10-21T12:31:38Z` is the new analysis floor.
+4. **Verify dynamic rows return** — the restart's own startup log reports `timeout_floor=25000ms`,
+   and the post-rollback slice's stall error strings read
+   `"upstream sent no bytes within <dynamic>ms"` again (the 25000 ms form A1 §4 read from the
+   baseline), with the fast budget back to `2x dynamic + 30000 + 500` (`retry.rs:77-97`).
+
+The pre-window era's stall strings show both `15000` and `25000` window values; the post-rollback
+slice shows only the dynamic value.
+
+## 9.7 No threshold was changed by this revision
+
+Rev 2.2 changes **no threshold, no minimum, no invariant, and no rollback trigger.** The §3.1 bars
+(ttfb p95 <=19000/>21000, 81-bound recovery >=50%/<25%, salvage >=9.5%, retry firing >=97%, TTFT
+ratio <=13.31x), the §3.2 invariants, and the §5.1 trigger table are exactly as pre-registered in
+rev 2.1 and are quoted, not edited, in §9.1/§9.5/§9.6. What this revision changes is the protocol's
+*stated grammar* (§4.2), the *validity of one join* (§4.3), and the *reported measurability* of two
+per-turn criteria (§9.4) — i.e. corrections to the measurement procedure, plus the rollback action
+§5.1 already mandated. The results artifact for this run is `EXPERIMENT-15S-RESULTS.md`.
