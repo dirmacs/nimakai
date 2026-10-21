@@ -32,12 +32,11 @@ jobs:
       # (every #[cfg(test)] mod tests under nimaproxy/src/) are NOT covered
       # by the loop below; they are gated by the separate `Unit tests` step.
       #
-      # Excluded on purpose:
+      # Excluded on purpose (they are gated by the separate `Live tests` job,
+      # which needs the NVIDIA_API_KEY repository secret to be provisioned):
       #   live_chat, live_circuit_breaker, live_conversation,
-      #   live_key_rotation, live_routing, live_streaming,
-      #   live_tool_calls  - need NVIDIA_API_KEY and the live gateway
-      #   e2e_live         - same, plus it runs against placeholder keys
-      #   stress_test      - panics unless a proxy answers NIMAPROXY_URL
+      #   live_routing, live_streaming, live_tool_calls, e2e_live
+      #   live_key_rotation, stress_test - need a running gateway at NIMAPROXY_URL
       - name: Test
         env:
           RUSTUP_TOOLCHAIN: '1.99.0'
@@ -67,6 +66,84 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: '1.99.0'
         run: cargo build --locked --manifest-path nimaproxy/Cargo.toml
+
+  # Live gateway tests. These targets talk to integrate.api.nvidia.com with real
+  # keys, so they can never run on a hosted runner without credentials. They are
+  # separated from the `rust` job so a live-upstream outage (429/502/503/504,
+  # or an NVIDIA model retirement) never gates an unrelated commit.
+  #
+  # The key is read from the `NVIDIA_API_KEY` repository secret — the exact
+  # variable name the crate's live tests already read (tests/live_*.rs,
+  # tests/e2e_live.rs). No new secret name was invented.
+  #
+  # The job is OPT-IN via the `LIVE_TESTS_ENABLED` repository variable, because
+  # a credential that is not provisioned cannot produce a meaningful result and
+  # a job that is permanently red on every unrelated PR is worse than no job.
+  # The opt-in is deliberately visible, not silent: with the variable unset the
+  # job is reported as SKIPPED, and the tests themselves are no longer
+  # `#[ignore]`d in the source, so a developer with keys can always run them
+  # locally. When the variable IS set, the secret is REQUIRED: the
+  # "Verify live credentials" step below hard-fails rather than falling back to
+  # a placeholder key, so an enabled-but-unprovisioned gate is red, never a
+  # vacuous green.
+  #
+  # To enable: set vars.LIVE_TESTS_ENABLED=true AND secrets.NVIDIA_API_KEY.
+  live-tests:
+    runs-on: [self-hosted, linux, arm64, dirmacs-ci]
+    if: ${{ vars.LIVE_TESTS_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check toolchain
+        run: |
+          command -v cargo >/dev/null || { echo "FATAL: cargo not on PATH on this runner"; exit 127; }
+          cargo --version
+
+      # Hard stop on a missing secret: never fall back to a placeholder key,
+      # which would turn every live test into an auth failure that reads like a
+      # regression.
+      - name: Verify live credentials
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          if [ -z "${NVIDIA_API_KEY}" ]; then
+            echo "FATAL: NVIDIA_API_KEY repository secret is not provisioned."
+            echo "The live_* / e2e_live targets require real NVIDIA NIM keys."
+            echo "Set it in the repository's Actions secrets; until then this job fails loudly."
+            exit 1
+          fi
+          echo "NVIDIA_API_KEY present: yes (value not printed)"
+
+      # `--test-threads=1`: the live suite is sequential by design — a burst of
+      # parallel live requests trips upstream rate limits, and the tests then
+      # report 429 noise instead of the behavior they assert.
+      - name: Live integration tests
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.0'
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          set -e
+          for t in live_tool_calls live_chat live_streaming live_routing live_conversation live_circuit_breaker e2e_live; do
+            echo "=== live target: $t ==="
+            cargo test --locked --manifest-path nimaproxy/Cargo.toml --test "$t" -- --test-threads=1
+          done
+
+      # live_key_rotation and stress_test target a running gateway rather than
+      # the in-process proxy, so they need NIMAPROXY_URL. Left out of the loop
+      # above on purpose: pointing them at a gateway that is not up produces a
+      # connection-refused failure that says nothing about the commit.
+      - name: Live gateway tests
+        if: ${{ vars.NIMAPROXY_URL != '' }}
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.0'
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NIMAPROXY_URL: ${{ vars.NIMAPROXY_URL }}
+        run: |
+          set -e
+          for t in live_key_rotation stress_test; do
+            echo "=== live gateway target: $t ==="
+            cargo test --locked --manifest-path nimaproxy/Cargo.toml --test "$t" -- --test-threads=1
+          done
 
   test:
     runs-on: ubuntu-latest

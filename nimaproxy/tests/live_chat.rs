@@ -186,7 +186,7 @@ async fn test_live_chat_streaming() {
     // (NVIDIA may return JSON even with stream:true for small responses)
     eprintln!(
         "[live] streaming response preview: {}",
-        &content[..content.len().min(200)]
+        content.chars().take(200).collect::<String>()
     );
 }
 
@@ -267,7 +267,7 @@ async fn test_live_chat_tool_calling() {
 
     eprintln!(
         "[live] tool calling response: {}",
-        &json.to_string()[..json.to_string().len().min(500)]
+        json.to_string().chars().take(500).collect::<String>()
     );
 
     // Response should have choices
@@ -379,7 +379,7 @@ async fn test_live_chat_multi_turn() {
 
     eprintln!(
         "[live] multi-turn response 2: {}",
-        &body2_json.to_string()[..body2_json.to_string().len().min(300)]
+        body2_json.to_string().chars().take(300).collect::<String>()
     );
 }
 
@@ -430,7 +430,11 @@ async fn test_live_chat_various_models() {
         let content = String::from_utf8_lossy(&body_bytes);
 
         let result_info = if status_code == 200 {
-            Some(content[..content.len().min(100)].to_string())
+            // Char-boundary safe: a byte slice at a fixed index panics when it
+            // lands inside a multi-byte character, and the model's output is
+            // not ASCII (a curly quote alone is enough). `chars().take()`
+            // counts characters, which is what a 100-char preview means.
+            Some(content.chars().take(100).collect::<String>())
         } else {
             Some(format!("ERROR: {}", content))
         };
