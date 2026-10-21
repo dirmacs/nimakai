@@ -1038,3 +1038,147 @@ async fn content_only_stream_records_zero_reasoning_not_none() {
         "the tap ran, so reasoning_chars is Some(0), not None"
     );
 }
+
+/// Concurrent requests must each keep THEIR OWN request id, and each turn's
+/// two halves must be joined by that one id.
+///
+/// This is the regression test for the id race: the id used to be published
+/// into a process-global slot by the write and read back out of it by the
+/// caller, so with two requests in flight each could read the other's id. The
+/// observable damage was (a) a turn's completion record written under another
+/// turn's id — one id with two completions and one first-byte with none — and
+/// (b) a client receiving a foreign id in `x-request-id`.
+///
+/// The test drives the real handler through the real request path, with the
+/// turns genuinely overlapping, and then checks the log file: every turn's
+/// first-byte record and completion record share exactly one id, and no id
+/// carries a completion that belongs to a different turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_turns_keep_their_own_request_ids() {
+    const TURNS: usize = 8;
+
+    let (_server, url) = mock_upstream(&format!(
+        "{}{}data: [DONE]\n\n",
+        frame("one", ""),
+        frame(" two", "stop")
+    ))
+    .await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    // Genuinely concurrent: every turn is started before any is awaited, so
+    // their first-byte writes interleave. A shared-slot read-back loses this
+    // race; an id returned by the write cannot.
+    //
+    // The barrier holds every turn at its first-byte write until all of them
+    // are there, so the window between one request's write and its read of
+    // the id is as wide as it can be made: this is the interleaving that
+    // produced the defect in production, reproduced deterministically.
+    let gate = Arc::new(tokio::sync::Barrier::new(TURNS));
+    let mut handles = Vec::with_capacity(TURNS);
+    for _ in 0..TURNS {
+        let state = state.clone();
+        let log = LogFile::new();
+        let gate = gate.clone();
+        handles.push(tokio::spawn(async move {
+            gate.wait().await;
+            log.turn(state, turn_body()).await
+        }));
+    }
+    let mut ids = Vec::with_capacity(TURNS);
+    for handle in handles {
+        let (_, request_id) = handle.await.expect("a turn task must not panic");
+        ids.push(request_id);
+    }
+
+    // The ids the clients received are distinct: a foreign id in a response
+    // header is one half of the defect.
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        TURNS,
+        "each concurrent turn must get its own id in x-request-id, got {ids:?}"
+    );
+
+    // Every id must have exactly one first-byte record and exactly one
+    // completion record: a stolen id shows up as two completions for one id
+    // and none for the turn that was stolen from.
+    //
+    // The completions are written by a detached task, so they are awaited
+    // before the file is counted; the first-byte records were written by the
+    // request path itself and are already on disk.
+    let mut completions_by_id = std::collections::HashMap::new();
+    for id in &ids {
+        let completion = log.completion_for(id).await;
+        completions_by_id.insert(id.clone(), completion);
+    }
+
+    let records = log.records();
+    for id in &ids {
+        let first_byte = records
+            .iter()
+            .filter(|r| {
+                r.request_id.as_deref() == Some(id.as_str())
+                    && r.record_kind == TurnLog::RECORD_KIND_TTFB
+            })
+            .count();
+        assert_eq!(
+            first_byte, 1,
+            "id {id} must have exactly one first-byte record, found {first_byte}"
+        );
+        let completions = records
+            .iter()
+            .filter(|r| {
+                r.request_id.as_deref() == Some(id.as_str())
+                    && r.record_kind == TurnLog::RECORD_KIND_COMPLETION
+            })
+            .count();
+        assert_eq!(
+            completions, 1,
+            "id {id} must have exactly one completion record, found {completions}"
+        );
+    }
+
+    // Every first-byte record this test produced has a completion: the
+    // signature measured in production was a first-byte record with no
+    // completion half, i.e. a turn whose completion was written under another
+    // turn's id.
+    let this_turn_ids: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let orphans: Vec<&str> = records
+        .iter()
+        .filter(|r| {
+            r.record_kind == TurnLog::RECORD_KIND_TTFB
+                && r.request_id
+                    .as_deref()
+                    .is_some_and(|id| this_turn_ids.contains(id))
+        })
+        .filter(|r| {
+            !records.iter().any(|c| {
+                c.record_kind == TurnLog::RECORD_KIND_COMPLETION && c.request_id == r.request_id
+            })
+        })
+        .filter_map(|r| r.request_id.as_deref())
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "every first-byte record must have its own completion half, orphans: {orphans:?}"
+    );
+
+    // And each completion is the one its own turn produced: the join is
+    // verified through the per-turn body, so a completion filed under a
+    // borrowed id is caught by the id assertion above rather than by luck.
+    for id in &ids {
+        let completion = completions_by_id
+            .get(id)
+            .expect("each turn's completion was awaited above");
+        assert_eq!(
+            completion.request_id.as_deref(),
+            Some(id.as_str()),
+            "the completion record must join to this turn's own first-byte record"
+        );
+        assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(completion.stream_ended_cleanly, Some(true));
+    }
+}
