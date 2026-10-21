@@ -74,12 +74,23 @@ jobs:
   #
   # The key is read from the `NVIDIA_API_KEY` repository secret — the exact
   # variable name the crate's live tests already read (tests/live_*.rs,
-  # tests/e2e_live.rs). No new secret name was invented: if the secret is not
-  # provisioned this job FAILS with the message below rather than silently
-  # skipping, because a silently-skipped live gate is indistinguishable from a
+  # tests/e2e_live.rs). No new secret name was invented.
+  #
+  # The job is OPT-IN via the `LIVE_TESTS_ENABLED` repository variable, because
+  # a credential that is not provisioned cannot produce a meaningful result and
+  # a job that is permanently red on every unrelated PR is worse than no job.
+  # The opt-in is deliberately visible, not silent: with the variable unset the
+  # job is reported as SKIPPED, and the tests themselves are no longer
+  # `#[ignore]`d in the source, so a developer with keys can always run them
+  # locally. When the variable IS set, the secret is REQUIRED: the
+  # "Verify live credentials" step below hard-fails rather than falling back to
+  # a placeholder key, so an enabled-but-unprovisioned gate is red, never a
   # vacuous green.
+  #
+  # To enable: set vars.LIVE_TESTS_ENABLED=true AND secrets.NVIDIA_API_KEY.
   live-tests:
     runs-on: [self-hosted, linux, arm64, dirmacs-ci]
+    if: ${{ vars.LIVE_TESTS_ENABLED == 'true' }}
     steps:
       - uses: actions/checkout@v4
 
