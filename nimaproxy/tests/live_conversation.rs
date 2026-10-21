@@ -126,7 +126,13 @@ async fn test_live_multi_turn_10_turns() {
             "[conversation] Turn {} - Status: {}, Response: {:?}",
             turn + 1,
             status_code,
-            assistant_response.as_ref().map(|s| &s[..s.len().min(100)])
+            assistant_response.as_ref().map(|s| {
+                // Char-boundary safe: a byte slice at a fixed index panics when
+                // it lands inside a multi-byte character, and the model's output
+                // is not ASCII (a curly quote alone is enough). `chars().take()`
+                // counts characters, which is what a 100-char preview means.
+                s.chars().take(100).collect::<String>()
+            })
         );
 
         turn_results.push((turn + 1, status_code, assistant_response.clone()));
@@ -246,7 +252,7 @@ async fn test_live_tool_calling_variations() {
         eprintln!(
             "[tool-calling] Variation 1 - Status: {}, Response: {:?}",
             status,
-            response_text.as_ref().map(|s| &s[..s.len().min(100)])
+            response_text.as_ref().map(|s| s.chars().take(100).collect::<String>())
         );
 
         tool_results.push(("single_tool", status, response_text));
@@ -319,7 +325,7 @@ async fn test_live_tool_calling_variations() {
         eprintln!(
             "[tool-calling] Variation 2 - Status: {}, Response: {:?}",
             status,
-            response_text.as_ref().map(|s| &s[..s.len().min(100)])
+            response_text.as_ref().map(|s| s.chars().take(100).collect::<String>())
         );
 
         tool_results.push(("multiple_tools", status, response_text));
@@ -387,7 +393,7 @@ async fn test_live_tool_calling_variations() {
         eprintln!(
             "[tool-calling] Variation 3 - Status: {}, Response: {:?}",
             status,
-            response_text.as_ref().map(|s| &s[..s.len().min(100)])
+            response_text.as_ref().map(|s| s.chars().take(100).collect::<String>())
         );
 
         tool_results.push(("complex_params", status, response_text));
