@@ -731,3 +731,196 @@ One artifact after the window closes, as §6 requires: the per-hour table, the n
 with their verdicts, the minima as measured, and the commands that recompute every published number
 against a named frozen snapshot with its line count and sha256. If a criterion is unmeasurable, the
 artifact says so and says why — it does not substitute a proxy number and present it as the metric.
+
+---
+
+# 11. Rev 3.1 — the window that the deploy started (2026-10-21)
+
+**Status: PRE-REGISTERED, while the window is still open.** Rev 3.1 changes **no threshold value**:
+the 19000/21000 ms ttfb p95 band, the 43.9% terminal-504 baseline, the 53.5% completion baseline,
+the 2.5% `truncated_stream` baseline, the 25% per-turn recovery floor and the 9.5% per-turn salvage
+floor all stand exactly as rev 3.0 and rev 2.2 set them. **No result observed in the running window
+has been examined**, and this revision is published before the window closes, so it is not a post-hoc
+edit of a threshold. What it corrects is a *denominator statement*, the *binary under test*, and the
+*reporting procedure* — and it restates the affected content in full, so this section can be read
+alone.
+
+## 11.1 The floor, the close, and the binary under test
+
+| | |
+|---|---|
+| floor | `2026-10-21T14:50:43Z` — the restart that deployed the fixed binary |
+| close | `2026-10-22T14:50:43Z` (>=24 h), or later if the minima are not met |
+| binary | `dirmacs/nimaproxy:stage4-20261021`, revision `2e6b6e0` (label `org.opencontainers.image.revision`) |
+| first-byte window | **dynamic** — the 15 s override is deleted, so the window is the per-model dynamic value (25 s) |
+| enabled model | `stepfun-ai/step-5-preview`, configured cap 32768, `top_k = 0`, circuit breaker 36000 |
+| log at the floor | 50,603,788 bytes, turn-log line 64,839 |
+
+**Rev 3.0's window was voided by that deploy.** It ran from `2026-10-21T12:31:38Z` and was closed
+at `2026-10-21T14:50:43Z`, so 2 h 19 m of it is discarded. The owner elected the deploy (the
+rolled-back configuration and the step-5 tuning were live, and the fixes in PRs #42, #43 and #45
+were not); the floor therefore moves to the deploy and the window runs its full 24 h from there.
+**The 24 h minimum is not missed** — the floor moved with the deploy, and only the 2 h 19 m is lost.
+
+## 11.2 The criteria, restated in full
+
+| # | metric | denominator (exact) | bar | source |
+|---|---|---|---|---|
+| 1 | ttfb p95 | `ttfb` rows in the window | <=19000 ms success, >21000 ms fail | A1 §1, carried from §3.1 |
+| 2 | ttfb p50 | `ttfb` rows in the window | reported, no bar | — |
+| 3 | terminal-504 share | **all >=15 s `ttfb` attempts** | <=43.9% **and** completion share >=53.5% | A1 §3, carried from §5.1 trigger 8 |
+| 4 | `truncated_stream` share | **>=15 s `ttfb` attempts joined to their completion half** | <=2.5% | A1 §3 (4/157) |
+| 5 | per-turn recovery rate | turns (by `loop_key`) containing >=1 stall attempt | **>=25%** | carried from §5.1 trigger 2 |
+| 6 | per-turn salvage rate | turns (by `loop_key`) containing >=1 stall attempt that reach a clean completion on a later attempt | **>=9.5%** | carried from §3.1 |
+| 7 | request-side vs response-side tool-call count | `completion` rows | the two must not be conflated | §9.7's trap, restated |
+| 8 | the step-5 cap is effective | `ttfb` rows for the enabled model | **no row EXCEEDS 32768, and the MAXIMUM effective `request_max_tokens` over the window equals 32768** | the tuning this window exists to check |
+| 9 | the breaker is not tripped inside the cap | completions | no breaker trip on a response within 32768 tokens | breaker and cap move together |
+
+**Bars 3 and 4 have different populations, and the numbers prove it.** Bar 3's denominator is every
+>=15 s attempt: in the closed 15 s window, 317 terminal-504 + 55 clean completions + 2 truncations
+= 374 = 317 + 57. So bar 3's 84.8% / 14.7% were measured over all 374 attempts, while bar 4's
+2/57 = 3.5% is over the 57 of them that have a completion half. Rev 3.0 gave both the same
+denominator string, which invited reading 84.8% against 3.5% as if they shared a base.
+
+**Bar 8 is a ceiling, not an equality, and it has to be.** The binary under test is the first to
+compute `min(caller's budget, 32768)`, so an individual row can legitimately read **below** 32768:
+that is the caller's own budget, not a missing cap. A per-row equality check would fire the first
+time any client in the fleet named a smaller budget, and send a healthy window into a false "the
+tuning is not live". The deploy itself already produced such rows — `request_max_tokens` of 32768
+on 38 rows, **16 on 3 rows and 512 on 1** — so the fleet does name its own budgets, and a smaller
+row is data, not a fault. The check is that the window's maximum effective value is 32768 and no row
+exceeds it.
+
+## 11.3 The rollback triggers, restated in full
+
+Any single one fires, and the response is to fix the configuration, not to extend the window:
+
+1. terminal-504 share above 43.9% with a lower completion share (A1 §3);
+2. per-turn recovery below 25% (§11.2 bar 5);
+3. `truncated_stream` share above 2.5% on the §11.2 bar-4 denominator;
+4. the circuit breaker tripping on a response within the model's 32 768-token cap;
+5. **the maximum effective `request_max_tokens` for the enabled model either exceeding 32768 or
+   falling below it** — a value above the cap is the ceiling not holding, and a maximum below it
+   means no request in the window reached the configured ceiling, which is the tuning not being
+   exercised.
+
+## 11.4 Reporting, restated in full
+
+One artifact after the window closes: the per-hour table, the nine criteria in §11.2 with their
+verdicts, the minima as measured, and the commands that recompute every published number against a
+named frozen snapshot with its line count and sha256. A criterion that is unmeasurable is reported
+as unmeasurable, with the reason — never as a proxy number presented as the metric.
+
+**The log rotates inside this window, and the snapshot procedure must account for it.** The logger
+rotates at 64 MiB and renames the live file to `turns.jsonl.<YYYYMMDD_HHMMSS>`. The log was
+50,603,788 bytes at the floor, so the rotation is expected inside the window — **re-measure the byte
+count at the close rather than trusting an estimate**, because the rotation time depends on the
+write rate, and because the counter is seeded from the file's existing size on open, so a restart
+does not postpone it by a whole threshold.
+
+`nimaproxy-query` opens exactly ONE file (`File::open(path)`, `log_query.rs:342` — no directory
+walk, no glob), so it **cannot read the window across a rotation**. The snapshot must be a
+concatenation.
+
+**The order is the trap, and a count check alone does not catch it.** The live file's name is a
+lexicographic prefix of the rotated names, so a naive `cat turns.jsonl*` puts the live file FIRST
+and the rotated ones after — newest-first, and the window concatenates BACKWARDS in time.
+
+Measured on a simulation built the way a real rotation leaves the files — **disjoint**, the renamed
+file holding the older records and the fresh live file holding only the newer ones: two 20,000-line
+rotated files and a 24,913-line live file.
+
+| order | lines | first record | last record |
+|---|---:|---|---|
+| naive `cat turns.jsonl*` | **64,913** | 2026-10-19T04:37:51.974Z | **2026-10-19T04:37:51.820Z** (backwards) |
+| rotated first by timestamp, live last | **64,913** | 2026-06-14T06:07:55Z | 2026-10-21T14:54:16Z (correct) |
+
+**The wrong order has exactly the right line count**, so the count cannot see it. But its boundary
+timestamps are visibly reversed — the first record is *newer* than the last — and that is catchable.
+So the two checks catch different failures and both are required:
+
+- **the concatenated line count equals the sum of the files' counts** — this catches a file that was
+  OMITTED. A glob that matches nothing (a rotated name whose date is eight digits, not seven)
+  drops the file silently and the count comes up short with no error anywhere;
+- **the first record's timestamp is OLDER than the last's**, and the last is the live file's — this
+  catches a REORDERING, which the count cannot see.
+
+So the snapshot is taken by **copying** the files (not by reading them, which can race the
+rotation), and the copies are concatenated in this order:
+
+```bash
+LOGDIR=/var/log/nimaproxy
+SNAP=$LOGDIR/snapshot-$(date -u +%Y%m%dT%H%M%SZ).jsonl
+
+# 1. Freeze by COPYING, not by reading: a read can race the rotation.
+#    The rotated names are turns.jsonl.<YYYYMMDD_HHMMSS> (plus a .<n> suffix
+#    when two rotations land in the same second). They sort chronologically
+#    among themselves under LC_ALL=C. The LIVE file is named LAST ON PURPOSE:
+#    it is a lexicographic prefix of the rotated names, so a glob would put
+#    it first and the window would concatenate backwards in time.
+mkdir -p "$SNAP.d"
+for f in $(ls -1 "$LOGDIR"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort); do
+  cp -- "$f" "$SNAP.d/"
+done
+cp -- "$LOGDIR"/turns.jsonl "$SNAP.d/turns.jsonl.LIVE-last"
+
+# 2. Re-check that nothing moved while the copies were taken. The BEFORE
+#    state has to be captured BEFORE the copies, or there is nothing to
+#    compare against: if a NEW rotated file appeared, or the live file's
+#    size changed, re-copy.
+BEFORE_ROTATED=$(ls -1 "$LOGDIR"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort)
+BEFORE_SIZE=$(stat -c '%s' "$LOGDIR"/turns.jsonl)
+# ... take the copies here ...
+AFTER_ROTATED=$(ls -1 "$LOGDIR"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort)
+AFTER_SIZE=$(stat -c '%s' "$LOGDIR"/turns.jsonl)
+[ "$BEFORE_ROTATED" = "$AFTER_ROTATED" ] || { echo "FAIL: a rotation landed during the copy"; exit 1; }
+[ "$BEFORE_SIZE" = "$AFTER_SIZE" ] || { echo "FAIL: the live file grew during the copy"; exit 1; }
+
+# 3. Concatenate, rotated first and the live file LAST, and record a manifest:
+#    every file, its line count, and the combined sha256.
+{ ls -1 "$SNAP.d"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort
+  echo "$SNAP.d/turns.jsonl.LIVE-last"; } | xargs cat > "$SNAP"
+wc -l "$SNAP.d"/turns.jsonl.20* "$SNAP.d"/turns.jsonl.LIVE-last "$SNAP"
+sha256sum "$SNAP"
+
+# 4. BOTH checks, because they catch different failures:
+#    (a) the concatenated count equals the sum of the files' counts
+#        -> catches an OMITTED file (a glob that matches nothing drops one
+#           silently, and the count comes up short with no error);
+#    (b) the first record is OLDER than the last, and the last is the live
+#        file's -> catches a REORDERING, which (a) cannot see, because a
+#           reordered concatenation has exactly the right count.
+#    A mismatch on either means THE SNAPSHOT IS INCOMPLETE AND MUST NOT BE
+#    SCORED -- a window scored on a partial slice looks like a clean window
+#    with a smaller denominator.
+SUM=$(cat "$SNAP.d"/turns.jsonl.20* "$SNAP.d"/turns.jsonl.LIVE-last 2>/dev/null | wc -l)
+GOT=$(wc -l < "$SNAP")
+[ "$SUM" = "$GOT" ] || { echo "FAIL: a file was omitted ($GOT != $SUM); the snapshot is incomplete, do not score it"; exit 1; }
+FIRST=$(head -1 "$SNAP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["timestamp"])')
+LAST=$(tail -1 "$SNAP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["timestamp"])')
+echo "first: $FIRST"
+echo "last:  $LAST"
+python3 -c "import sys; sys.exit(0 if '$FIRST' < '$LAST' else 1)" \
+  || { echo "FAIL: the snapshot runs backwards in time; do not score it"; exit 1; }
+
+# 5. The cut is taken on the SNAPSHOT's own timestamps, never on the live file.
+nimaproxy-query "$SNAP" "record_kind=ttfb count"
+nimaproxy-query "$SNAP" "error~no bytes within count"
+```
+
+**The query path over a concatenation is pre-flighted, not assumed.** Run against the disjoint
+triple above: the correctly-ordered concatenation held 64,913 lines, its first record was dated
+2026-06-14T06:07:55Z and its last 2026-10-21T14:54:16Z, and `nimaproxy-query` read it —
+`"count"` returned 64,913 and `"record_kind=ttfb count"` returned 49,351 — so a concatenated
+snapshot is readable by the tool the operator will actually use.
+
+**The floor and close are taken on the snapshot's own timestamps**, never on the live file, and the
+log's byte count is recorded at the floor and re-measured at the close.
+
+## 11.5 One number this window produces that no window has produced before
+
+With the binary under test, a row's effective `request_max_tokens` can be **below** 32768, because
+that is now a client budget rather than a config value. So at the close the artifact must report
+**the distribution of `request_max_tokens` below 32768** for the enabled model: how many rows, and
+which budgets. That count is the fleet's real exposure to the new semantics, and it is the number
+nobody has yet.
