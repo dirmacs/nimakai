@@ -22,14 +22,20 @@
 //!
 //! # Why rounds are counted at `begin`
 //!
-//! The proxy writes its error records (504 timeouts, auth failures) from sites
-//! that carry no session, so a failed round cannot report itself here. If
-//! `rounds` were incremented by [`LoopTracker::record_round`], every failed
-//! round would vanish from the depth metric — and with 8.4% of live traffic
-//! returning 504, that is the exact number this feature exists to measure.
-//! So a round is counted when its request BEGINS, and `record_round` only
-//! enriches it. The gap between `rounds` and `completed_rounds` is then, by
-//! construction, "rounds that started and never reported".
+//! A round can fail before it reports an outcome, and a failure is exactly
+//! what the depth metric exists to measure: with 8.4% of live traffic
+//! returning 504, a metric that counted only the rounds that reported would
+//! be blind to the number it was built for. If `rounds` were incremented by
+//! [`LoopTracker::record_round`], every failed round would vanish from the
+//! depth metric. So a round is counted when its request BEGINS, and
+//! `record_round` only enriches it. The gap between `rounds` and
+//! `completed_rounds` is then, by construction, "rounds that started and
+//! never reported".
+//!
+//! The turn log's error records now name their loop, but naming a loop is
+//! not reporting an outcome: `record_round` is still called only from the
+//! completion path. The two are separate, and a keyed failure record changes
+//! neither counter.
 //!
 //! # Why `ended_at` is `last_seen`
 //!

@@ -68,10 +68,11 @@ pub struct TurnLog {
     #[serde(default = "default_record_kind")]
     pub record_kind: String,
 
-    /// Set on request records that belong to a tracked loop. Absent on records
-    /// written before loop tracking existed, and on the proxy's failure-path
-    /// records, which carry no session: those rounds are still counted by the
-    /// tracker, they just cannot name their loop.
+    /// Set on request records that belong to a tracked loop, including the
+    /// proxy's failure-path records: a failed attempt names the turn it
+    /// belongs to, so a session filter returns that conversation's failures
+    /// alongside its successes. Absent only on records written before loop
+    /// tracking existed and on requests that never resolved a session.
     #[serde(default)]
     pub loop_key: Option<LoopKey>,
 
@@ -835,14 +836,49 @@ mod tests {
 
     #[test]
     fn a_record_without_a_loop_key_cannot_satisfy_a_loop_filter() {
-        // The proxy's failure-path records carry no session. They must fail a
-        // session filter rather than pass it by default, or a query for one
-        // conversation would silently include every untracked request.
+        // A record with no key must fail a session filter rather than pass it
+        // by default, or a query for one conversation would silently include
+        // every untracked request. This is about keyless records, not about
+        // which records are keyless: the proxy's failure-path records now
+        // carry their key, and pass legitimately.
         let rec = log(None, "completion");
         assert!(rec.loop_key.is_none());
         assert!(!Query::parse("session=fp:aa").matches(&rec));
         assert!(!Query::parse("loop=1").matches(&rec));
         assert!(!Query::parse("round>=1").matches(&rec));
+    }
+
+    /// A failure attempt belongs to a turn, and the turn's key is what makes
+    /// the attempt joinable to the attempt that recovered from it. The turn
+    /// log's only other handle is `request_id`, which is unique per record,
+    /// so a keyed failure record is the difference between a recoverable
+    /// attempt and an unattributable one.
+    #[test]
+    fn a_failure_record_with_a_loop_key_joins_its_turn() {
+        let key = LoopKey {
+            session_id: "fp:aa".to_string(),
+            loop_seq: 2,
+            round_index: 3,
+        };
+        let mut stalled = log(None, "ttfb");
+        stalled.loop_key = Some(key.clone());
+        stalled.error = Some("upstream sent no bytes within 15000ms".to_string());
+        stalled.success = false;
+        stalled.status_code = 504;
+
+        let mut recovered = log(Some("clean_stop"), "completion");
+        recovered.loop_key = Some(key.clone());
+
+        // Same turn: one key, so the two records are joinable.
+        assert_eq!(stalled.loop_key, recovered.loop_key);
+        // A session filter returns that conversation's failure as well as its
+        // success, which is the point of naming the loop.
+        assert!(Query::parse("session=fp:aa").matches(&stalled));
+        assert!(Query::parse("session=fp:aa").matches(&recovered));
+        assert!(Query::parse("loop=2").matches(&stalled));
+        assert!(Query::parse("round>=3").matches(&stalled));
+        // And it still does not leak into another conversation.
+        assert!(!Query::parse("session=fp:bb").matches(&stalled));
     }
 
     #[test]
