@@ -255,6 +255,14 @@ slice.
 > `first_byte_timeout_ms = 15000` (line 134). This change is TTFB-neutral by
 > construction (timeout knob untouched), but the restart itself would reset
 > the 24h clock — hence the hold.
+>
+> 2026-10-21 07:36Z update: live file DISARMED. The staged values were armed,
+> not parked (bind-mounted: any restart would have activated them), so the
+> live file was reverted to floor state (16384/32000, knob 15000 kept) and
+> verified by grep + TOML parse. Armed snapshot preserved at
+> `nimaproxy.toml.armed-step5tuning-20261021`. Tuning now lives only in PR
+> #31 (`tuning/step5-modelcard-20261021`, commit 3c73e22) — merge any time,
+> restart after window close.
 
 ### 4.5 Confound control
 
