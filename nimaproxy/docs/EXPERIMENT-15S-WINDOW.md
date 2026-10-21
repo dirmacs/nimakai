@@ -612,3 +612,122 @@ rev 2.1 and are quoted, not edited, in §9.1/§9.5/§9.6. What this revision cha
 *stated grammar* (§4.2), the *validity of one join* (§4.3), and the *reported measurability* of two
 per-turn criteria (§9.4) — i.e. corrections to the measurement procedure, plus the rollback action
 §5.1 already mandated. The results artifact for this run is `EXPERIMENT-15S-RESULTS.md`.
+
+---
+
+# 10. Rev 3.0 — pre-registration for the rolled-back window (2026-10-21)
+
+**Status: PRE-REGISTERED, before the window closes.** Issued per §6, after the 15 s run closed and
+the rollback was taken, and before the new window's floor. Nothing in §1-§9 is edited by this
+revision: the 15 s experiment's thresholds, minima, invariants and triggers stand as they were
+pre-registered, and the results artifact for that run is `EXPERIMENT-15S-RESULTS.md`.
+
+This section exists because a window with no criteria closes undecidably. §9.4 records that the 15 s
+run's two decisive per-turn metrics were **unmeasurable** — and §9.7 records that the reason is
+fixable: the failure-path records now carry their turn key. A window that can answer those
+questions, and has no pre-registered bars for them, would produce numbers nobody could act on. So
+they are registered here, before the window closes, not derived from it afterwards.
+
+## 10.1 The floor, and the close
+
+| | |
+|---|---|
+| floor | `2026-10-21T12:31:38Z` — the restart that applied the rollback |
+| close | `2026-10-22T12:31:38Z`, or later if the minima in §10.5 are not met |
+| first-byte window | **dynamic** — the override is deleted, so the window is the per-model dynamic value (25 s at the floor) |
+| enabled model | `stepfun-ai/step-5-preview`, `max_tokens = 32768`, `top_k = 0`, circuit breaker `max_output_tokens = 36000` |
+| analysis floor in the log | turn-log line 62206 |
+
+## 10.2 What this window is FOR
+
+It measures the **rolled-back configuration** — the state the proxy was in before the 15 s
+experiment, plus three changes that are not the experiment:
+
+1. the **step-5 tuning** (a 32 768-token cap, `top_k = 0`, and the breaker moved to 36 000 in
+   lockstep with it);
+2. the **turn-log schema fix** — the response-side tool-call count, and the failure records now
+   carrying their turn key;
+3. the **corrected launch spec**, which is what makes the window's data about the real proxy rather
+   than about a placeholder-keyed one.
+
+It is **not** a first-byte-window experiment. The 15 s-specific bars of §3.1 do not apply to it: the
+>=97% retry-firing bar was defined over 15 s stall rows, the 81-bound recovery bar is defined over
+the attempts a 15 s window converts from success into stall, and there is no such conversion set
+here. The cutoff itself remains **underived**; the dynamic window is a fallback, not an answer.
+
+## 10.3 The joins available, and what may not be compared
+
+| quantity | join | available? |
+|---|---|---|
+| per-attempt | same full `request_id` (ttfb half <-> completion half) | YES |
+| per-turn | `loop_key` = `{session_id, loop_seq, round_index}` | **YES** — this is what the schema fix bought |
+
+**The 15 s run's per-turn numbers and this window's per-turn numbers must not be compared.** The
+15 s run's were not computed at all (§9.4): the failure records carried no turn key, and the
+protocol's join was a per-second time bucket. This window's are the first per-turn measurements of
+the proxy's behaviour that exist. They establish a baseline; they do not improve on one.
+
+**A caveat on the per-ATTEMPT join, measured.** The turn log publishes each record's id through a
+process-global slot, and the request path reads that slot back to learn "its own" id. Two
+concurrent requests can therefore take each other's id, and an attempt's completion record can be
+written under a different attempt's id. Measured on the live log: the closed 15 s window had 4228
+`ttfb` ids against 3903 completion ids, of which 3903 held both halves, and **8 successful
+attempts had no completion half at all** — the signature of a lost id. The current window shows the
+same 8 over a much smaller sample.
+
+So the per-attempt join is usable but not exact, at a rate of the order of 0.2% of attempts in the
+closed window. Every row-level criterion in §10.4 is computed on row counts and is unaffected; the
+two criteria that use the join (bars 3 and 4) carry a join uncertainty of about that size, which
+is far below the distance to their bars. The defect is tracked separately; if it is fixed before
+this window closes, the caveat becomes moot and this note should say so.
+
+## 10.4 The criteria
+
+Each bar cites its source. Where a bar is carried over from the 15 s protocol, that is stated,
+because the metric's population is the same kind of quantity even though the window is not.
+
+| # | metric | denominator (exact) | bar | source |
+|---|---|---|---|---|
+| 1 | ttfb p95 | `ttfb` rows in the window | <=19000 ms success, >21000 ms fail | A1 §1, carried from §3.1 |
+| 2 | ttfb p50 | `ttfb` rows in the window | reported, no bar | — |
+| 3 | terminal-504 share | >=15 s `ttfb` attempts joined to their completion half | <=43.9% **and** completion share >=53.5% | A1 §3, carried from §5.1 trigger 8 |
+| 4 | `truncated_stream` share | >=15 s `ttfb` attempts joined to their completion half | <=2.5% | A1 §3 (4/157) — **this denominator, not a `ttfb` count**: `failure_mode` is only set on completion records, so counting it over `ttfb` rows is 0 by construction |
+| 5 | **per-turn recovery rate** | turns (by `loop_key`) containing >=1 stall attempt | **>=25%** | carried from §5.1 trigger 2's failure bar: no window-specific baseline exists, and this is the same kind of quantity — a stalled attempt's turn recovering. Below 25% the rolled-back configuration is itself suspect |
+| 6 | **per-turn salvage rate** | turns (by `loop_key`) containing >=1 stall attempt, that reach a clean completion (`clean_stop` / `tool_calls`) on a later attempt | **>=9.5%** | carried from §3.1's salvage bar, for the same reason. This is the FIRST measurement of it, not a comparison |
+| 7 | request-side tool-call count vs response-side | `completion` rows | the two must not be conflated; the response-side distinct count is the response's | §9.7's trap, restated as a check |
+| 8 | the step-5 cap is effective | `ttfb` rows for the enabled model | `request_max_tokens` == 32768 on every request | the tuning this window exists to check |
+| 9 | the breaker is not tripped inside the cap | completions | no breaker trip on a response within 32768 tokens | the breaker and the cap must move together |
+
+Bars 5 and 6 are the ones this window exists to produce. They are registered with a carried-over bar
+rather than a derived one, and the report must say so — a bar that is not derived from the window is
+a weaker instrument than one that is, and pretending otherwise would repeat the failure this
+revision is correcting.
+
+## 10.5 Minima (carried from §4.4, unchanged)
+
+| minimum | bar | why |
+|---|---|---|
+| window length | >=24 h, covering a full diurnal cycle | the same reason as §4.4: the baseline window spans 22Z-09Z and has zero-traffic hours |
+| `ttfb` rows | >=300 | the same |
+| stall attempts | >=20 | enough for a share to be decidable at +/-1 row of granularity |
+
+If a minimum is not met at 24 h, **extend the window; do not evaluate the criteria on a smaller
+slice** (§4.4). The 15 s run closed early for a different and stronger reason — its failing bars
+could not be reversed by waiting — and that reasoning does not transfer here.
+
+## 10.6 The rollback trigger for THIS window
+
+Any single one fires, and the response is to fix the configuration, not to extend the window:
+
+1. terminal-504 share above 43.9% with a lower completion share (A1 §3);
+2. per-turn recovery below 25% (§10.4 bar 5);
+3. `truncated_stream` share above 2.5% on the §10.4 bar-4 denominator;
+4. the circuit breaker tripping on a response within the model's 32 768-token cap;
+5. `request_max_tokens` not equal to 32768 for the enabled model — the tuning is not live.
+
+## 10.7 Reporting
+
+One artifact after the window closes, as §6 requires: the per-hour table, the nine criteria in §10.4
+with their verdicts, the minima as measured, and the commands that recompute every published number
+against a named frozen snapshot with its line count and sha256. If a criterion is unmeasurable, the
+artifact says so and says why — it does not substitute a proxy number and present it as the metric.
