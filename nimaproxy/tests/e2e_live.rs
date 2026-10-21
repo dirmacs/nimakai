@@ -254,7 +254,7 @@ async fn test_e2e_racing_uses_preallocated_keys() {
         let content = String::from_utf8_lossy(&body_bytes);
         eprintln!(
             "[racing] status=200, body_preview={}",
-            &content.chars().take(200).collect::<String>()
+            content.chars().take(200).collect::<String>()
         );
         assert!(
             content.contains(LIVE_MODEL_A) || content.contains("choices"),
@@ -598,7 +598,7 @@ async fn test_e2e_invalid_assistant_message_not_propagated() {
     eprintln!(
         "[e2e-invalid-assistant] status={} body={}",
         status,
-        &body_str.chars().take(300).collect::<String>()
+        body_str.chars().take(300).collect::<String>()
     );
 
     // The proxy must NOT forward 400 "Invalid assistant message" directly to client.
@@ -651,7 +651,7 @@ async fn test_e2e_racing_returns_2xx_winner() {
         status,
         elapsed,
         winner,
-        &body_str.chars().take(200).collect::<String>()
+        body_str.chars().take(200).collect::<String>()
     );
 
     // Racing must NEVER return a raw 4xx from NVIDIA
@@ -671,7 +671,7 @@ async fn test_e2e_racing_returns_2xx_winner() {
         200,
         "racing must return a 2xx winner, got {} (body: {})",
         status,
-        &body_str.chars().take(200).collect::<String>()
+        body_str.chars().take(200).collect::<String>()
     );
     assert!(
         winner.is_some(),

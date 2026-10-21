@@ -186,7 +186,7 @@ async fn test_live_chat_streaming() {
     // (NVIDIA may return JSON even with stream:true for small responses)
     eprintln!(
         "[live] streaming response preview: {}",
-        &content.chars().take(200).collect::<String>()
+        content.chars().take(200).collect::<String>()
     );
 }
 
@@ -267,7 +267,7 @@ async fn test_live_chat_tool_calling() {
 
     eprintln!(
         "[live] tool calling response: {}",
-        &json.to_string().chars().take(500).collect::<String>()
+        json.to_string().chars().take(500).collect::<String>()
     );
 
     // Response should have choices
@@ -379,7 +379,7 @@ async fn test_live_chat_multi_turn() {
 
     eprintln!(
         "[live] multi-turn response 2: {}",
-        &body2_json.to_string().chars().take(300).collect::<String>()
+        body2_json.to_string().chars().take(300).collect::<String>()
     );
 }
 

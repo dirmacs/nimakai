@@ -97,7 +97,7 @@ async fn test_live_streaming_chunked_response() {
     let content = String::from_utf8_lossy(&body_bytes);
 
     eprintln!("[streaming] Response preview (first 500 chars):");
-    eprintln!("{}", &content.chars().take(500).collect::<String>());
+    eprintln!("{}", content.chars().take(500).collect::<String>());
 
     if status_code == 200 {
         // For streaming, we expect either:
