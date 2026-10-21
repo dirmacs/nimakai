@@ -89,6 +89,22 @@ pub struct TurnLog {
     /// [`Self::response_tool_calls`].
     pub tool_call_count: usize,
 
+    /// The REQUEST-side tool-call count under a name that says which side it
+    /// is -- the same number as [`Self::tool_call_count`], carried alongside it
+    /// so the two sides of the question can be told apart BY NAME rather than
+    /// by reading the documentation of a field whose name says the other side.
+    ///
+    /// It is derived from `tool_call_count` in one place, so the two can never
+    /// disagree. `None` on a line written before this field existed.
+    ///
+    /// **The two sides are not interchangeable on a pre-existing line.** A line
+    /// written before this field carries only `tool_call_count`, which is the
+    /// REQUEST-side count; its `response_tool_calls` is absent, so it correctly
+    /// never satisfies a response-side filter. No pre-existing line is
+    /// reinterpreted by this field, and none needs migrating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_tool_call_count: Option<u64>,
+
     /// Distinct logical tool calls the RESPONSE made, de-duplicated by the SSE
     /// delta's `index`.
     ///
@@ -423,6 +439,9 @@ impl TurnLog {
             has_tool_calls: record.has_tool_calls,
             tool_call_count: record.tool_call_count,
             error: record.error,
+            // Derived from the same source as `tool_call_count`, so the two
+            // can never disagree; see the field's documentation.
+            request_tool_call_count: Some(record.tool_call_count as u64),
             key_label: record.key_label,
             is_racing: record.is_racing,
             racing_models_count: None,
@@ -1009,6 +1028,52 @@ mod tests {
             response_tool_calls: None,
         });
         assert_eq!(turn.loop_key, None);
+    }
+
+    /// The three tool-call fields name three different things, and a
+    /// pre-existing line must not be reinterpreted by any of them.
+    ///
+    /// `tool_call_count` is the REQUEST-side count and keeps its historical
+    /// meaning on every line, old and new. `request_tool_call_count` is the
+    /// same number under a name that says which side it is.
+    /// `response_tool_calls` is the RESPONSE-side count, and it is absent
+    /// wherever the response was never observed.
+    #[test]
+    fn the_tool_call_fields_name_different_sides_and_keep_history_readable() {
+        let record = TurnRecord {
+            requested_model: "auto".to_string(),
+            responding_model: "m".to_string(),
+            latency_ms: 1,
+            success: true,
+            status_code: 200,
+            request_message_count: 1,
+            response_message_count: 1,
+            has_tool_calls: true,
+            tool_call_count: 6,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+            loop_key: None,
+            request_has_tools: None,
+            request_max_tokens: None,
+            response_tool_calls: None,
+        };
+        let turn = TurnLog::new(record);
+        // The legacy field keeps its meaning and its type: it is the request's
+        // tool history, and a new line carries it exactly as an old one did.
+        assert_eq!(turn.tool_call_count, 6);
+        // The alias is the same number, and it cannot disagree with the field
+        // it mirrors because it is derived from it.
+        assert_eq!(turn.request_tool_call_count, Some(6));
+        // The response side is unknown until the response is observed.
+        assert_eq!(turn.response_tool_calls, None);
+
+        // Reading a line written before this change is the reader's job, and
+        // the reader is the query binary's own copy of this schema -- not this
+        // struct, which is the writer's and requires every field. The
+        // compatibility guarantee is pinned there, in log_query.rs.
     }
 
     /// A `TurnRecord` carrying a real `LoopKey` round-trips through

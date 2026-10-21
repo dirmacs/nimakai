@@ -19,6 +19,17 @@ All notable changes to nimakai are documented in this file.
 
 ### Fixed
 
+- **The turn log's tool-call counts now name their side.** `tool_call_count`
+  has always been the REQUEST-side count -- the tool history the request
+  carried -- and it keeps that meaning on every line, old and new, so no
+  historical line is reinterpreted. A new field, `request_tool_call_count`,
+  carries the same number under a name that says which side it is, and
+  `response_tool_calls` remains the response-side reading. The
+  `response_tool_calls>=N` filter reads the response side, so a "tool calls
+  per request" rate computed from it is the rate that means something; the
+  request side was overstated by 63x to 225x on live traffic.
+
+
 - **Removed the shared client's 120 s whole-request timeout.** reqwest's
   client-level timeout caps headers, body, and stream together, so it severed
   healthy long generations mid-stream — measured 3/3 on the proxy arm of an
