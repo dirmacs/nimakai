@@ -1,5 +1,13 @@
 # EXPERIMENT 15S — first-byte window dynamic → 15 s (pre-registered protocol, rev 2)
 
+> **Paths in this document are environment variables.** This is a public repository, so the
+> protocol cites placeholders rather than one operator's host layout:
+>
+> ```bash
+> export CONFIG_FILE=/etc/nimaproxy/nimaproxy.toml       # the deployed config (adjust to taste)
+> export OMP_SESSION_DIR="$HOME/.omp/agent/sessions"     # omp transcript corpus
+> ```
+
 **Status:** pre-registered, not yet run. Nothing in this document is a result; every number is a
 baseline or a threshold set *before* the measurement.
 
@@ -19,9 +27,9 @@ reporting shape are unchanged from rev 1.
 
 | Lane | File | What it measured |
 |---|---|---|
-| A1 | `/tmp/opt-lane/A1.md` | TTFB/stall analysis on the post-start slice (4096 rows, 22:57:57Z Oct-19 → 09:40Z Oct-20) |
-| A6 | `/tmp/opt-lane/A6.md` | Client TTFT vs proxy TTFB, per-hour, per-request matched ratios |
-| B | `/tmp/opt-lane/B-ranked.md` | Evidence-synthesized ranked list; C2 names this experiment as the unlock |
+| A1 | `$ANALYSIS_DIR/A1.md` | TTFB/stall analysis on the post-start slice (4096 rows, 22:57:57Z Oct-19 → 09:40Z Oct-20) |
+| A6 | `$ANALYSIS_DIR/A6.md` | Client TTFT vs proxy TTFB, per-hour, per-request matched ratios |
+| B | `$ANALYSIS_DIR/B-ranked.md` | Evidence-synthesized ranked list; C2 names this experiment as the unlock |
 
 **Code basis (verified at `5a24d89`):** `nimaproxy/src/proxy/retry.rs`
 (`new_split`, two budgets, `decide_under`),
@@ -229,7 +237,7 @@ dot-parts):
   (denominator = turns containing at least one stall attempt).
 
 Client-side corroboration (optional, secondary): match client TTFT from the omp transcripts
-(`/home/dirmacs/.omp/agent/sessions/**/*.jsonl`, `type=="message"`, `role=="assistant"`,
+(`$OMP_SESSION_DIR/**/*.jsonl`, `type=="message"`, `role=="assistant"`,
 `provider=="nimaproxy"`, field `ttft`) to proxy rows by time window, per A6 §2's per-request match.
 The client ratio p95 ≤ 13.31× criterion is evaluated on that matched set only.
 
@@ -247,7 +255,7 @@ slice.
 > 2026-10-21 07:28Z annotation (step-5 model-card tuning staged, NOT deployed):
 > a separate tuning change (max_tokens 16384→32768, top_k=0, breaker
 > 32000→36000, docs/comments) is baked into the repo checkout and staged in
-> `/opt/nimaproxy-config/nimaproxy.toml`, but the container was deliberately
+> `$CONFIG_FILE`, but the container was deliberately
 > NOT restarted: §1.2 "everything else stays" + §4.4's post-restart clock
 > forbid mid-window restarts. The live proxy still serves max_tokens=16384.
 > Deploy (restart) is parked for owner re-go at window close (~18:44Z),
@@ -367,7 +375,7 @@ revision rule.
 
 **What rev 2 got wrong:** §1.3/§2 used code-default constant values for keys
 the live config actually sets. The live config
-(`/opt/nimaproxy-config/nimaproxy.toml`, backup sha256 `0d8245d2…`) sets:
+(`$CONFIG_FILE`, backup sha256 `0d8245d2…`) sets:
 
 | Knob | Rev 2 assumed | Live value | Locator |
 |---|---|---|---|

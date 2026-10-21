@@ -10,7 +10,7 @@
 #   docker run -v /path/to/nimaproxy.toml:/etc/nimaproxy/nimaproxy.toml:ro \
 #       dirmacs/nimaproxy:phase2
 #
-# Build context: the repo root (/opt/nimakai); the crate is copied from nimaproxy/.
+# Build context: the repo root ($REPO_ROOT); the crate is copied from nimaproxy/.
 
 ARG RUST_IMAGE=rust:1.99-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim

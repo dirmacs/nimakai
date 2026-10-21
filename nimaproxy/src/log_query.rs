@@ -8,6 +8,7 @@
 //!   latency>5000        - Filter by latency (ms)
 //!   error~"DEGRADED"    - Regex match on error field
 //!   has_tool_calls=true - Filter tool call presence
+//!   response_tool_calls>=2 - Filter by RESPONSE-side distinct tool calls
 //!   failure_mode=truncated - Exact match on the failure classifier's label
 //!   record_kind=completion - Exact match: ttfb (first byte) or completion
 //!   session=<id>        - Exact match on the agent-loop session id
@@ -48,7 +49,18 @@ pub struct TurnLog {
     pub success: bool,
     pub status_code: u16,
     pub has_tool_calls: bool,
+    /// REQUEST-SIDE tool history count. Overcounts what the model did: it
+    /// counts the tool messages and `tool_calls` entries the request carried,
+    /// so a turn whose response made no tool call still logs a non-zero value
+    /// here. Use `response_tool_calls` for a rate that means anything.
     pub tool_call_count: usize,
+    /// Distinct logical tool calls the RESPONSE made, de-duplicated by the SSE
+    /// delta's `index`. `Some(0)` means the response genuinely made no tool
+    /// call; `None` means the response was not observed (first-byte record,
+    /// failure path, non-streaming turn, or a line written before the field
+    /// existed).
+    #[serde(default)]
+    pub response_tool_calls: Option<u64>,
     pub error: Option<String>,
     pub is_racing: bool,
     #[serde(default)]
@@ -116,6 +128,10 @@ struct Query {
     latency_min: Option<u64>,
     error_pattern: Option<String>,
     tool_calls_filter: Option<bool>,
+    /// Minimum RESPONSE-side distinct tool calls. Separate from
+    /// `tool_calls_filter`, which filters the request-side `has_tool_calls`
+    /// bool.
+    response_tool_calls_min: Option<u64>,
     failure_mode_filter: Option<String>,
     record_kind_filter: Option<String>,
     session_filter: Option<String>,
@@ -136,6 +152,7 @@ impl Query {
             latency_min: None,
             error_pattern: None,
             tool_calls_filter: None,
+            response_tool_calls_min: None,
             failure_mode_filter: None,
             record_kind_filter: None,
             session_filter: None,
@@ -155,6 +172,8 @@ impl Query {
                 q.success_filter = Some(val == "true");
             } else if let Some(val) = part.strip_prefix("has_tool_calls=") {
                 q.tool_calls_filter = Some(val == "true");
+            } else if let Some(val) = part.strip_prefix("response_tool_calls>=") {
+                q.response_tool_calls_min = val.parse().ok();
             } else if let Some(val) = part.strip_prefix("failure_mode=") {
                 q.failure_mode_filter = Some(val.to_string());
             } else if let Some(val) = part.strip_prefix("record_kind=") {
@@ -210,6 +229,19 @@ impl Query {
         if let Some(has_tools) = self.tool_calls_filter {
             if log.has_tool_calls != has_tools {
                 return false;
+            }
+        }
+        // Response-side, unlike `has_tool_calls=`/`tool_call_count`: this is
+        // the count of logical tool calls the response actually made. A record
+        // whose response was never observed (`None`) cannot satisfy the filter
+        // and must not be silently included — an absent count is "unknown",
+        // not "at least N". So `response_tool_calls>=1` is the query that finds
+        // the turns that really did call a tool, which the request-side field
+        // cannot answer.
+        if let Some(min) = self.response_tool_calls_min {
+            match log.response_tool_calls {
+                Some(n) if n >= min => {}
+                _ => return false,
             }
         }
         // Exact match, like success/has_tool_calls: `failure_mode` is a
@@ -602,6 +634,7 @@ mod tests {
             status_code: 200,
             has_tool_calls: false,
             tool_call_count: 0,
+            response_tool_calls: None,
             error: None,
             is_racing: false,
             failure_mode: None,
@@ -667,6 +700,74 @@ mod tests {
         let q = Query::parse("failure_mode=truncated record_kind=completion");
         assert_eq!(q.failure_mode_filter.as_deref(), Some("truncated"));
         assert_eq!(q.record_kind_filter.as_deref(), Some("completion"));
+    }
+
+    #[test]
+    fn parses_the_response_tool_calls_filter() {
+        let q = Query::parse("response_tool_calls>=2 record_kind=completion");
+        assert_eq!(q.response_tool_calls_min, Some(2));
+        assert_eq!(q.record_kind_filter.as_deref(), Some("completion"));
+        // A query that does not name it must leave it unset, so it cannot
+        // silently narrow every other query.
+        assert_eq!(Query::parse("model=test").response_tool_calls_min, None);
+    }
+
+    #[test]
+    fn response_tool_calls_filter_selects_the_response_side() {
+        // The defect this field fixes: the request carried tool history (so
+        // `has_tool_calls` is true and `tool_call_count` is non-zero) but the
+        // response made no tool call. A response-side filter must see 0 here.
+        let non_call = TurnLog {
+            has_tool_calls: true,
+            tool_call_count: 4,
+            response_tool_calls: Some(0),
+            ..blank()
+        };
+        let called = TurnLog {
+            has_tool_calls: true,
+            tool_call_count: 4,
+            response_tool_calls: Some(3),
+            ..blank()
+        };
+        assert!(!Query::parse("response_tool_calls>=1").matches(&non_call));
+        assert!(Query::parse("response_tool_calls>=1").matches(&called));
+        // The request-side filter still answers the old question on the same
+        // rows: it cannot tell the two apart, which is the point.
+        assert!(Query::parse("has_tool_calls=true").matches(&non_call));
+        assert!(Query::parse("has_tool_calls=true").matches(&called));
+    }
+
+    #[test]
+    fn response_tool_calls_filter_rejects_an_unobserved_response() {
+        // `None` means "not observed" (first-byte record, failure path, or a
+        // line written before the field). It must not pass a `>=1` filter by
+        // being coerced to zero, or the query would under-report.
+        let unobserved = TurnLog {
+            response_tool_calls: None,
+            ..blank()
+        };
+        assert!(!Query::parse("response_tool_calls>=1").matches(&unobserved));
+        // `>=0` is satisfied by an observed zero but not by an unobserved one:
+        // "at least zero calls were made" requires the calls to have been
+        // counted at all.
+        let observed_zero = TurnLog {
+            response_tool_calls: Some(0),
+            ..blank()
+        };
+        assert!(Query::parse("response_tool_calls>=0").matches(&observed_zero));
+        assert!(!Query::parse("response_tool_calls>=0").matches(&unobserved));
+    }
+
+    #[test]
+    fn a_line_without_the_new_field_still_deserializes_as_none() {
+        // Written before this change: no `response_tool_calls` key at all.
+        let raw = r#"{"timestamp":"2026-10-16T00:00:00Z","requested_model":"m","responding_model":"m","latency_ms":1,"success":true,"status_code":200,"has_tool_calls":true,"tool_call_count":6,"error":null,"is_racing":false,"record_kind":"completion"}"#;
+        let parsed: TurnLog = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.tool_call_count, 6);
+        assert_eq!(
+            parsed.response_tool_calls, None,
+            "an absent key is 'not observed', never 0"
+        );
     }
 
     #[test]

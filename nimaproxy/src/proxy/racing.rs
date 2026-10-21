@@ -375,6 +375,10 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                             error: Some(body_str[..body_str.len().min(400)].to_string()),
                             request_tokens: None,
                             response_tokens: None,
+                            // The response side is not known here: a first-byte or failure record is
+                            // written before any stream is observed. `None` keeps "no tool calls" and
+                            // "not observed" distinguishable.
+                            response_tool_calls: None,
                         });
                         return (
                             model_id_for_task,
@@ -430,6 +434,10 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                     error: Some(msg.clone()),
                                     request_tokens: None,
                                     response_tokens: None,
+                                    // The response side is not known here: a first-byte or failure record is
+                                    // written before any stream is observed. `None` keeps "no tool calls" and
+                                    // "not observed" distinguishable.
+                                    response_tool_calls: None,
                                 });
                                 return (model_id_for_task, Err(msg));
                             }
@@ -459,6 +467,10 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 error: Some(e.to_string()),
                                 request_tokens: None,
                                 response_tokens: None,
+                                // The response side is not known here: a first-byte or failure record is
+                                // written before any stream is observed. `None` keeps "no tool calls" and
+                                // "not observed" distinguishable.
+                                response_tool_calls: None,
                             });
                             return (model_id_for_task, Err(format!("body error: {}", e)));
                         }
@@ -495,6 +507,10 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 error: Some(timeout_error.clone()),
                                 request_tokens: None,
                                 response_tokens: None,
+                                // The response side is not known here: a first-byte or failure record is
+                                // written before any stream is observed. `None` keeps "no tool calls" and
+                                // "not observed" distinguishable.
+                                response_tool_calls: None,
                             });
                             return (model_id_for_task, Err(timeout_error));
                         }
@@ -524,6 +540,10 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 error: Some(embedded_msg.clone()),
                                 request_tokens: None,
                                 response_tokens: None,
+                                // The response side is not known here: a first-byte or failure record is
+                                // written before any stream is observed. `None` keeps "no tool calls" and
+                                // "not observed" distinguishable.
+                                response_tool_calls: None,
                             });
                             return (
                                 model_id_for_task,
@@ -571,6 +591,10 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         },
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     Ok::<(Response, u16, usize, u64), String>((
                         response,
@@ -611,6 +635,10 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         error: Some(e.to_string()),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     Err(format!("request error: {}", e))
                 }
@@ -647,6 +675,10 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         error: Some(timeout_error.clone()),
                         request_tokens: None,
                         response_tokens: None,
+                        // The response side is not known here: a first-byte or failure record is
+                        // written before any stream is observed. `None` keeps "no tool calls" and
+                        // "not observed" distinguishable.
+                        response_tool_calls: None,
                     });
                     Err(timeout_error)
                 }
