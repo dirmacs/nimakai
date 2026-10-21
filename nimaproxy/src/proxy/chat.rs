@@ -911,15 +911,16 @@ pub async fn chat_completions(
                 // The first-byte record is written BEFORE the stream is
                 // handed to axum, so its generated `request_id` is known and
                 // can be threaded into the tap for the completion record.
-                // Reading the id back out of the global logger is the only way
-                // to get it: `TurnLog::new` generates it internally.
+                // `TurnLog::new` generates that id inside the write, so the
+                // write hands it back to this caller.
                 //
-                // The read MUST come after the write: `last_request_id` is
-                // only updated inside `log`, once the record is on disk.
-                // Reading it first returns the previous request's id (or
-                // `None` on a fresh logger), which would silently join this
-                // turn's completion record to the wrong turn — or to nothing.
-                log_turn_request(TurnRecord {
+                // The id MUST come from this call's own return value: reading
+                // it out of the process-global logger instead would return the
+                // last id written by ANY caller, so two concurrent requests
+                // can each end up with the other's id — joining a completion
+                // record to another turn's first byte, and echoing a foreign
+                // id back to the client in `x-request-id`.
+                let request_id = log_turn_request(TurnRecord {
                     requested_model: original_model.to_string(),
                     responding_model: model_id.to_string(),
                     latency_ms: ttfc_ms as u128 as u64,
@@ -944,8 +945,6 @@ pub async fn chat_completions(
                     // "not observed" distinguishable.
                     response_tool_calls: None,
                 });
-                let request_id =
-                    crate::turn_log::with_logger(|logger| logger.last_request_id()).flatten();
                 let tap_for_completion = tap.clone();
 
                 // Echo the generated request id back to the client.

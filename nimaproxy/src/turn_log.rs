@@ -532,18 +532,6 @@ pub struct TurnLogger {
     /// which also swaps in a fresh file, so the two can never disagree.
     bytes_since_rotate: Mutex<u64>,
     rotate_at_bytes: u64,
-    /// `request_id` of the most recently written record.
-    ///
-    /// The proxy writes a first-byte record when a response starts and a
-    /// completion record when the stream ends, and the two must share an id so
-    /// a truncated generation can be traced back to the attempt that produced
-    /// it. `TurnLog::new` generates the id internally, so the only way for the
-    /// caller to learn it is to read it back out of the logger after the write.
-    ///
-    /// It is the last id written by ANY caller, which is why it is read
-    /// immediately after the first-byte write and before any other record can
-    /// be logged for this turn.
-    last_request_id: Mutex<Option<String>>,
 }
 
 impl TurnLogger {
@@ -569,7 +557,6 @@ impl TurnLogger {
             enabled,
             bytes_since_rotate: Mutex::new(0),
             rotate_at_bytes,
-            last_request_id: Mutex::new(None),
         };
 
         if enabled {
@@ -587,11 +574,6 @@ impl TurnLogger {
     /// Whether this logger rotates, and at what size.
     pub fn rotate_threshold(&self) -> Option<u64> {
         (self.rotate_at_bytes > 0).then_some(self.rotate_at_bytes)
-    }
-
-    /// `request_id` of the most recently written record, if any.
-    pub fn last_request_id(&self) -> Option<String> {
-        self.last_request_id.lock().unwrap().clone()
     }
 
     fn open_file(&self) -> io::Result<()> {
@@ -616,9 +598,21 @@ impl TurnLogger {
         Ok(())
     }
 
-    pub fn log(&self, turn: &TurnLog) -> io::Result<()> {
+    /// Append `turn` to the log and return the request id that was written.
+    ///
+    /// The id is the one `TurnLog::new` generated for THIS record, returned by
+    /// the very write that produced it. A caller that needs to join a later
+    /// record to this one — the completion record joining to the first-byte
+    /// record — uses the returned value rather than reading a shared slot: a
+    /// process-global "last written id" is the last id written by ANY caller,
+    /// so two concurrent requests can each read the other's id, which joins a
+    /// turn's completion to another turn's first byte and echoes a foreign id
+    /// back to the client.
+    ///
+    /// `None` means no record was written, because logging is disabled.
+    pub fn log(&self, turn: &TurnLog) -> io::Result<Option<String>> {
         if !self.enabled {
-            return Ok(());
+            return Ok(None);
         }
 
         // Serialize first so the byte count is exact rather than estimated:
@@ -655,22 +649,10 @@ impl TurnLogger {
             writer.write_all(&buf)?;
             writer.flush()?;
         }
-        // Recorded after the write, so an id is only published once its record
-        // is on disk. A record whose id is visible but which was never written
-        // would be worse than no id at all: the completion record would claim
-        // a join that does not exist.
-        //
-        // `loop` summaries are excluded. `last_request_id` exists for exactly
-        // one purpose — letting the first-byte writer read back the id it just
-        // generated so the completion record can share it — and a loop summary
-        // is not a request, has no completion record, and therefore has no join
-        // to serve. Publishing it only overwrites the id that a request is
-        // waiting to read, which was measured: with loop summaries publishing,
-        // `stream_observability` became flaky, because a test read back another
-        // test's id and then asserted against the wrong turn's finish_reason.
-        if turn.record_kind != TurnLog::RECORD_KIND_LOOP {
-            *self.last_request_id.lock().unwrap() = turn.request_id.clone();
-        }
+        // The id is handed back only once its record is on disk. An id
+        // returned for a record that was never written would be worse than no
+        // id at all: the completion record would claim a join that does not
+        // exist.
 
         // Rotate once this file is over the threshold. The check is after the
         // write (not before) so the file that triggered it keeps the record
@@ -690,7 +672,7 @@ impl TurnLogger {
             }
         }
 
-        Ok(())
+        Ok(turn.request_id.clone())
     }
 
     pub fn rotate(&self) -> io::Result<()> {
@@ -753,10 +735,17 @@ pub fn init_logger(path: &str, enabled: bool) -> io::Result<()> {
     })
 }
 
-/// Log a turn to the global logger
-pub fn log_turn(turn: &TurnLog) {
+/// Log a turn to the global logger.
+///
+/// Returns the request id the global logger wrote, so a caller that needs to
+/// join a later record to this one can obtain its OWN id rather than reading a
+/// shared "last written" slot (which under concurrency is another request's).
+/// `None` means nothing was written: no global logger, or logging is disabled.
+pub fn log_turn(turn: &TurnLog) -> Option<String> {
     if let Some(logger) = GLOBAL_LOGGER.get() {
-        let _ = logger.log(turn);
+        logger.log(turn).ok().flatten()
+    } else {
+        None
     }
 }
 
@@ -1411,6 +1400,10 @@ mod tests {
 
     /// The first-byte record and the completion record must share a request id,
     /// or the two halves of a turn cannot be read together.
+    ///
+    /// The id is obtained from the write's own return value, which is what
+    /// makes the join safe under concurrency: each caller gets the id of the
+    /// record IT wrote, never another caller's.
     #[test]
     fn test_request_id_is_shared_between_record_kinds() {
         let dir = tempfile::tempdir().unwrap();
@@ -1419,10 +1412,10 @@ mod tests {
 
         let mut ttfb = sample_turn();
         assert_eq!(ttfb.record_kind, TurnLog::RECORD_KIND_TTFB);
-        logger.log(&ttfb).unwrap();
         let shared_id = logger
-            .last_request_id()
-            .expect("the logger must publish the id it just wrote");
+            .log(&ttfb)
+            .unwrap()
+            .expect("a written record hands back its id");
         ttfb.request_id = Some(shared_id.clone());
 
         let mut completion = sample_turn();

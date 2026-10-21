@@ -733,10 +733,16 @@ pub async fn embeddings(
     )
         .into_response()
 }
-/// Log a completed turn
-pub(crate) fn log_turn_request(record: TurnRecord) {
+/// Log a first-byte (or failure) record and return the request id it wrote.
+///
+/// The id is `TurnLog::new`'s, generated inside the write, so it is handed
+/// back to the caller rather than read out of a shared slot: the caller needs
+/// the id of ITS OWN record to thread into the completion record and the
+/// response header, and under concurrency a shared "last written id" is
+/// another request's.
+pub(crate) fn log_turn_request(record: TurnRecord) -> Option<String> {
     use crate::turn_log::{log_turn as log_turn_event, TurnLog};
-    log_turn_event(&TurnLog::new(record));
+    log_turn_event(&TurnLog::new(record))
 }
 
 /// Identity of the turn a completion record belongs to.
