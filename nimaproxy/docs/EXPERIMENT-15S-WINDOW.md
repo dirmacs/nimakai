@@ -4,8 +4,12 @@
 > protocol cites placeholders rather than one operator's host layout:
 >
 > ```bash
-> export CONFIG_FILE=/etc/nimaproxy/nimaproxy.toml       # the deployed config (adjust to taste)
+> # The HOST-side live config — the file the operator edits. It is NOT the
+> # in-container /etc/nimaproxy/nimaproxy.toml, which is a different file (a
+> bind mount of this one on a deployed host).
+> export CONFIG_FILE="$HOME/.config/nimaproxy/nimaproxy.toml"
 > export OMP_SESSION_DIR="$HOME/.omp/agent/sessions"     # omp transcript corpus
+> export ANALYSIS_DIR=/path/to/analysis                 # dir holding the A*/B* analysis notes
 > ```
 
 **Status:** pre-registered, not yet run. Nothing in this document is a result; every number is a

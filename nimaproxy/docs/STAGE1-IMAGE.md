@@ -8,7 +8,6 @@
 > export REPO_ROOT="$(git rev-parse --show-toplevel)"   # the nimakai checkout
 > export CRATE_DIR="$REPO_ROOT/nimaproxy"                # the nimaproxy crate inside it
 > export EXPORT_DIR="$(mktemp -d)"                      # scratch dir for the git-archive export
-> export CONFIG_FILE=/etc/nimaproxy/nimaproxy.toml       # the deployed config (adjust to taste)
 > ```
 
 ## 1. Goal

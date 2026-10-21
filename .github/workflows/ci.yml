@@ -9,6 +9,14 @@ on:
 jobs:
   rust:
     runs-on: [self-hosted, linux, arm64, dirmacs-ci]
+    # Fork-PR guard. This runner is a self-hosted box whose home holds live
+    # session logs and whose config directory holds key-bearing material; a
+    # fork PR gets no secrets but DOES get code execution here. This
+    # repository is public, so that is a realistic event. Branches pushed
+    # from a clone of this same repository (the normal case) are unaffected.
+    if: >-
+      ${{ github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@v4
 
@@ -88,9 +96,20 @@ jobs:
   # vacuous green.
   #
   # To enable: set vars.LIVE_TESTS_ENABLED=true AND secrets.NVIDIA_API_KEY.
+  #
+  # The `head.repo.full_name == repository` guard keeps this job off FORK
+  # pull requests. A fork PR gets no secrets, but it still gets CODE
+  # EXECUTION on this self-hosted runner, whose home holds live session logs
+  # and whose config directory holds key-bearing material. This repository is
+  # public, so "someone opened a PR from a fork" is a realistic event and it
+  # must not be able to run anything here.
   live-tests:
     runs-on: [self-hosted, linux, arm64, dirmacs-ci]
-    if: ${{ vars.LIVE_TESTS_ENABLED == 'true' }}
+    if: >-
+      ${{ vars.LIVE_TESTS_ENABLED == 'true'
+      && github.event_name != 'pull_request'
+      || (vars.LIVE_TESTS_ENABLED == 'true'
+      && github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
       - uses: actions/checkout@v4
 
