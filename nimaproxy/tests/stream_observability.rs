@@ -1156,8 +1156,7 @@ async fn concurrent_turns_keep_their_own_request_ids() {
         })
         .filter(|r| {
             !records.iter().any(|c| {
-                c.record_kind == TurnLog::RECORD_KIND_COMPLETION
-                    && c.request_id == r.request_id
+                c.record_kind == TurnLog::RECORD_KIND_COMPLETION && c.request_id == r.request_id
             })
         })
         .filter_map(|r| r.request_id.as_deref())
