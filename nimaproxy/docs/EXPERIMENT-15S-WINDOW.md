@@ -667,6 +667,20 @@ here. The cutoff itself remains **underived**; the dynamic window is a fallback,
 protocol's join was a per-second time bucket. This window's are the first per-turn measurements of
 the proxy's behaviour that exist. They establish a baseline; they do not improve on one.
 
+**A caveat on the per-ATTEMPT join, measured.** The turn log publishes each record's id through a
+process-global slot, and the request path reads that slot back to learn "its own" id. Two
+concurrent requests can therefore take each other's id, and an attempt's completion record can be
+written under a different attempt's id. Measured on the live log: the closed 15 s window had 4228
+`ttfb` ids against 3903 completion ids, of which 3903 held both halves, and **8 successful
+attempts had no completion half at all** — the signature of a lost id. The current window shows the
+same 8 over a much smaller sample.
+
+So the per-attempt join is usable but not exact, at a rate of the order of 0.2% of attempts in the
+closed window. Every row-level criterion in §10.4 is computed on row counts and is unaffected; the
+two criteria that use the join (bars 3 and 4) carry a join uncertainty of about that size, which
+is far below the distance to their bars. The defect is tracked separately; if it is fixed before
+this window closes, the caveat becomes moot and this note should say so.
+
 ## 10.4 The criteria
 
 Each bar cites its source. Where a bar is carried over from the 15 s protocol, that is stated,
