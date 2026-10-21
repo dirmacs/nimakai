@@ -739,7 +739,14 @@ pub async fn chat_completions(
                 // below. `None` until one of the two fills them in.
                 let mut usage_tokens: (Option<u32>, Option<u32>) = (None, None);
                 let body = if is_stream {
-                    Body::from_stream(tapped)
+                    // Only the STREAMING branch opts in to the in-band error
+                    // frame. The non-streaming branch below drives the SAME
+                    // tapped stream to assemble the client's JSON body, and a
+                    // non-streaming upstream body has no `data:` frames, so
+                    // the tap never sees a `[DONE]` there: injecting on that
+                    // path would append an error frame to every non-streaming
+                    // response.
+                    Body::from_stream(tapped.with_error_frame_on_truncation())
                 } else {
                     // Assemble the body. A stall here is retryable for this
                     // branch and only this branch: nothing has been written to

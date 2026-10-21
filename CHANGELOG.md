@@ -29,6 +29,51 @@ All notable changes to nimakai are documented in this file.
   per request" rate computed from it is the rate that means something; the
   request side was overstated by 63x to 225x on live traffic.
 
+- **A truncated stream now ends with an in-band error frame.** The status is
+  sent before the body exists, so a truncated stream cannot change its
+  status code; the client is told in-band instead. The frame mirrors
+  OpenAI's own mid-stream error shape -- an `error` object with no `choices`
+  key and no `[DONE]` -- so a client that handles the upstream API's own
+  mid-stream errors handles this one. The injection is gated on the
+  streaming path: the same tapped stream serves the non-streaming path too,
+  and a non-streaming upstream body has no `data:` frames, so an injection
+  gated only on the absence of `[DONE]` would corrupt every non-streaming
+  response. The turn log is unchanged: it still records
+  `stream_ended_cleanly=false` and `failure_mode=truncated_stream`, and the
+  injected frame is not counted in `chunk_count` or `body_bytes`, which
+  measure what the upstream sent.
+
+- **The client-facing streaming contract is now stated where a client
+  developer reads it.** For a streamed request, HTTP 200 means the upstream
+  accepted the request and began streaming -- not that the response
+  completed, because the status is sent before the body exists. The
+  generation is complete only if the stream ends with a `finish_reason` AND
+  `data: [DONE]`; the proxy never synthesizes a `[DONE]`, so its absence is
+  a reliable signal of a truncation. The correct client action is to re-issue
+  the SAME prompt as a fresh request. The contract was previously published
+  only in an operator-facing retry guide; it is now in the crate README and
+  pinned by tests on the client's side of the wire.
+
+- **The turn log's tool-call counts now name their side.** `tool_call_count`
+  has always been the REQUEST-side count -- the tool history the request
+  carried -- and it keeps that meaning on every line, old and new, so no
+  historical line is reinterpreted. A new field, `request_tool_call_count`,
+  carries the same number under a name that says which side it is, and
+  `response_tool_calls` remains the response-side reading. The
+  `response_tool_calls>=N` filter reads the response side, so a "tool calls
+  per request" rate computed from it is the rate that means something; the
+  request side was overstated by 63x to 225x on live traffic.
+- **The client-facing streaming contract is now stated where a client
+  developer reads it.** For a streamed request, HTTP 200 means the upstream
+  accepted the request and began streaming -- not that the response
+  completed, because the status is sent before the body exists. The
+  generation is complete only if the stream ends with a `finish_reason` AND
+  `data: [DONE]`; the proxy never synthesizes a `[DONE]`, so its absence is
+  a reliable signal of a truncation. The correct client action is to re-issue
+  the SAME prompt as a fresh request. The contract was previously published
+  only in an operator-facing retry guide; it is now in the crate README and
+  pinned by a test on the client's side of the wire.
+
 
 - **Removed the shared client's 120 s whole-request timeout.** reqwest's
   client-level timeout caps headers, body, and stream together, so it severed
