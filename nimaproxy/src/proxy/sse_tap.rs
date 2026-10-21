@@ -533,6 +533,18 @@ pub struct TappedStream {
     tap: SseTap,
     stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
     ended: bool,
+    /// Whether to append an in-band error frame when the upstream stream ends
+    /// without having sent `[DONE]`.
+    ///
+    /// OFF by default, and the streaming branch is the only one that turns it
+    /// on. That is not a stylistic choice: the SAME tapped stream is used by
+    /// both branches, and the non-streaming branch drives it to assemble the
+    /// client's JSON body. A non-streaming upstream body is plain JSON with no
+    /// `data:` frames, so the tap never sees a `[DONE]` on that path and
+    /// `saw_done()` is always false there. Injecting on `!saw_done()` alone
+    /// would therefore append an error frame to EVERY non-streaming response
+    /// and break every one of them.
+    error_frame_on_truncation: bool,
 }
 
 impl TappedStream {
@@ -544,12 +556,61 @@ impl TappedStream {
             tap,
             stream: Box::pin(stream),
             ended: false,
+            error_frame_on_truncation: false,
         }
+    }
+
+    /// Opt in to an in-band error frame when the upstream stream ends without
+    /// sending `[DONE]`.
+    ///
+    /// Only the STREAMING path may use this. The frame mirrors OpenAI's own
+    /// mid-stream error shape -- `data: {"error": {...}}`, with no `choices`
+    /// key and no `[DONE]` -- so a client that handles the upstream API's own
+    /// errors handles this one, rather than a proxy-specific shape it has
+    /// never seen.
+    ///
+    /// The frame is NOT passed to the tap: it would be parsed as a data frame
+    /// and could set a finish reason, and `chunk_count` / `body_bytes` must
+    /// keep measuring what the UPSTREAM sent. The client therefore receives
+    /// slightly more bytes than the log reports, deliberately.
+    pub fn with_error_frame_on_truncation(mut self) -> Self {
+        self.error_frame_on_truncation = true;
+        self
     }
 
     pub fn tap(&self) -> &SseTap {
         &self.tap
     }
+}
+
+/// The in-band frame that tells a client its stream was truncated.
+///
+/// It mirrors OpenAI's own mid-stream error shape: an `error` object with no
+/// `choices` key and no `[DONE]`, which is exactly what a client receives
+/// from the upstream API itself when the upstream fails mid-stream. A client
+/// that handles that handles this.
+///
+/// `code` is a free-form machine-readable string in OpenAI's error object,
+/// so it carries the classifier's label: a client that wants to distinguish
+/// this from another failure can, and one that ignores it is unaffected.
+fn truncation_error_frame() -> Bytes {
+    let body = serde_json::json!({
+        "error": {
+            "message": "the upstream stream ended before the response completed; \
+                         this response is truncated and must be re-issued as a fresh request",
+            "type": "server_error",
+            "param": null,
+            "code": "truncated_stream"
+        }
+    });
+    // One SSE frame, terminated by a blank line, and deliberately WITHOUT
+    // `[DONE]`: the generation did not complete, and a `[DONE]` would tell
+    // the client it had.
+    let mut out = Vec::with_capacity(body.to_string().len() + 16);
+    out.extend_from_slice(b"data: ");
+    out.extend_from_slice(body.to_string().as_bytes());
+    out.extend_from_slice(b"\n\n");
+    Bytes::from(out)
 }
 
 impl Stream for TappedStream {
@@ -589,6 +650,18 @@ impl Stream for TappedStream {
                 tap.record_end(StreamEnd::Clean);
                 tap.finalize();
                 this.ended = true;
+                // The upstream's stream ended without a `[DONE]`, so the
+                // generation did not complete. The status was sent before the
+                // body existed and cannot be revised now, so the client is
+                // told in-band instead -- but only on the streaming path, and
+                // only when the upstream did not terminate the stream
+                // itself.
+                //
+                // This is the LAST thing the body yields: `ended` is already
+                // set, so the next poll returns None.
+                if this.error_frame_on_truncation && !tap.saw_done() {
+                    return Poll::Ready(Some(Ok(truncation_error_frame())));
+                }
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,

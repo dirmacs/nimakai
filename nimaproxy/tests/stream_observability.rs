@@ -267,6 +267,202 @@ async fn truncated_stream_is_recorded_as_truncated() {
 
 /// A turn that ends in tool calls is a success, not a failure, and is named as
 /// such.
+/// The client-facing contract, pinned from the client's side of the wire.
+///
+/// A 200 means the upstream accepted the request and began streaming, not
+/// that the response completed -- the status is sent before the body exists.
+/// What decides the outcome is the body: a stream is complete only if it ends
+/// with a `finish_reason` AND `data: [DONE]`. The proxy must never synthesize
+/// a `[DONE]` of its own, because that would tell a client that a truncated
+/// response finished.
+///
+/// This is the contract the crate README states, so a change to either must
+/// change this test.
+#[tokio::test]
+async fn a_truncated_stream_reaches_the_client_without_done_or_finish_reason() {
+    // The upstream sends a fragment and then the stream just ends.
+    let (_server, url) =
+        mock_upstream(&format!("{}{}", frame("Comm", ""), frame("D1 i", ""))).await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (body, request_id) = log.turn(state, turn_body()).await;
+    let text = String::from_utf8(body).unwrap();
+
+    // What the CLIENT can see: no terminal marker and no finish reason.
+    // Either one missing means the response did not complete, so a client that
+    // checks for them cannot mistake a truncation for a success.
+    assert!(
+        !text.contains("[DONE]"),
+        "the proxy must never synthesize a [DONE]: {text}"
+    );
+    assert!(
+        !text.contains("finish_reason\":\"stop"),
+        "a truncated stream must not carry a clean finish_reason: {text}"
+    );
+
+    // And what the LOG says about the same event, under its three names.
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(completion.stream_ended_cleanly, Some(false));
+    assert_eq!(
+        completion.failure_mode.as_deref(),
+        Some("truncated_stream"),
+        "one event, one label"
+    );
+    assert!(
+        completion
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("[DONE]")),
+        "the truncation is visible in the error field too: {:?}",
+        completion.error
+    );
+}
+
+/// The other half of the same contract: a stream that completes carries both
+/// markers, so the absence of either one is meaningful.
+#[tokio::test]
+async fn a_complete_stream_reaches_the_client_with_done_and_finish_reason() {
+    let (_server, url) = mock_upstream(&format!(
+        "{}{}data: [DONE]\n\n",
+        frame("Hello", ""),
+        frame(" world", "stop")
+    ))
+    .await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (body, request_id) = log.turn(state, turn_body()).await;
+    let text = String::from_utf8(body).unwrap();
+
+    assert!(text.contains("data: [DONE]"), "clean stream: {text}");
+    assert!(
+        text.contains("finish_reason\":\"stop"),
+        "a complete stream carries its finish reason: {text}"
+    );
+
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(completion.stream_ended_cleanly, Some(true));
+    assert_eq!(completion.failure_mode.as_deref(), Some("clean_stop"));
+}
+
+/// A truncated stream now reaches the client with an IN-BAND error frame, and
+/// still without `[DONE]` or a finish reason.
+///
+/// The frame mirrors OpenAI's own mid-stream error shape, so a client that
+/// handles the upstream API's own mid-stream errors handles this one.
+#[tokio::test]
+async fn a_truncated_stream_reaches_the_client_with_an_in_band_error_frame() {
+    let (_server, url) =
+        mock_upstream(&format!("{}{}", frame("Comm", ""), frame("D1 i", ""))).await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (body, request_id) = log.turn(state, turn_body()).await;
+    let text = String::from_utf8(body).unwrap();
+
+    // The client is told, in-band.
+    assert!(
+        text.contains("\"error\""),
+        "a truncated stream must carry an in-band error: {text}"
+    );
+    assert!(
+        text.contains("truncated_stream"),
+        "the error carries the classifier's label: {text}"
+    );
+    // And the generation is still NOT complete: no terminal marker, no finish
+    // reason. The error frame is not a completion.
+    assert!(
+        !text.contains("[DONE]"),
+        "the proxy must never synthesize a [DONE]: {text}"
+    );
+    assert!(
+        !text.contains("finish_reason\":\"stop"),
+        "a truncated stream must not carry a clean finish_reason: {text}"
+    );
+
+    // The LOG says the same thing, under the same names as before. The frame
+    // is a client-facing signal; it does not change what the proxy recorded.
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(completion.stream_ended_cleanly, Some(false));
+    assert_eq!(completion.failure_mode.as_deref(), Some("truncated_stream"));
+    assert!(
+        completion
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("[DONE]")),
+        "the truncation is visible in the error field too: {:?}",
+        completion.error
+    );
+}
+
+/// A COMPLETE stream must carry no error frame: the error frame is a signal
+/// about truncation, and emitting one on a clean stream would be a false
+/// alarm on every successful request.
+#[tokio::test]
+async fn a_complete_stream_reaches_the_client_without_an_error_frame() {
+    let (_server, url) = mock_upstream(&format!(
+        "{}{}data: [DONE]\n\n",
+        frame("Hello", ""),
+        frame(" world", "stop")
+    ))
+    .await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (body, request_id) = log.turn(state, turn_body()).await;
+    let text = String::from_utf8(body).unwrap();
+
+    assert!(text.contains("data: [DONE]"), "clean stream: {text}");
+    assert!(
+        text.contains("finish_reason\":\"stop"),
+        "a complete stream carries its finish reason: {text}"
+    );
+    assert!(
+        !text.contains("\"error\""),
+        "a complete stream must not carry an error frame: {text}"
+    );
+
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(completion.stream_ended_cleanly, Some(true));
+    assert_eq!(completion.failure_mode.as_deref(), Some("clean_stop"));
+}
+
+/// The regression guard for the hazard: the SAME tapped stream serves both
+/// branches, and the non-streaming branch drives it to assemble the client's
+/// JSON body. A non-streaming upstream body has no `data:` frames, so the tap
+/// never sees a `[DONE]` on that path -- so an injection gated only on
+/// `!saw_done()` would append an error frame to EVERY non-streaming response
+/// and break every one of them.
+#[tokio::test]
+async fn a_non_streaming_body_is_untouched() {
+    // The upstream answers with a JSON content type, which is what decides
+    // this path: the branch is chosen by the UPSTREAM's content type, not by
+    // the request's `stream` field.
+    let upstream_body =
+        "{\"id\":\"cmpl-1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}";
+    let mut server = Server::new_async().await;
+    server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(upstream_body)
+        .expect_at_least(1)
+        .create();
+    let log = LogFile::new();
+    let state = make_state(server.url());
+
+    let (response_body, _request_id) = log.turn(state, turn_body()).await;
+
+    assert_eq!(
+        String::from_utf8(response_body).unwrap(),
+        upstream_body,
+        "a non-streaming response must be byte-identical to the upstream's body: \
+         the error frame is a STREAMING-path signal, and a non-streaming body \
+         has no `data:` frames for the tap to have seen a [DONE] in"
+    );
+}
+
 #[tokio::test]
 async fn tool_call_stream_is_classified_as_tool_calls() {
     let sse = concat!(

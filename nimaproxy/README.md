@@ -189,6 +189,27 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
+### Streaming: a 200 is not a completed response
+
+For a streamed request, **HTTP 200 means the upstream accepted the request and began streaming — not that the response completed.** The status is sent before the body exists, so it cannot be revised once the stream starts. What decides the outcome is the body.
+
+**A stream is complete only if it ends with `data: [DONE]` and carries a `finish_reason`.** The proxy never synthesizes a `[DONE]` of its own, so its absence is a reliable signal: a stream that ends without one was truncated, and the bytes you did receive are a prefix of the answer.
+
+A client that only checks the status will read a truncated response as a success. Check for `[DONE]`.
+
+The turn log records the same event under three names — one event, not three:
+
+| where | what it says |
+|---|---|
+| `record_kind=completion` | the record kind |
+| `stream_ended_cleanly=false` | the stream did not complete |
+| `failure_mode=truncated_stream` | the classifier's label |
+| `error="stream ended without data: [DONE]"` | the human-readable form |
+
+**The correct client action is to re-issue the same prompt as a fresh request** — the payload is not the problem, the connection was. See [RETRY-GUIDANCE.md](docs/RETRY-GUIDANCE.md) for the full symptom-to-cause table.
+
+One thing the client cannot tell from the body alone: a stream cut by the proxy's own idle guard looks the same as one the upstream broke. The log distinguishes them — `stream_ended_by` is `guard_stall` for the former and `upstream_error` for the latter — and the `x-request-id` response header correlates the client's turn with its log record.
+
 ### Health Check
 
 ```bash
