@@ -997,6 +997,46 @@ mod tests {
         assert!(entry.is_degraded("test-model", 3000.0, &cb));
     }
 
+    /// The breaker must sit ABOVE the model's own output cap, or it clips
+    /// legitimate responses. The enabled model's cap is 32768 and the breaker
+    /// is configured at 36000, so a response produced at the model's own
+    /// ceiling must NOT trip the breaker, while one that overshoots the
+    /// BREAKER still does.
+    ///
+    /// This drives the PRODUCTION recorder (`record_with_circuit_breaker` +
+    /// `snapshot`), which is the only path that actually marks a model
+    /// degraded in service, rather than a hand-built `ModelEntry` whose
+    /// degradation is also gated by latency samples the test never pushes. The
+    /// over-breaker arm is the positive control: without it a passing at-cap
+    /// arm would only prove the breaker never trips at all.
+    #[test]
+    fn test_breaker_does_not_trip_on_a_response_within_the_models_cap() {
+        let cap = 32768u32; // stepfun-ai/step-5-preview configured max_tokens
+        let breaker = 36000u32; // configured circuit_breaker.max_output_tokens
+        let cb = CircuitBreakerConfig {
+            max_output_tokens: breaker,
+            ..Default::default()
+        };
+        assert!(
+            breaker > cap,
+            "the breaker must sit above the model cap or it clips legitimate responses"
+        );
+
+        let over = ModelStatsStore::with_circuit_breaker(3000.0, cb.clone());
+        over.record_with_circuit_breaker("model-a", 500.0, true, breaker + 1, 0, true);
+        assert!(
+            over.snapshot()[0].degraded,
+            "a response above the breaker threshold must trip the breaker"
+        );
+
+        let at_cap = ModelStatsStore::with_circuit_breaker(3000.0, cb);
+        at_cap.record_with_circuit_breaker("model-a", 500.0, true, cap, 0, true);
+        assert!(
+            !at_cap.snapshot()[0].degraded,
+            "a response at the model's own cap is legitimate and must not trip the breaker"
+        );
+    }
+
     #[test]
     fn test_is_degraded_repetition_threshold() {
         let mut entry = ModelEntry::new();

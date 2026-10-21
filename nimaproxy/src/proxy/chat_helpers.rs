@@ -62,8 +62,22 @@ pub(crate) fn apply_model_params(json: &mut Value, params: &crate::config::Model
     if let Some(min_p) = params.min_p {
         json["min_p"] = Value::from(min_p);
     }
+    // The configured `max_tokens` is the proxy's CEILING for this model, and it
+    // stays authoritative: a request is never forwarded with a budget above it,
+    // so the upstream can never be asked for a limit the model does not have.
+    //
+    // What it is NOT is a floor. A caller that names a SMALLER budget keeps it:
+    // forwarding 32768 when the caller asked for 100 would silently spend the
+    // caller's budget on tokens they did not ask for. So the effective budget
+    // is min(caller's, the configured ceiling), and an absent budget takes the
+    // configured ceiling.
     if let Some(max_tokens) = params.max_tokens {
-        json["max_tokens"] = Value::from(max_tokens);
+        let requested = json.get("max_tokens").and_then(|v| v.as_u64());
+        let effective = match requested {
+            Some(requested) => requested.min(max_tokens as u64),
+            None => max_tokens as u64,
+        };
+        json["max_tokens"] = Value::from(effective);
     }
     if let Some(reasoning_budget) = params.reasoning_budget {
         json["reasoning_budget"] = Value::from(reasoning_budget);
@@ -141,6 +155,11 @@ pub(crate) fn non_streaming_usage(body: &[u8]) -> (Option<u32>, Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModelParams;
+    use crate::AppState;
+    use bytes::Bytes;
+    use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn usage_object_populates_both_token_counts() {
@@ -165,8 +184,127 @@ mod tests {
         assert_eq!(non_streaming_usage(body), (Some(7), None));
     }
 
-    /// The hoisted-Accept contract behind the per-attempt loop.
-    ///
+    #[test]
+    fn absent_max_tokens_gets_the_configured_default() {
+        let mut json = json!({
+            "model": "stepfun-ai/step-5-preview",
+            "messages": [{"role": "user", "content": "test"}]
+        });
+        let params = ModelParams {
+            max_tokens: Some(32768),
+            ..Default::default()
+        };
+        apply_model_params(&mut json, &params);
+        assert_eq!(json["max_tokens"], json!(32768));
+    }
+
+    /// The defect this pins: `apply_model_params` used to overwrite
+    /// `max_tokens` unconditionally, so a caller asking for 100000 was sent
+    /// 16384 with no indication that the request was clipped. The caller's
+    /// budget must survive the injection; only an ABSENT (or explicit null)
+    /// budget takes the configured default.
+    #[test]
+    fn a_client_budget_above_the_configured_ceiling_is_capped_at_it() {
+        // The configured value is a CEILING, not a default. A client asking for
+        // 100000 must not be forwarded 100000: the ceiling is the proxy's
+        // expression of what the model can serve, and forwarding a larger
+        // budget would ask the upstream for a limit it does not have.
+        let mut json = json!({
+            "model": "stepfun-ai/step-5-preview",
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 100000
+        });
+        let params = ModelParams {
+            max_tokens: Some(32768),
+            ..Default::default()
+        };
+        apply_model_params(&mut json, &params);
+        assert_eq!(json["max_tokens"], json!(32768));
+    }
+
+    /// The other half of the contract: the ceiling is not a FLOOR either. A
+    /// client that names a smaller budget keeps it, because forwarding 32768
+    /// when the caller asked for 512 would spend their budget on tokens they
+    /// did not ask for.
+    #[test]
+    fn explicit_client_max_tokens_below_the_ceiling_is_not_raised() {
+        let mut json = json!({
+            "model": "stepfun-ai/step-5-preview",
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 512
+        });
+        let params = ModelParams {
+            max_tokens: Some(32768),
+            ..Default::default()
+        };
+        apply_model_params(&mut json, &params);
+        assert_eq!(json["max_tokens"], json!(512));
+    }
+
+    /// An explicit null is "no budget named", so the default applies. This is
+    /// the JSON-compatible shape the rest of `apply_model_params` uses for
+    /// `stream`, and it keeps a null budget from being forwarded as null.
+    #[test]
+    fn null_max_tokens_takes_the_configured_default() {
+        let mut json = json!({
+            "model": "stepfun-ai/step-5-preview",
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": null
+        });
+        let params = ModelParams {
+            max_tokens: Some(32768),
+            ..Default::default()
+        };
+        apply_model_params(&mut json, &params);
+        assert_eq!(json["max_tokens"], json!(32768));
+    }
+
+    /// End-to-end through `resolve_model`, which is the path every non-racing
+    /// request takes: the body the proxy forwards carries what the caller asked
+    /// for, so the turn log's `request_max_tokens` reports the caller's value
+    /// rather than the configured default.
+    #[test]
+    fn resolve_model_keeps_a_client_budget_below_the_configured_ceiling() {
+        use crate::config::ModelCompat;
+        use crate::model_stats::ModelStatsStore;
+        use crate::proxy::messages::resolve_model;
+
+        let state = AppState::new(crate::AppStateParams {
+            keys: vec![],
+            target: "https://test.api.nvidia.com".to_string(),
+            router: None,
+            model_stats: ModelStatsStore::new(3000.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 8000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::from([(
+                "stepfun-ai/step-5-preview".to_string(),
+                ModelParams {
+                    max_tokens: Some(32768),
+                    ..Default::default()
+                },
+            )]),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: crate::loop_idle_timeout(),
+        });
+        let body = Bytes::from_static(
+            br#"{"model":"stepfun-ai/step-5-preview","messages":[{"role":"user","content":"hi"}],"max_tokens":4000}"#,
+        );
+        let (_, resolved) = resolve_model(body, &state);
+        let json: serde_json::Value = serde_json::from_slice(&resolved).expect("valid JSON body");
+        assert_eq!(json["max_tokens"], json!(4000));
+
+        // And the ceiling still binds: the same client asking for more than
+        // the model can serve is capped rather than forwarded.
+        let body = Bytes::from_static(
+            br#"{"model":"stepfun-ai/step-5-preview","messages":[{"role":"user","content":"hi"}],"max_tokens":40000}"#,
+        );
+        let (_, resolved) = resolve_model(body, &state);
+        let json: serde_json::Value = serde_json::from_slice(&resolved).expect("valid JSON body");
+        assert_eq!(json["max_tokens"], json!(32768));
+    }
+
     /// The retry loop computes the Accept header once, before the first
     /// attempt, from the request body, and reuses that value on every later
     /// attempt. The DEGRADED path is the one place the request body is
