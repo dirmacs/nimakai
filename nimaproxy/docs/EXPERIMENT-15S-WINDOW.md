@@ -577,7 +577,33 @@ rollback; §5.2's 4-step rollback therefore applies in full:
 The pre-window era's stall strings show both `15000` and `25000` window values; the post-rollback
 slice shows only the dynamic value.
 
-## 9.7 No threshold was changed by this revision
+## 9.7 The two invariants: one verified, one not decided
+
+**§3.2.1 (the mid-stream guard is decoupled from the first-byte rail) is VERIFIED.** 0 rows in the
+slice read `upstream body stalled after 15000ms`; the idle bound stayed at 180000 ms for the whole
+window.
+
+**§3.2.2 (`truncated_stream` is flat) is NOT DECIDED, and the measurement is within noise of the
+bar.** On the invariant's own denominator -- >=15 s attempts joined to their completion half, which
+is a per-ATTEMPT join and so does not depend on the broken turn-join -- the share is **2/57 = 3.5%**
+against the 2.5% baseline. That is above the bar, on a sample where the bar itself is 1.4 rows: 2
+rows is within noise of it, and is not evidence that the cut truncates in-flight generations. For
+scale, the same join over the pre-window part of the log gives 44/568 = 7.7%, and the raw counts are
+305 `truncated_stream` across 6807 completions against the window's 32 across 3903; the pre-window
+slice spans several timeout eras, so that is context rather than a like-for-like baseline, and the
+governing bar is A1's 4/157 = 2.5%.
+
+The invariant is the one that would have detected the cut truncating in-flight generations, so its
+being undecided is a real gap in this run's evidence. The decisive measurement is the new window,
+where the failure records carry their turn key and the per-turn join exists.
+
+**A trap this invariant sets, recorded because it is easy to fall into.** `failure_mode` is only ever
+set on **completion** records -- 0 of the slice's 4228 `ttfb` rows carry one. Dividing a count of
+`truncated_stream` records by a count of `ttfb` rows is therefore 0 by construction, whatever the
+streams did, and reading that 0 as a pass is a false one. The results artifact's reproduction steps
+scope the count to completion records and print the record-kind split so the artefact is visible.
+
+## 9.8 No threshold was changed by this revision
 
 Rev 2.2 changes **no threshold, no minimum, no invariant, and no rollback trigger.** The §3.1 bars
 (ttfb p95 <=19000/>21000, 81-bound recovery >=50%/<25%, salvage >=9.5%, retry firing >=97%, TTFT

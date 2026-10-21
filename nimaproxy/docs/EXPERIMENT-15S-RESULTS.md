@@ -62,10 +62,31 @@ metrics above use.
 | invariant | requirement | measured | verdict |
 |---|---|---|---|
 | §3.2.1 — the idle bound is decoupled from the first-byte rail | no row may read `upstream body stalled after 15000ms`; the idle bound must read 180000 ms | **0** such rows | **PASS** |
-| §3.2.2 — `truncated_stream` is flat | share at or below the 2.5% baseline | **0/4228 = 0.00%** | **PASS** |
+| §3.2.2 — `truncated_stream` is flat | share at or below the 2.5% baseline | **2/57 = 3.5%** of >=15 s attempts joined to their completion half (the protocol's own denominator, A1 §3's 4/157); raw counts 32 `truncated_stream` and 19 `length_cutoff` across 3903 completions | **NOT DECIDED** — above the 2.5% bar, but 2.5% of 57 is 1.4 rows, so 2 rows is within noise of it |
 
-Both invariants held throughout. The cut did not truncate in-flight generations and did not move the
-mid-stream guard.
+**§3.2.1 is verified.** 0 rows read `body stalled after 15000ms`, so the mid-stream guard did not
+move: the first-byte rail and the idle bound stayed decoupled for the whole window.
+
+**§3.2.2 could not be decided, and the honest reading is that it is within noise.** It is the one
+invariant that would have detected the cut truncating in-flight generations. On the protocol's own
+denominator — >=15 s attempts joined to their completion half, which is a per-ATTEMPT join and so
+does not depend on the broken turn-join — it is **2/57 = 3.5%** against the 2.5% baseline. That is
+above the bar, on a sample where the bar itself is 1.4 rows: 2 rows is within noise of it, and is
+not evidence either way.
+
+For scale, the same join over the pre-window part of the same log gives 44/568 = 7.7%, and the raw
+counts are 305 `truncated_stream` across 6807 completions against the window's 32 across 3903. The
+pre-window slice spans several timeout eras, so it is context rather than a like-for-like baseline;
+the bar that governs is A1's 4/157 = 2.5%.
+
+**A note on how this number can be got wrong.** `failure_mode` is only ever set on **completion**
+records — 0 of the slice's 4228 `ttfb` rows carry one. Dividing a count of `truncated_stream`
+records by a count of `ttfb` rows is therefore 0 by construction, whatever the streams did, and
+reading that 0 as a pass is a false one. The reproduction steps below scope the count to completion
+records and print the record-kind split so the artefact is visible rather than inviting it.
+
+The decisive measurement for this invariant is the new window, where the failure records carry their
+turn key and the per-turn join exists.
 
 ## Per-hour table (§4.5)
 
@@ -165,8 +186,28 @@ jq -s '
       stall_rows:           ($stall | length),
       retry_firing:         (([$stall[] | select(.error | test("retrying on another key"))] | length) / ($stall|length)),
       terminal_stalls:      ([$stall[] | select((.error | test("retrying on another key")) | not)] | length),
-      truncated_stream:     ([$ttfb[] | select(.failure_mode=="truncated_stream")] | length)
+      # failure_mode is ONLY ever set on completion records, so it must be counted
+      # there. Counting it over $ttfb is 0 by construction, whatever the streams did.
+      completions:          ([ .[] | select(.record_kind=="completion") ] | length),
+      truncated_stream:     ([ .[] | select(.record_kind=="completion" and .failure_mode=="truncated_stream") ] | length),
+      length_cutoff:       ([ .[] | select(.record_kind=="completion" and .failure_mode=="length_cutoff") ] | length),
+      # The invariant's own denominator: >=15 s attempts joined to their completion half.
+      ge15_joined:          ([ .[] | select(.record_kind=="ttfb" and (.latency_ms // 0) >= 15000) ] | length)
     }' /tmp/slice/window.jsonl
+
+# 3b. The §3.2.2 invariant's own denominator: >=15 s attempts joined to their
+#     completion half. This is a per-ATTEMPT join, so it does not depend on the
+#     broken turn-join, and it is what the 2/57 = 3.5% figure is.
+jq -s '
+  [ .[] | select(.record_kind=="ttfb" and (.latency_ms // 0) >= 15000) ] as $a
+  | [ .[] | select(.record_kind=="completion") ] as $c
+  | ($c | map({(.request_id): .}) | add) as $byid
+  | [ $a[] | select($byid[.request_id] != null) ] as $joined
+  | { joined: ($joined|length),
+      truncated: ([ $joined[] | select($byid[.request_id].failure_mode=="truncated_stream") ]|length),
+      share_pct: (100 * ([ $joined[] | select($byid[.request_id].failure_mode=="truncated_stream") ]|length) / ($joined|length)) }' \
+  /tmp/slice/window.jsonl
+# -> { "joined": 57, "truncated": 2, "share_pct": 3.508771929824561 }
 
 # 4. The grammar facts: one id per record, and the first two dot-parts are a time bucket.
 jq -r 'select(.record_kind=="ttfb") | .request_id' /tmp/slice/window.jsonl \
