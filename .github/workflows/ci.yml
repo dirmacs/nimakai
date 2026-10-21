@@ -58,7 +58,14 @@ jobs:
       - name: Unit tests
         env:
           RUSTUP_TOOLCHAIN: '1.99.0'
-        run: cargo test --locked --manifest-path nimaproxy/Cargo.toml --lib
+        run: |
+          set -e
+          cargo test --locked --manifest-path nimaproxy/Cargo.toml --lib
+          # The query binary carries its own copy of the turn-log schema -- the
+          # reader side -- and its own tests. Nothing else in CI compiles that
+          # target, so a break in it (or a schema change that only landed on
+          # the writer side) would reach main without anything failing.
+          cargo test --locked --manifest-path nimaproxy/Cargo.toml --bin nimaproxy-query
 
       - name: Lint
         env:

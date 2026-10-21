@@ -54,6 +54,11 @@ pub struct TurnLog {
     /// so a turn whose response made no tool call still logs a non-zero value
     /// here. Use `response_tool_calls` for a rate that means anything.
     pub tool_call_count: usize,
+    /// The REQUEST-side count under a name that says which side it is -- the
+    /// same number as `tool_call_count`, which keeps its historical meaning.
+    /// `None` on a line written before the field existed.
+    #[serde(default)]
+    pub request_tool_call_count: Option<u64>,
     /// Distinct logical tool calls the RESPONSE made, de-duplicated by the SSE
     /// delta's `index`. `Some(0)` means the response genuinely made no tool
     /// call; `None` means the response was not observed (first-byte record,
@@ -635,6 +640,7 @@ mod tests {
             status_code: 200,
             has_tool_calls: false,
             tool_call_count: 0,
+            request_tool_call_count: None,
             response_tool_calls: None,
             error: None,
             is_racing: false,
@@ -769,6 +775,33 @@ mod tests {
             parsed.response_tool_calls, None,
             "an absent key is 'not observed', never 0"
         );
+        assert_eq!(
+            parsed.request_tool_call_count, None,
+            "the request-side alias did not exist on that line either, and an absent count is unknown"
+        );
+        // The compatibility guarantee: the legacy key keeps its historical
+        // REQUEST-side meaning on an old line, so no pre-existing line is
+        // reinterpreted by the alias, and the old line correctly carries no
+        // response-side count.
+        assert_eq!(parsed.tool_call_count, 6);
+    }
+
+    /// The three tool-call fields name three different sides, and a line
+    /// written before the alias existed still reads the way it always did.
+    #[test]
+    fn the_tool_call_fields_name_different_sides() {
+        let mut rec = log(None, "completion");
+        rec.tool_call_count = 6;
+        rec.request_tool_call_count = Some(6);
+        rec.response_tool_calls = Some(1);
+        // The request side is the request's tool history; the response side is
+        // what the response made. They are not interchangeable.
+        assert_eq!(rec.tool_call_count, 6);
+        assert_eq!(rec.request_tool_call_count, Some(6));
+        assert_eq!(rec.response_tool_calls, Some(1));
+        // The response-side filter answers the response-side question.
+        assert!(Query::parse("response_tool_calls>=1").matches(&rec));
+        assert!(!Query::parse("response_tool_calls>=2").matches(&rec));
     }
 
     #[test]
