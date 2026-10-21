@@ -317,11 +317,19 @@ pub struct TurnRecord {
     pub request_tokens: Option<u32>,
     pub response_tokens: Option<u32>,
     /// Which agent loop this request belongs to, if a session could be
-    /// established. `None` means the request is not part of a tracked loop
-    /// (no session id was available), and error-path records intentionally
-    /// keep this `None`: the round was already counted by
-    /// [`LoopTracker::begin`], so the round count stays correct even though
-    /// those records cannot name the loop.
+    /// established. `None` means no session id was available for this request,
+    /// so it is not part of a tracked loop.
+    ///
+    /// Failure-path records carry the key too. A failed attempt is part of the
+    /// same turn as the attempt that follows it, and this key is what makes
+    /// that joinable: `request_id` is unique per RECORD, not per turn, so
+    /// without it a stalled attempt could not be attributed to the turn that
+    /// recovered from it.
+    ///
+    /// This does not change how rounds are counted. The tracker's counters
+    /// come from [`LoopTracker::begin`] and from the completion path, never
+    /// from these records, so a keyed failure record leaves `rounds`,
+    /// `completed_rounds` and `error_rounds` exactly as they were.
     pub loop_key: Option<LoopKey>,
     /// Whether the request carried a non-empty top-level `tools` array.
     pub request_has_tools: Option<bool>,
