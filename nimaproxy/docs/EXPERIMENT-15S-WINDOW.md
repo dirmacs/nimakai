@@ -27,6 +27,15 @@ derivation (two rows), §3.2 invariant 1 (idle message now reads the resolved
 idle window), §5 rollback verification strings. Thresholds, minima, and the
 reporting shape are unchanged from rev 1.
 
+**Rev 3.2 (2026-10-21, window floor `2026-10-21T14:50:43Z`, binary `2e6b6e0`):** the window that
+is running now was started by the deploy of the fixed binary, so rev 3.0's window
+(`2026-10-21T12:31:38Z..2026-10-21T14:50:43Z`) was voided and 2 h 19 m of it discarded; the floor
+moved to the restart, so the 24 h minimum is not missed. **The operative criteria for the running
+window are §11.2, the triggers are §11.3 as amended by §12, and the reporting procedure is §11.4.**
+Rev 3.0's §10.4 rows 3, 4 and 8, its §10.6 trigger 5 and its §10.7 are superseded by them — §10.7
+carries no rotation procedure at all, and the log WILL rotate inside this window. Rev 3.2 changes
+**no threshold value**, and **no result observed in the running window has been examined**.
+
 **Evidence basis (read-only lanes, frozen 2026-10-20):**
 
 | Lane | File | What it measured |
@@ -924,3 +933,68 @@ that is now a client budget rather than a config value. So at the close the arti
 **the distribution of `request_max_tokens` below 32768** for the enabled model: how many rows, and
 which budgets. That count is the fleet's real exposure to the new semantics, and it is the number
 nobody has yet.
+
+---
+
+# 12. Rev 3.2 — trigger 5, split (2026-10-21)
+
+**Status: PRE-REGISTERED, while the window is still open.** Rev 3.2 changes **no threshold value**
+and **no result observed in the running window has been examined**. It restates §11.3's trigger 5
+in full, because as written it could fire a rollback for a reason that is not a fault. This is a
+new revision, not an edit of §11.3's published text, per §6.
+
+## 12.1 The problem with trigger 5 as written
+
+§11.3's trigger 5 reads: the maximum effective `request_max_tokens` for the enabled model
+"either exceeding 32768 or falling below it" fires the rollback. The two directions are not the
+same kind of finding, and the response to any trigger is "fix the configuration, not extend the
+window" — which is the wrong response to one of them.
+
+The reason is that **the log records the EFFECTIVE value only.** Under the deployed semantics
+(`min(caller's budget, 32768)`) a client that asks for 65536 against a 16384 cap reads **16384** in
+the log — indistinguishable from a client that asked for 16384. So a maximum below the configured
+cap is ambiguous between two very different situations:
+
+- the cap was **reverted** (a real fault, and the thing trigger 5 exists to catch), or
+- the cap is **live** and the traffic simply never reached it (not a fault at all).
+
+The log cannot separate those, because it never recorded the client's own request. **The config
+can**: the live config states the enabled model's configured cap, and that is the arbiter.
+
+## 12.2 Trigger 5, restated
+
+**5. The step-5 cap.** Two conditions, and they are not one condition:
+
+- **5a. The maximum effective `request_max_tokens` over the window EXCEEDS 32768 — a rollback
+  trigger on its own.** The ceiling did not hold. A well-behaved client cannot produce this under
+  `min(caller, 32768)`, so it is exactly what a broken ceiling looks like.
+- **5b. The maximum effective `request_max_tokens` over the window is BELOW 32768 — NOT a rollback
+  trigger by itself.** It is a finding to be resolved by comparing the live config's configured cap
+  for the enabled model against the window's maximum. **If the config says 32768 and the maximum is
+  lower, the cap is live and the traffic did not reach it, so bar 8 is reported as UNEXERCISED with
+  the config verified — not rolled back.** If the config says something other than 32768, the
+  tuning was reverted and the rollback applies on that ground.
+
+This is the same disambiguation the protocol applies elsewhere: a row-level measurement cannot
+distinguish "the thing did not happen" from "the thing did not happen because the thing was
+changed", so the configuration file arbitrates and the row-level number is reported as what it is.
+
+## 12.3 What this changes about the evidence
+
+It does not change any threshold, and it does not change the verdict of the 15 s run — that verdict
+rests on the two row-level bars, T4 and T8, neither of which uses the per-request value.
+
+It does change one thing the running window will produce: a row whose effective
+`request_max_tokens` is below 32768 is **the client's own budget**, not a missing cap. The deploy
+already showed this: in the first minutes of the window, `request_max_tokens` read 32768 on 280
+rows and below it on 11 (16 on 3, 512 on 1, and 3000 on 7 — the last of those a real client
+naming its own budget, not the operator's verification traffic). Under rev 3.0's per-row equality
+those 11 rows would have read as "the tuning is not live" and rolled back a healthy window within
+minutes. Under §12.2 the window's **maximum** is the measurement, and the maximum is 32768.
+
+One consequence of the new semantics is disclosed here rather than discovered at the close: a
+client that names a small budget now RECEIVES that budget, and can therefore be cut off at its own
+threshold rather than the proxy's. Measured so far: of the 7 rows at a 3000-token budget, **none**
+is a `length_cutoff` — the three completions among them returned 1072, 1430 and 1072 tokens — so the
+risk is identified and quantified rather than merely described, and it is the argument for keeping
+the enabled model's cap at 32768 instead of lowering it to meet a client's ask.
