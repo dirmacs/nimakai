@@ -5,8 +5,15 @@ use nimaproxy::AppState;
 use std::sync::Arc;
 
 const NVIDIA_API_BASE: &str = "https://integrate.api.nvidia.com";
-const LIVE_MODEL_A: &str = "nvidia/nemotron-3-super-120b-a12b";
-const LIVE_MODEL_B: &str = "meta/llama-3.2-11b-vision-instruct";
+// Racing/latency pool, aligned with the live gateway's own [racing] models.
+// The pool previously held nvidia/nemotron-3-super-120b-a12b, which answers
+// 404 "Function ... Not found for account" for this account on inference, so
+// every racing test failed for an upstream reason rather than a proxy one.
+// Measured against the live catalog on 2026-10-21: nemotron-3-super 404s
+// (not provisioned for the account), nemotron-3-nano-30b-a3b is 410 Gone
+// (end-of-life 2026-09-01), and the pool below is what still answers.
+const LIVE_MODEL_A: &str = "stepfun-ai/step-5-preview";
+const LIVE_MODEL_B: &str = "nvidia/nemotron-3.5-lightning-30b-a3b";
 const LIVE_MODEL_C: &str = "stepfun-ai/step-5-preview";
 
 fn get_test_keys() -> Vec<(String, String)> {
@@ -18,7 +25,10 @@ fn get_test_keys() -> Vec<(String, String)> {
         .collect();
 
     if keys.is_empty() {
-        vec![("nvapi-YOUR_FIRST_KEY_HERE".to_string(), "key-0".to_string())]
+        panic!(
+            "e2e_live needs NVIDIA_API_KEY (comma-separated real keys) set; \
+             a placeholder key cannot exercise the live gateway"
+        );
     } else {
         keys.into_iter()
             .enumerate()
@@ -649,10 +659,22 @@ async fn test_e2e_racing_returns_2xx_winner() {
         status, 400,
         "racing forwarded NVIDIA 400 to client — status filtering broken"
     );
-    // Accept 200, 429 (all keys exhausted), 502 (all models failed)
+    // The test is named "returns_2xx_winner", so it must assert a 2xx and a
+    // winner. Accepting 429/502/503/504 here would let it pass with racing
+    // entirely broken (every model failed), which is a vacuous green: the
+    // previous assertion set passed against a pool whose only member 404'd.
+    // A live-upstream outage SHOULD fail this test — that is why the live
+    // targets run in their own CI job, so an upstream outage never blocks an
+    // unrelated commit.
+    assert_eq!(
+        status,
+        200,
+        "racing must return a 2xx winner, got {} (body: {})",
+        status,
+        &body_str.chars().take(200).collect::<String>()
+    );
     assert!(
-        status == 200 || status == 429 || status == 502 || status == 503 || status == 504,
-        "unexpected status {} from racing",
-        status
+        winner.is_some(),
+        "a 2xx from racing must carry the winning key label, got none"
     );
 }

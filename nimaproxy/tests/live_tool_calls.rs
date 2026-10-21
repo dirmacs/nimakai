@@ -13,22 +13,25 @@ use std::sync::Arc;
 
 const NVIDIA_API_BASE: &str = "https://integrate.api.nvidia.com";
 
-/// Load API keys from environment variable (comma-separated).
-/// Falls back to a dummy key if not set (causes 401, but allows test to run).
+/// Load API keys from `NVIDIA_API_KEY` (comma-separated).
+///
+/// The split MUST trim each entry and drop empties: an untrimmed key reaches
+/// upstream as `Bearer  nvapi-...`, which NVIDIA answers 403 Authorization
+/// failed, and an empty trailing entry from a trailing comma becomes a phantom
+/// key that 403s on every request. Returns an empty vec when the variable is
+/// unset or holds no usable key, so callers can skip loudly instead of
+/// silently running with a dummy key.
 fn get_test_keys() -> Vec<(String, String)> {
-    let env_keys = std::env::var("NVIDIA_API_KEY").unwrap_or_default();
-    let keys: Vec<&str> = env_keys.split(',').collect();
-    if keys.is_empty() || (keys.len() == 1 && keys[0].is_empty()) {
-        eprintln!(
-            "WARN: NVIDIA_API_KEY not set, using dummy key (tests will likely fail with 401)"
-        );
-        vec![("dummy".to_string(), "test".to_string())]
-    } else {
-        keys.iter()
-            .enumerate()
-            .map(|(i, k)| (k.to_string(), format!("key-{}", i)))
-            .collect()
-    }
+    let keys: Vec<String> = std::env::var("NVIDIA_API_KEY")
+        .unwrap_or_default()
+        .split(',')
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    keys.into_iter()
+        .enumerate()
+        .map(|(i, k)| (k, format!("key-{}", i)))
+        .collect()
 }
 
 fn live_unavailable(status: u16) -> bool {
@@ -37,6 +40,11 @@ fn live_unavailable(status: u16) -> bool {
 
 fn make_state() -> Arc<AppState> {
     let keys = get_test_keys();
+    assert!(
+        !keys.is_empty(),
+        "live_tool_calls needs NVIDIA_API_KEY (comma-separated real keys) set; \
+         refusing to run with a dummy key that can only produce 403/401 noise"
+    );
     let key_entries: Vec<KeyEntry> = keys
         .iter()
         .map(|(k, l)| KeyEntry {
@@ -98,7 +106,6 @@ async fn send_chat(
 // ============================================================================
 
 #[tokio::test]
-#[ignore]
 async fn test_tool_definition_with_empty_params() {
     let state = make_state();
     let model = "openai/gpt-oss-20b";
@@ -151,7 +158,6 @@ async fn test_tool_definition_with_empty_params() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_tool_definition_with_parameters() {
     let state = make_state();
     let model = "openai/gpt-oss-20b";
@@ -218,7 +224,6 @@ async fn test_tool_definition_with_parameters() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore]
 async fn test_tool_call_sequence() {
     let state = make_state();
     let model = "openai/gpt-oss-20b";
@@ -344,7 +349,6 @@ async fn test_tool_call_sequence() {
 /// Test that the proxy correctly transforms "tool" role messages for models that don't support it.
 /// The proxy should convert "tool" -> "assistant" while preserving tool_call_id.
 #[tokio::test]
-#[ignore]
 async fn test_tool_role_transformation() {
     let state = make_state();
     let model = "stepfun-ai/step-5-preview"; // This model may not support native "tool" role
@@ -418,7 +422,6 @@ async fn test_tool_role_transformation() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore]
 async fn test_assistant_message_with_tool_calls_missing_content() {
     let state = make_state();
     let model = "openai/gpt-oss-20b";
@@ -482,7 +485,6 @@ async fn test_assistant_message_with_tool_calls_missing_content() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_reasoning_field_stripped() {
     let state = make_state();
     let model = "openai/gpt-oss-20b";
@@ -531,7 +533,6 @@ async fn test_reasoning_field_stripped() {
 /// This occurs when the number of tool calls in the assistant message does not match
 /// the number of tool responses in subsequent messages.
 #[tokio::test]
-#[ignore]
 
 async fn test_mismatched_tool_calls_and_responses() {
     let state = make_state();

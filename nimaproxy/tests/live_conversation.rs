@@ -252,7 +252,9 @@ async fn test_live_tool_calling_variations() {
         eprintln!(
             "[tool-calling] Variation 1 - Status: {}, Response: {:?}",
             status,
-            response_text.as_ref().map(|s| s.chars().take(100).collect::<String>())
+            response_text
+                .as_ref()
+                .map(|s| s.chars().take(100).collect::<String>())
         );
 
         tool_results.push(("single_tool", status, response_text));
@@ -325,7 +327,9 @@ async fn test_live_tool_calling_variations() {
         eprintln!(
             "[tool-calling] Variation 2 - Status: {}, Response: {:?}",
             status,
-            response_text.as_ref().map(|s| s.chars().take(100).collect::<String>())
+            response_text
+                .as_ref()
+                .map(|s| s.chars().take(100).collect::<String>())
         );
 
         tool_results.push(("multiple_tools", status, response_text));
@@ -393,7 +397,9 @@ async fn test_live_tool_calling_variations() {
         eprintln!(
             "[tool-calling] Variation 3 - Status: {}, Response: {:?}",
             status,
-            response_text.as_ref().map(|s| s.chars().take(100).collect::<String>())
+            response_text
+                .as_ref()
+                .map(|s| s.chars().take(100).collect::<String>())
         );
 
         tool_results.push(("complex_params", status, response_text));
