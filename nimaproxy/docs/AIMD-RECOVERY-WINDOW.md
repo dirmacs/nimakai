@@ -11,12 +11,13 @@ report a flat headline while the failure mode flipped underneath it.
 ## 1. The measured state this window starts from
 
 Read live from the proxy's own counters and `/stats`, during the 24 h window that closed on
-2026-10-22:
+2026-10-22. This table is an **episode**, not the standing state: the pool collapsed hard for a
+bounded period and recovered.
 
 | quantity | value | source |
 |---|---|---|
-| per-key AIMD window | **1 of a configured 4**, on every key | `/stats` `max_in_flight` vs `configured_max_in_flight` |
-| effective window sum | **4 of 16** | `/stats` |
+| per-key AIMD window | **1 of a configured 4**, on every key, **at 06:55–07:00** | `/stats` `max_in_flight` vs `configured_max_in_flight` |
+| effective window sum | **4 of 16 at 06:55–07:00; 11 of 16 at 10:07; 12 of 16 at 10:3x** | `/stats`; dry-run capture 10:07, live reads 06:55 and 10:3x |
 | upstream 429 rate | **18.47 %** (836 / 4525) | counter delta `rate_limit_count / upstream_attempts` |
 | client requests admission-rejected | **47.5 %** | counter delta `(overload_rejects + no_key_rejects) / request_total` |
 | active keys | 0–2 of 4 across 40 samples over 160 s | `/stats` |
@@ -108,7 +109,7 @@ attribute it.
 
 Reported per key and over time:
 
-- the **per-key window sum** — the quantity that must move (4 of 16 today);
+- the **per-key window sum** — the quantity that must move (4 of 16 during the 06:55–07:00 episode, recovered to 11–12 of 16 by 10:07);
 - the **per-key benched fraction of time** — the term Change A acts on;
 - the three counter deltas of section 5;
 - the per-key 429 histogram of section 2, to check whether the even distribution holds.
