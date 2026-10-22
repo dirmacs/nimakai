@@ -200,7 +200,7 @@ at 18:52Z on 1305 successes gave the same curve to within one success at every p
 window is young and will tighten as it fills.
 
 **This curve was recomputed from scratch by a second, independent implementation**
-(`/tmp/cutoff-second-opinion/cutoff_curve.py`, written without reading
+(a second implementation, written without reading
 `derive_cutoff.py`), against a **pinned** snapshot so the numbers are reproducible: 1520
 successes / 127 stalls / 1647 attempts, sha256
 `315bf8eae2ab6c74dc701336e676234823d4a024f007b23cb64d31e90b07e740`, source mtime

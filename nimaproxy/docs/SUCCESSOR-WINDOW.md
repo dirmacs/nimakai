@@ -884,7 +884,8 @@ reader seeing which join produced it.
 `$OMP_SESSION_DIR/**/*.jsonl`. They are at
 `<client-session-dir>/<cwd-slug>/<ts>_<uuid>.jsonl`, indexed by
 `<client-agent-db>` (`threads.rollout_path`). The exporter takes the corpus
-root as `--sessions` and defaults to the real path.
+root as `--sessions` and **requires** it explicitly; the shipped tool bakes no
+host path, so the corpus location is supplied by the operator.
 
 **How the ratio is then computed.**
 
@@ -1053,6 +1054,7 @@ different (and wrong) band. `measure.py` computes it correctly; see §2.5.
 ## 10. The measurement script
 
 `design/measure.py` implements every metric in §2 and every gate in §6.
+Paths of the form `design/…` are relative to the crate root, `nimaproxy/`.
 
 ```
 measure.py SNAPSHOT FLOOR CEIL [--json]
