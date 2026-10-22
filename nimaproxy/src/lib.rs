@@ -1024,7 +1024,10 @@ mod ffi_tests {
     fn with_isolated_env<T>(pid: u16, f: impl FnOnce(&str, &str) -> T) -> T {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let unique_id = format!("nimtest-{:016x}-{:08x}", std::process::id(), counter);
-        let base_dir = std::path::PathBuf::from(format!("/tmp/{}", unique_id));
+        // Honour $TMPDIR (nimakai#9): hardcoded /tmp exhausts quota-limited
+        // tmpfs hosts; TMPDIR lets constrained hosts redirect, /tmp stays fallback.
+        let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        let base_dir = std::path::PathBuf::from(format!("{tmp}/{unique_id}"));
         std::fs::create_dir_all(&base_dir).expect("create temp dir");
 
         let pid_file = base_dir.join("nimaproxy.pid");
