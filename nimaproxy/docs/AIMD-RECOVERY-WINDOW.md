@@ -12,7 +12,7 @@ report a flat headline while the failure mode flipped underneath it.
 
 Read live from the proxy's own counters and `/stats`, during the 24 h window that closed on
 2026-10-22. This table is an **episode**, not the standing state: the pool collapsed hard for a
-bounded period and recovered.
+bounded period and recovered. It is also a **25 000 ms-era** measurement — see §7 for why the AIMD window's baseline is re-derived at its own floor.
 
 | quantity | value | source |
 |---|---|---|
@@ -141,6 +141,13 @@ The 45 000 ms long-timeout window — the blocked benefit side of the cutoff que
 this window, not after it (R3, 2026-10-22: the benefit side is measured first, on the floor binary,
 so no cutoff value is published until BOTH the Q1 verdict and a measured benefit side exist; R4 holds
 this change's deploy behind the 45 s run). The sequence is floor → 45 s benefit window → AIMD window.
+
+**Baseline consequence.** §1's baseline (window sum 4 of 16 in the episode, 18.47 % 429 rate,
+47.5 % admission-rejected) was measured in the 25 000 ms timeout era. A 45 s timeout converts
+25 s stalls into successes, so it changes the attempt population, the per-key concurrency
+pressure, the 429 rate and the admission-reject share. The AIMD window's baseline MUST therefore
+be re-derived at its own floor from that deploy's stats-floor.json; before/after is
+within-window, never §1's 25 s-era numbers against 45 s-era measurements.
 
 ## 8. What this change does NOT do
 
