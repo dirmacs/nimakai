@@ -365,17 +365,38 @@ are counted for reconciliation and are **not** folded into the turn population �
 denominator rule says a loop summary is not a model call.
 
 **Ordering rule.** "Recovery" and "salvage" are ordered quantities. A clean completion recorded
-*before* a turn's first stall is not a recovery from it. The implementation therefore compares the
-completing attempt's timestamp against the turn's first stall timestamp, and only counts a
-recovery when the completion is not earlier. This is stated here because an unordered join would
-inflate both metrics.
+*before* a turn's first stall is not a recovery from it. This is stated here because an unordered
+join would inflate both metrics.
+
+**The rule as implemented, exactly.** Both shipped implementations keep the turn's **EARLIEST**
+clean completion (the first `clean_stop` or `tool_calls` completion by timestamp) and count the
+turn as recovered only when that earliest clean completion is **not earlier than** the turn's
+first stall. In other words: *a turn is recovered when its earliest clean completion did not
+precede its first stall.*
+
+**The other reading, and its effect.** The wording in §8 below ("reaching a clean completion
+after their first stall") can also be read existentially — *the turn reached SOME clean
+completion after its first stall* — which would additionally count a turn that completed cleanly
+both before and after its stall. The two readings differ on such turns only. Measured on the
+live window's log:
+
+| metric | implemented rule (strict) | existential reading | difference |
+|---|---|---|---|
+| Q1 band recovery | 20/21 = 95.24 % | 21/21 = 100 % | 1 turn |
+| Q2 per-turn salvage | 123/190 = 64.74 % | 128/190 = 67.37 % | 5 turns |
+
+Every figure quoted in this document is the **implemented (strict)** rule, because that is what
+`measure.py` and the close script both compute. **Both readings pass both bars**, so no verdict
+in this document depends on the choice; the strict rule is reported because it is the one that
+produced the numbers. The design's wording is kept as the specification of the *intent*, and the
+implementation is the stricter of the two — a discrepancy worth stating rather than hiding.
 
 | metric | denominator | definition |
 |---|---|---|
 | `turns_total` | — | turns with ≥1 `ttfb` attempt in the slice |
 | `turns_with_a_stall_attempt` | `turns_total` | `T_stall`; the denominator for both Q2 and Q1's recovery |
 | `turns_with_a_keyed_stall_attempt` | `turns_with_a_stall_attempt` | the joinable subset; must equal the previous, or the schema fix has regressed |
-| `salvage_turns`, `salvage_rate_pct` | `turns_with_a_stall_attempt` | turns reaching a clean completion after their first stall — **Q2's answer** |
+| `salvage_turns`, `salvage_rate_pct` | `turns_with_a_stall_attempt` | turns whose **earliest** clean completion is not earlier than their first stall (the rule as implemented, above) — **Q2's answer** |
 | `recovered_turns`, `recovery_rate_pct` | `turns_with_a_stall_attempt` | turns reaching *any* completion after their first stall — reported beside salvage, because "recovered" and "salvaged cleanly" are different claims |
 | `stall_attempts_carrying_a_turn_key` | `stall_attempts_total` | the join's coverage over the population that matters |
 | `error_rows_with_turn_key` | `error_rows` | the same coverage over every error row, which is the schema fix's actual contract |
@@ -892,8 +913,10 @@ later window inherits a key, a shape and a bar rather than improvising them.
 
 - **Computed over:** turns containing at least one `ttfb` attempt with `15000 ≤ latency_ms <
   25000` **and** at least one stall attempt (`T_band ∩ T_stall`).
-- **Numerator:** those turns reaching a clean completion (`clean_stop` / `tool_calls`) after their
-  first stall.
+- **Numerator:** those turns whose **earliest** clean completion (`clean_stop` / `tool_calls`) is
+  not earlier than their first stall. (The existential reading of the same rule would count one
+  further turn on the live window — 21/21 rather than 20/21 — and changes no verdict; see the
+  ordering rule in §2.4.)
 - **Bar:** ≥50% pass, <25% fail (B2).
 - **Outcome space, so the answer cannot be unfalsifiable:**
 
@@ -936,7 +959,9 @@ measured benefit side exist.**
 ### Q2 — the per-turn salvage
 
 - **Computed over:** `T_stall`, all turns containing at least one stall attempt.
-- **Numerator:** those reaching a clean completion after their first stall.
+- **Numerator:** those whose **earliest** clean completion is not earlier than their first stall.
+  (The existential reading would count five further turns on the live window — 128/190 rather
+  than 123/190 — and changes no verdict; see the ordering rule in §2.4.)
 - **Bar:** ≥9.5% pass, <9.5% fail (B1), carried from A1 §4's `6/63`.
 - **Outcome space:**
 
