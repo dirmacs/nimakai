@@ -41,8 +41,14 @@ fn make_live_state() -> Option<Arc<AppState>> {
     }))
 }
 
-fn skip_if_no_api_key() -> bool {
-    get_api_key().is_none()
+/// Fail loudly when no live key is present. A live test that cannot run must
+/// FAIL, never pass: an early `return` records `ok` and the suite reads
+/// green while asserting nothing (nimakai#49). Run with NVIDIA_API_KEY set,
+/// or `cargo test -- --skip live_` to exclude the live targets explicitly.
+fn require_api_key(test: &str) {
+    if get_api_key().is_none() {
+        panic!("{test} needs NVIDIA_API_KEY set; refusing to pass vacuously (nimakai#49)");
+    }
 }
 
 fn extract_assistant_message(json: &serde_json::Value) -> Option<String> {
@@ -61,10 +67,7 @@ fn extract_assistant_message(json: &serde_json::Value) -> Option<String> {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_multi_turn_10_turns() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_multi_turn_10_turns: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_multi_turn_10_turns");
 
     let state = make_live_state().expect("Failed to create live state");
 
@@ -190,10 +193,7 @@ async fn test_live_multi_turn_10_turns() {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_tool_calling_variations() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_tool_calling_variations: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_tool_calling_variations");
 
     let state = make_live_state().expect("Failed to create live state");
 

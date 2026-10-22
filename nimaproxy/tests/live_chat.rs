@@ -45,8 +45,14 @@ fn make_live_state() -> Option<Arc<AppState>> {
 }
 
 /// Helper to check if test should be skipped
-fn skip_if_no_api_key() -> bool {
-    get_api_key().is_none()
+/// Fail loudly when no live key is present. A live test that cannot run must
+/// FAIL, never pass: an early `return` records `ok` and the suite reads
+/// green while asserting nothing (nimakai#49). Run with NVIDIA_API_KEY set,
+/// or `cargo test -- --skip live_` to exclude the live targets explicitly.
+fn require_api_key(test: &str) {
+    if get_api_key().is_none() {
+        panic!("{test} needs NVIDIA_API_KEY set; refusing to pass vacuously (nimakai#49)");
+    }
 }
 
 /// ============================================================================
@@ -54,10 +60,7 @@ fn skip_if_no_api_key() -> bool {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_chat_completions() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_chat_completions: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_chat_completions");
 
     let state = make_live_state().expect("Failed to create live state");
 
@@ -126,10 +129,7 @@ async fn test_live_chat_completions() {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_chat_streaming() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_chat_streaming: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_chat_streaming");
 
     let state = make_live_state().expect("Failed to create live state");
 
@@ -195,10 +195,7 @@ async fn test_live_chat_streaming() {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_chat_tool_calling() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_chat_tool_calling: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_chat_tool_calling");
 
     let state = make_live_state().expect("Failed to create live state");
 
@@ -282,10 +279,7 @@ async fn test_live_chat_tool_calling() {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_chat_multi_turn() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_chat_multi_turn: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_chat_multi_turn");
 
     let state = make_live_state().expect("Failed to create live state");
 
@@ -388,10 +382,7 @@ async fn test_live_chat_multi_turn() {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_chat_various_models() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_chat_various_models: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_chat_various_models");
 
     let state = make_live_state().expect("Failed to create live state");
 
