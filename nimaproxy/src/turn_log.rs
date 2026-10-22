@@ -210,6 +210,54 @@ pub struct TurnLog {
     /// keeps working.
     #[serde(default)]
     pub failure_mode: Option<String>,
+
+    /// TOP-LEVEL `id` of the upstream's response body, present on `completion`
+    /// records.
+    ///
+    /// This is the id the client echoes back as `responseId`, so it is the
+    /// only key that joins a client-side TTFT measurement to the proxy's own
+    /// completion record for the same turn. Without it the exact join is
+    /// impossible: the client's per-message ids and the proxy's log lines have
+    /// no shared column.
+    ///
+    /// Populated on BOTH paths: the streaming tap reads it off the upstream's
+    /// SSE frames, and the non-streaming path reads it off the assembled JSON
+    /// body. `None` means the upstream sent no top-level id (or the body was
+    /// unparsable), which is not the same fact as an empty id.
+    ///
+    /// **Deliberately absent from the ttfb record.** A first-byte record is
+    /// written before any response bytes exist, and on the non-streaming path
+    /// the id is only knowable once the whole body has been assembled, so a
+    /// ttfb-time field would be `None` on every non-streamed turn. The
+    /// completion record is the one that always can carry it, and it shares
+    /// `request_id` with its ttfb record, so the pair is still one joinable
+    /// turn.
+    ///
+    /// This is the response-BODY id, never a tool-call id. A tool-call id
+    /// (`choices[].delta.tool_calls[].id`, `call_...`) is a different object;
+    /// recording it here would populate the field with a value no client ever
+    /// echoes, which looks like success while joining to nothing.
+    ///
+    /// SCOPE: it is populated on the STREAMING completion record only. The
+    /// non-streaming path writes a first-byte record but NO completion record
+    /// at all, so there is no row there to carry the id - and its first-byte
+    /// record is written BEFORE the body is assembled, which is when the id
+    /// becomes knowable. The two facts are not interchangeable, so this field
+    /// is absent on the non-streaming path rather than populated there.
+    ///
+    /// The join's population is therefore the STREAMING subset of attempts.
+    /// Measured on the 2026-10-21 window, that subset is 3590 of 3603
+    /// first-byte records (the other 13 are non-streaming), so the omitted
+    /// fraction is 0.36 % - but a match rate must be published beside any
+    /// ratio computed over this field, because "no rows" and "no match" are
+    /// different facts.
+    // Skipped when absent, like the other fields where "not observed" and
+    // "observed as absent" are different answers: an absent
+    // `response_body_id` says the id was not observed on this record, and
+    // writing null would collapse that into the same shape as a field that
+    // exists and is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_id: Option<String>,
     /// Which agent loop this record belongs to, if any.
     ///
     /// `None` for ordinary per-request records and for records written before
@@ -359,6 +407,10 @@ pub struct TurnRecord {
     /// records, the failure paths, and non-streaming turns. This is the
     /// response-side reading; `tool_call_count` above is the request-side one.
     pub response_tool_calls: Option<u64>,
+    /// TOP-LEVEL id of the upstream's response body - what the client echoes
+    /// back as `responseId`. Only ever set on completion records; see
+    /// [`TurnLog::response_body_id`] for why the ttfb half cannot carry it.
+    pub response_body_id: Option<String>,
 }
 
 impl TurnLog {
@@ -473,6 +525,12 @@ impl TurnLog {
             request_has_tools: record.request_has_tools,
             request_max_tokens: record.request_max_tokens,
             response_tool_calls: record.response_tool_calls,
+            // Unknowable at first-byte time: on the non-streaming path the id
+            // exists only once the body is assembled, and on the streaming
+            // path not before the first frame is parsed. `TurnLog::new` builds
+            // the ttfb record, so the field starts `None` here and only the
+            // completion path fills it in.
+            response_body_id: None,
         }
     }
 }
@@ -773,6 +831,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
 
         assert_eq!(turn.requested_model, "auto");
@@ -810,6 +872,10 @@ mod tests {
                 request_has_tools: None,
                 request_max_tokens: None,
                 response_tool_calls: None,
+                // Not known on any path that has not observed the response body:
+                // ttfb and failure records, and the non-streaming body id is filled
+                // in where the body is assembled.
+                response_body_id: None,
             }
         }
 
@@ -871,6 +937,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
         let b = TurnLog::new(TurnRecord {
             requested_model: "auto".to_string(),
@@ -891,6 +961,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
         assert!(a.request_id.is_some(), "request_id must be populated");
         assert!(b.request_id.is_some(), "request_id must be populated");
@@ -921,6 +995,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
 
         turn.request_messages = vec![
@@ -977,6 +1055,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
 
         let json = serde_json::to_string(&turn).unwrap();
@@ -1007,6 +1089,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
         assert_eq!(turn.loop_key, None);
     }
@@ -1040,6 +1126,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         };
         let turn = TurnLog::new(record);
         // The legacy field keeps its meaning and its type: it is the request's
@@ -1086,6 +1176,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
         let json = serde_json::to_string(&turn).unwrap();
         let back: TurnLog = serde_json::from_str(&json).unwrap();
@@ -1119,6 +1213,10 @@ mod tests {
             request_has_tools: None,
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         })
     }
 
@@ -1533,6 +1631,10 @@ mod tests {
             request_has_tools: Some(true),
             request_max_tokens: None,
             response_tool_calls: Some(0),
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
         assert_eq!(
             turn.response_tool_calls,
@@ -1581,6 +1683,7 @@ mod tests {
             request_has_tools: Some(true),
             request_max_tokens: None,
             response_tool_calls: Some(distinct),
+            response_body_id: None,
         });
         assert_eq!(turn.response_tool_calls, Some(3));
         assert_ne!(

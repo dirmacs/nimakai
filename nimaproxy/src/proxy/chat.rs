@@ -270,6 +270,10 @@ pub async fn chat_completions(
                         // written before any stream is observed. `None` keeps "no tool calls" and
                         // "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     continue;
                 }
@@ -295,6 +299,10 @@ pub async fn chat_completions(
                     // written before any stream is observed. `None` keeps "no tool calls" and
                     // "not observed" distinguishable.
                     response_tool_calls: None,
+                    // Not known on any path that has not observed the response body:
+                    // ttfb and failure records, and the non-streaming body id is filled
+                    // in where the body is assembled.
+                    response_body_id: None,
                 });
                 return (
                     StatusCode::GATEWAY_TIMEOUT,
@@ -337,6 +345,10 @@ pub async fn chat_completions(
                     // written before any stream is observed. `None` keeps "no tool calls" and
                     // "not observed" distinguishable.
                     response_tool_calls: None,
+                    // Not known on any path that has not observed the response body:
+                    // ttfb and failure records, and the non-streaming body id is filled
+                    // in where the body is assembled.
+                    response_body_id: None,
                 });
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
@@ -424,6 +436,10 @@ pub async fn chat_completions(
                         // written before any stream is observed. `None` keeps "no tool calls" and
                         // "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     // Same-key re-attempt is pointless here: the key was just
                     // quarantined, so attempt 1 would stall in admission and
@@ -508,6 +524,10 @@ pub async fn chat_completions(
                             // written before any stream is observed. `None` keeps "no tool calls" and
                             // "not observed" distinguishable.
                             response_tool_calls: None,
+                            // Not known on any path that has not observed the response body:
+                            // ttfb and failure records, and the non-streaming body id is filled
+                            // in where the body is assembled.
+                            response_body_id: None,
                         });
                         // Next-key only, as above: re-sending a structurally
                         // rejected body on the same key cannot succeed.
@@ -635,6 +655,10 @@ pub async fn chat_completions(
                             // written before any stream is observed. `None` keeps "no tool calls" and
                             // "not observed" distinguishable.
                             response_tool_calls: None,
+                            // Not known on any path that has not observed the response body:
+                            // ttfb and failure records, and the non-streaming body id is filled
+                            // in where the body is assembled.
+                            response_body_id: None,
                         });
                         continue;
                     }
@@ -663,6 +687,10 @@ pub async fn chat_completions(
                         // written before any stream is observed. `None` keeps "no tool calls" and
                         // "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     return (
                         StatusCode::GATEWAY_TIMEOUT,
@@ -738,6 +766,11 @@ pub async fn chat_completions(
                 // non-streaming path parses them out of the assembled body
                 // below. `None` until one of the two fills them in.
                 let mut usage_tokens: (Option<u32>, Option<u32>) = (None, None);
+                // The upstream's response-body id, the id the client echoes
+                // back as `responseId`. The streaming path reads it off the
+                // tap's frames; the non-streaming path parses it out of the
+                // assembled body. `None` until one of the two fills it in, and
+                // `None` stays the honest answer if neither did.
                 let body = if is_stream {
                     // Only the STREAMING branch opts in to the in-band error
                     // frame. The non-streaming branch below drives the SAME
@@ -841,6 +874,10 @@ pub async fn chat_completions(
                                 // written before any stream is observed. `None` keeps "no tool calls" and
                                 // "not observed" distinguishable.
                                 response_tool_calls: None,
+                                // Not known on any path that has not observed the response body:
+                                // ttfb and failure records, and the non-streaming body id is filled
+                                // in where the body is assembled.
+                                response_body_id: None,
                             });
                             continue;
                         }
@@ -869,6 +906,10 @@ pub async fn chat_completions(
                             // written before any stream is observed. `None` keeps "no tool calls" and
                             // "not observed" distinguishable.
                             response_tool_calls: None,
+                            // Not known on any path that has not observed the response body:
+                            // ttfb and failure records, and the non-streaming body id is filled
+                            // in where the body is assembled.
+                            response_body_id: None,
                         });
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
@@ -881,7 +922,6 @@ pub async fn chat_completions(
                     // read from the bytes the client is about to receive rather
                     // than from the stream. Absent means `None`, never 0.
                     usage_tokens = non_streaming_usage(&collected.concat());
-
                     Body::from(collected.concat())
                 };
 
@@ -944,6 +984,10 @@ pub async fn chat_completions(
                     // written before any stream is observed. `None` keeps "no tool calls" and
                     // "not observed" distinguishable.
                     response_tool_calls: None,
+                    // Not known on any path that has not observed the response body:
+                    // ttfb and failure records, and the non-streaming body id is filled
+                    // in where the body is assembled.
+                    response_body_id: None,
                 });
                 let tap_for_completion = tap.clone();
 
@@ -1032,6 +1076,7 @@ pub async fn chat_completions(
                                 abort_reason,
                                 max_gap_ms: outcome.max_gap_ms,
                                 ended_by: outcome.ended_by.as_str().to_string(),
+                                response_body_id: outcome.response_body_id,
                             },
                             &state.loop_tracker,
                             &state.gateway_metrics,

@@ -844,6 +844,59 @@ async fn non_streaming_usage_body_populates_token_counts() {
     assert_eq!(mine[0].response_tokens, Some(11));
 }
 
+/// The completion record carries the upstream's response-body id, so the
+/// exact client/proxy TTFT join becomes possible.
+///
+/// The join is `client.responseId == log.response_body_id`. The client sees the
+/// upstream's own per-message id (relayed through the proxy), and before this
+/// field that id appeared in NO turn-log column, so a client-side TTFT reading
+/// could not be matched to the proxy record for the same turn: measured on the
+/// live log, 3733 client response_ids against 70516 log lines produced zero
+/// matches.
+///
+/// The fixture carries BOTH ids in the same frame: the top-level response id
+/// and a tool-call id nested in `choices[].delta.tool_calls[]`. A tap that read
+/// the nested id would still populate the field and still pass an "is Some"
+/// assertion, so this names the expected value AND denies the wrong one.
+#[tokio::test]
+async fn streaming_completion_carries_the_response_body_id_not_a_tool_call_id() {
+    let first = "data: {\"id\":\"chatcmpl-8e3aa1b2c3\",\"object\":\"chat.completion.chunk\",\"model\":\"MODEL\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc123\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}\n\n";
+    let second = "data: {\"id\":\"chatcmpl-8e3aa1b2c3\",\"choices\":[{\"index\":0,\"delta\":{\"function\":{\"arguments\":\"echo hi\"}},\"finish_reason\":\"tool_calls\"}]}\n\n";
+    let sse = format!("{first}{second}data: [DONE]\n\n").replace("MODEL", MODEL);
+    let (_server, url) = mock_upstream(&sse).await;
+    let log = LogFile::new();
+    let state = make_state(url);
+
+    let (_, request_id) = log.turn(state, turn_body()).await;
+
+    let completion = log.completion_for(&request_id).await;
+    assert_eq!(
+        completion.response_body_id.as_deref(),
+        Some("chatcmpl-8e3aa1b2c3"),
+        "the completion record must carry the response-body id the client echoes"
+    );
+    assert_ne!(
+        completion.response_body_id.as_deref(),
+        Some("call_abc123"),
+        "a tool-call id is a different object; recording it would join to nothing on the client side"
+    );
+
+    // The paired first-byte record must not carry the field at all: a first
+    // byte says nothing about which response body it belongs to.
+    let ttfb = log
+        .records()
+        .into_iter()
+        .find(|r| {
+            r.request_id.as_deref() == Some(request_id.as_str())
+                && r.record_kind == TurnLog::RECORD_KIND_TTFB
+        })
+        .unwrap_or_else(|| panic!("no ttfb record for request {request_id}"));
+    assert_eq!(
+        ttfb.response_body_id, None,
+        "the first-byte record must not fabricate a response-body id"
+    );
+}
+
 /// A turn whose upstream reports no usage must record no token counts.
 ///
 /// "The upstream said nothing" and "the upstream said 0" are different facts;

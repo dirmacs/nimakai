@@ -152,6 +152,8 @@ pub(crate) fn non_streaming_usage(body: &[u8]) -> (Option<u32>, Option<u32>) {
     (prompt, completion)
 }
 
+/// Read the TOP-LEVEL response-body id out of an assembled non-streaming
+/// completion body.
 #[cfg(test)]
 mod tests {
     use super::*;
