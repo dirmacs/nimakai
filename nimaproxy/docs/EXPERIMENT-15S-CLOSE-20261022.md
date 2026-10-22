@@ -99,8 +99,8 @@ what the estate's armed close will score over its full 24 h; the numbers here st
 | 2 | ttfb p50 | reported, no bar | 3787 ms | **REPORTED** |
 | 3 | terminal-504 share and completion share | &lt;=43.9% and completion share &gt;=53.5% | 105 terminal-504 of 214 attempts &gt;=15 s = 49.07%; completion share 50.93% (109 clean of 214) | **FAIL (terminal FAIL, completion FAIL)** |
 | 4 | truncated_stream share | &lt;=2.5% of the &gt;=15 s attempts with a completion half | 0 of 109 = 0.00% | **PASS** |
-| 5 | per-turn recovery rate | &gt;=25% of the turns with &gt;=1 stall attempt | 29 of 32 turns = 90.62% | **PASS** |
-| 6 | per-turn salvage rate | &gt;=9.5% of the turns with &gt;=1 stall attempt | 24 of 32 turns = 75.00% | **PASS** |
+| 5 | per-turn recovery rate | &gt;=25% of the turns with &gt;=1 stall attempt | 80 of 84 turns = 95.24% | **PASS** |
+| 6 | per-turn salvage rate | &gt;=9.5% of the turns with &gt;=1 stall attempt | 72 of 84 turns = 85.71% | **PASS** |
 | 7 | request-side vs response-side tool-call count | the two must not be conflated | request-side max 350 (sum 108972); response-side max 6 (sum 1303) | **REPORTED side by side** |
 | 8 | the step-5 cap is effective | no row exceeds 32768 and the maximum effective request_max_tokens equals 32768 | max effective 32768; 0 rows over 32768 | **PASS** |
 | 9 | the breaker is not tripped inside the cap | no breaker trip on a response within 32768 tokens | not observable in the turn log &mdash; see below | **NOT MEASURED** |
@@ -113,8 +113,8 @@ what the estate's armed close will score over its full 24 h; the numbers here st
 | 2 | ttfb p50 | reported, no bar | 4733 ms | **REPORTED** |
 | 3 | terminal-504 share and completion share | &lt;=43.9% and completion share &gt;=53.5% | 702 terminal-504 of 1372 attempts &gt;=15 s = 51.17%; completion share 48.03% (659 clean of 1372) | **FAIL (terminal FAIL, completion FAIL)** |
 | 4 | truncated_stream share | &lt;=2.5% of the &gt;=15 s attempts with a completion half | 10 of 669 = 1.49% | **PASS** |
-| 5 | per-turn recovery rate | &gt;=25% of the turns with &gt;=1 stall attempt | 126 of 128 turns = 98.44% | **PASS** |
-| 6 | per-turn salvage rate | &gt;=9.5% of the turns with &gt;=1 stall attempt | 91 of 128 turns = 71.09% | **PASS** |
+| 5 | per-turn recovery rate | &gt;=25% of the turns with &gt;=1 stall attempt | 376 of 527 turns = 71.35% | **PASS** |
+| 6 | per-turn salvage rate | &gt;=9.5% of the turns with &gt;=1 stall attempt | 350 of 527 turns = 66.42% | **PASS** |
 | 7 | request-side vs response-side tool-call count | the two must not be conflated | request-side max 380 (sum 318412); response-side max 8 (sum 5027) | **REPORTED side by side** |
 | 8 | the step-5 cap is effective | no row exceeds 32768 and the maximum effective request_max_tokens equals 32768 | max effective 32768; 0 rows over 32768 | **PASS** |
 | 9 | the breaker is not tripped inside the cap | no breaker trip on a response within 32768 tokens | not observable in the turn log &mdash; see below | **NOT MEASURED** |
@@ -128,8 +128,8 @@ record, not as a verdict):
 | 2 | ttfb p50 | reported, no bar | 4606 ms | **REPORTED** |
 | 3 | terminal-504 share and completion share | &lt;=43.9% and completion share &gt;=53.5% | 807 terminal-504 of 1586 attempts &gt;=15 s = 50.88%; completion share 48.42% (768 clean of 1586) | **FAIL (terminal FAIL, completion FAIL)** |
 | 4 | truncated_stream share | &lt;=2.5% of the &gt;=15 s attempts with a completion half | 10 of 778 = 1.29% | **PASS** |
-| 5 | per-turn recovery rate | &gt;=25% of the turns with &gt;=1 stall attempt | 155 of 160 turns = 96.88% | **PASS** |
-| 6 | per-turn salvage rate | &gt;=9.5% of the turns with &gt;=1 stall attempt | 115 of 160 turns = 71.88% | **PASS** |
+| 5 | per-turn recovery rate | &gt;=25% of the turns with &gt;=1 stall attempt | 456 of 611 turns = 74.63% | **PASS** |
+| 6 | per-turn salvage rate | &gt;=9.5% of the turns with &gt;=1 stall attempt | 422 of 611 turns = 69.07% | **PASS** |
 | 7 | request-side vs response-side tool-call count | the two must not be conflated | request-side max 380 (sum 427384); response-side max 8 (sum 6330) | **REPORTED side by side** |
 | 8 | the step-5 cap is effective | no row exceeds 32768 and the maximum effective request_max_tokens equals 32768 | max effective 32768; 0 rows over 32768 | **PASS** |
 | 9 | the breaker is not tripped inside the cap | no breaker trip on a response within 32768 tokens | not observable in the turn log &mdash; see below | **NOT MEASURED** |
@@ -145,9 +145,20 @@ canonical filter's number.
 **"Terminal" and "stall" are two different populations.** Bar 3's denominator is latency-based:
 every `ttfb` attempt with `latency_ms >= 15000` (1586 rows in the §11 slice), which in this
 window includes slow successes inside the dynamic window's [15 s, 25 s) band. The per-hour
-"stall rows" column is error-based (the timeout wordings). The 43.9% baseline was measured on
-the 15 s cut's population, so the terminal share measured here is on a different base and the two
-must not be compared as like for like.
+"stall rows" column is error-based (the timeout wordings). The bars themselves
+(&lt;=43.9% terminal-504, &gt;=53.5% completion share) are **A1 §3's pre-experiment baseline,
+carried from §5.1 trigger 8**, measured while the 15 s override was absent &mdash; that is, under
+the same dynamic-25 s first-byte window this run uses, over the same latency-based
+"&gt;=15 s attempts" denominator §11.2 restates. The 84.8% / 14.7% figures are the **15 s run's own
+measurements**, not the baseline's. So bar 3 is like-for-like in regime, and 50.88% terminal
+(51.17% in stage-6) with a 48.42% completion share (48.03% in stage-6) is a genuine FAIL of both
+clauses. The caveat that does apply: A1's baseline window spans 22Z&ndash;09Z with zero-traffic
+hours, so it is not a diurnal-24 h slice like this one.
+
+**These are §11-protocol bars, not the estate's Q1/Q2/Q3.** The terminal-504 finding above is
+therefore a handover to the estate, whose armed close scores the successor window's Q1/Q2/Q3
+from `measure.py` &mdash; a different metric set with different key names, not a trigger of that
+window.
 
 **Bar 9 is not measurable from the turn log.** The log's completion vocabulary is
 `tool_calls`, `clean_stop`, `length_cutoff`, `truncated_stream` &mdash; there is no breaker label
@@ -162,7 +173,14 @@ percentile is the value at rank `ceil(p/100 * n)`, 1-based. Hours are UTC bucket
 own timestamp. The final hour is **partial** &mdash; the slice ends at 14:50:43Z, so the 14Z
 bucket covers 50 minutes, not 60.
 
-| hour (UTC) | ttfb n | p50 ms | p95 ms | stall rows | terminal | terminal share |
+Column definitions, so the two counts are not read as one: **"stall rows"** is error-based over
+`ttfb` rows &mdash; the canonical `no bytes within` wording **plus** the
+`upstream timeout after 25000ms` variant (the union, 807 rows over the whole §11 slice).
+**"terminal share"** is `stall rows` divided by **that hour's `ttfb n`**, not by the hour's stall
+rows. The prior artifact's column of the same name divides by the hour's stall rows, so the two
+tables carry different quantities under one name and must not be compared cell by cell.
+
+| hour (UTC) | ttfb n | p50 ms | p95 ms | stall rows | terminal | terminal share (of ttfb n) |
 |---|---:|---:|---:|---:|---:|---:|
 | 2026-10-21T18 | 380 | 3076 | 25074 | 19 | 19 | 5.0% |
 | 2026-10-21T19 | 674 | 2521 | 21880 | 26 | 26 | 3.9% |
@@ -241,16 +259,70 @@ jq -r 'select(.timestamp <= "2026-10-21T18:11:43.607673689Z") | .timestamp' "$SN
 jq -r 'select(.timestamp >  "2026-10-21T18:11:43.607673689Z") | .timestamp' "$SNAP" | head -1
 ```
 
-The per-turn metrics (bars 5 and 6) need the turn key, which is `loop_key.session_id`:
+The per-turn metrics (bars 5 and 6) need the turn key and the stall population, and both are
+defined by the protocol rather than chosen here:
 
-```bash
-jq -s '
-  [ .[] | select(.record_kind=="ttfb") ]
-  | map(select((.latency_ms|tonumber) >= 15000))
-  | map({rid: .request_id, ts: .timestamp, turn: .loop_key.session_id})
-  | group_by(.turn) | {stall_turns: length}
-' /tmp/stage6-slice.jsonl
+- **Turn key** &mdash; `SUCCESSOR-WINDOW.md` §2.4: "`loop_key` is `{session_id, loop_seq,
+  round_index}`. It is canonicalised as JSON with sorted keys." So the turn is the **full
+  triple**, not `session_id` alone. In the §11 slice all 16,100 rows carry a `loop_key`, and
+  368 of its 392 distinct `session_id` values hold more than one triple (up to 2,291), so
+  grouping by `session_id` merges turns the protocol separates: 392 sessions vs **8,665**
+  distinct triples.
+- **Stall population** &mdash; `T_stall`, the set of turns containing at least one `ttfb` attempt
+  whose `error` matches the canonical `no bytes within` wording (§11.4's own command). The
+  latency-based `latency_ms >= 15000` predicate is **bar 3's** denominator and must not be
+  substituted here.
+
+```python
+CANON = "no bytes within"
+CLEAN = {"clean_stop", "tool_calls"}   # failure_mode, not finish_reason
+
+first_stall, last_comp, first_clean = {}, {}, {}
+for r in slice_rows:
+    lk = r["loop_key"]
+    turn = (lk["session_id"], lk["loop_seq"], lk["round_index"])
+    ts = r["timestamp"]
+    if r["record_kind"] == "ttfb" and CANON in (r.get("error") or ""):
+        if turn not in first_stall or ts < first_stall[turn]:
+            first_stall[turn] = ts
+    if r["record_kind"] == "completion":
+        if turn not in last_comp or ts > last_comp[turn]:
+            last_comp[turn] = ts
+        if (r.get("failure_mode") or "") in CLEAN:
+            if turn not in first_clean or ts < first_clean[turn]:
+                first_clean[turn] = ts
+
+stall_turns = list(first_stall)
+# both are ORDERED: the completion must come at/after the turn's first stall.
+# bar 5 uses the LAST completion half; bar 6 uses the EARLIEST clean completion
+# (measure.py keeps the first clean, not the last).
+recovered = [t for t in stall_turns if last_comp.get(t, "") >= first_stall[t]]
+salvaged  = [t for t in stall_turns if first_clean.get(t, "") >= first_stall[t]]
+assert set(salvaged) <= set(recovered)   # recovery is a superset of salvage
 ```
+
+Two corrections this block records against the first published version of this document, so a
+reader comparing the two can see exactly what changed:
+
+1. **The turn key.** The first version grouped by `loop_key.session_id` alone, which merges
+   turns the protocol separates. On the correct triple the mixed-slice `T_stall` is **611**
+   turns, not the 160 the first version published.
+2. **The stall predicate.** The first version pre-filtered attempts by
+   `latency_ms >= 15000` &mdash; bar 3's latency denominator &mdash; instead of the error-based
+   stall wording §11.2 defines for `T_stall`. That is why the first version's turn counts
+   reproduced as 32 / 128 / 160 under the latency predicate and 132 under the error predicate
+   on the `session_id` key, while the protocol-correct combination gives 84 / 527 / 611.
+3. **Which clean completion counts as the salvage.** `measure.py` keeps the turn's **earliest**
+   clean completion (`turn_clean` keeps first), not the last, so bar 6 above uses the earliest.
+   The two readings disagree on **23 turns** in the mixed slice (7 in stage-4, 16 in stage-6):
+   turns whose earliest clean completion *precedes* the first stall while a later clean
+   completion follows it. Taking the latest instead would report 445 salvaged of 611 (72.83%)
+   rather than the protocol's 422 (69.07%). Both readings are published here so the choice is
+   visible rather than implicit; the tables carry the protocol's earliest-clean reading.
+
+Bars 5 and 6 still **PASS** in every era on the corrected definitions, so the correction changes
+the denominators rather than the verdicts &mdash; but the first version's numbers were computed
+on definitions the protocol does not define, and are superseded by the table above.
 
 Two independent implementations (a Python pass and the jq above) were cross-checked against the
 **previous** window's published numbers: both reproduce its population (374), terminal-504 count
