@@ -136,6 +136,10 @@ pub(crate) async fn solo_model_fallback(
                         // written before any stream is observed. `None` keeps "no tool calls" and
                         // "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     last_error = Some((StatusCode::BAD_GATEWAY, msg));
                     break;
@@ -173,6 +177,10 @@ pub(crate) async fn solo_model_fallback(
                         // written before any stream is observed. `None` keeps "no tool calls" and
                         // "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
                     break;
@@ -236,6 +244,10 @@ pub(crate) async fn solo_model_fallback(
                         // written before any stream is observed. `None` keeps "no tool calls" and
                         // "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     last_error = Some((StatusCode::BAD_GATEWAY, msg));
                     break;
@@ -273,6 +285,10 @@ pub(crate) async fn solo_model_fallback(
                         // written before any stream is observed. `None` keeps "no tool calls" and
                         // "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     last_error = Some((StatusCode::GATEWAY_TIMEOUT, msg));
                     break;
@@ -317,6 +333,10 @@ pub(crate) async fn solo_model_fallback(
                         // written before any stream is observed. `None` keeps "no tool calls" and
                         // "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     last_error = Some((
                         StatusCode::from_u16(embedded_code).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -385,6 +405,10 @@ pub(crate) async fn solo_model_fallback(
                 // written before any stream is observed. `None` keeps "no tool calls" and
                 // "not observed" distinguishable.
                 response_tool_calls: None,
+                // Not known on any path that has not observed the response body:
+                // ttfb and failure records, and the non-streaming body id is filled
+                // in where the body is assembled.
+                response_body_id: None,
             });
             if ok {
                 state.gateway_metrics.record_racing_win(&model_id);

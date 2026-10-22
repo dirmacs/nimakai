@@ -114,6 +114,15 @@ pub struct SseTap {
 struct SseTapInner {
     /// Last non-null, non-empty `finish_reason` seen in `choices[0]`.
     finish_reason: Mutex<Option<String>>,
+    /// TOP-LEVEL `id` of the upstream's response body, as carried on the SSE
+    /// frames. First frame that carries one wins: every fragment of a single
+    /// completion repeats the same response id, so the first reading is the
+    /// completion's id, and a later frame cannot carry a different one.
+    ///
+    /// This is the response-body id, never a tool-call id. A tool-call id
+    /// lives at `choices[].delta.tool_calls[].id` and is a different object;
+    /// see [`SseFrame::id`].
+    response_body_id: Mutex<Option<String>>,
     /// Sum of characters in `choices[0].delta.content` across frames.
     content_chars: AtomicU64,
     /// Sum of characters in `choices[0].delta.reasoning_content` across
@@ -287,6 +296,16 @@ impl SseTap {
         let Ok(frame) = serde_json::from_str::<SseFrame>(payload) else {
             return;
         };
+        // The TOP-LEVEL response id, taken from the frame object itself rather
+        // than from any nested choice/tool-call entry. First one wins, so a
+        // stream whose frames repeat the id records it once and a stream whose
+        // first frame omits it picks it up from the first frame that has it.
+        if let Some(id) = frame.id.filter(|i| !i.is_empty()) {
+            let mut slot = self.inner.response_body_id.lock();
+            if slot.is_none() {
+                *slot = Some(id);
+            }
+        }
         // The usage frame arrives with `choices: []` in most upstreams, so the
         // choice-only read below would drop it. `include_usage` frames carry
         // the whole request's accounting; record whatever the upstream chose
@@ -364,6 +383,22 @@ impl SseTap {
     /// Last non-null `finish_reason` observed, if any.
     pub fn finish_reason(&self) -> Option<String> {
         self.inner.finish_reason.lock().clone()
+    }
+
+    /// TOP-LEVEL `id` of the upstream's response body, if any frame carried
+    /// one.
+    ///
+    /// This is the id the client echoes back as `responseId`, so it is the
+    /// only key that joins a client-side TTFT measurement to the proxy's
+    /// completion record. `None` means the upstream sent no top-level frame
+    /// id, which is not the same as the id being zero or empty.
+    ///
+    /// It is deliberately NOT the tool-call id
+    /// (`choices[].delta.tool_calls[].id`): that key joins tool-call
+    /// fragments, not completions, and substituting it here would populate
+    /// this field with a value that can never match a client `responseId`.
+    pub fn response_body_id(&self) -> Option<String> {
+        self.inner.response_body_id.lock().clone()
     }
 
     pub fn content_chars(&self) -> u64 {
@@ -463,6 +498,7 @@ impl SseTap {
     pub fn outcome(&self) -> SseOutcome {
         SseOutcome {
             finish_reason: self.finish_reason(),
+            response_body_id: self.response_body_id(),
             content_chars: self.content_chars(),
             reasoning_chars: self.reasoning_chars(),
             tool_call_count: self.tool_call_count(),
@@ -482,6 +518,10 @@ impl SseTap {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SseOutcome {
     pub finish_reason: Option<String>,
+    /// TOP-LEVEL response-body id carried on the upstream's SSE frames, if any
+    /// frame carried one. The client echoes this back as `responseId`, so it
+    /// is what joins a client-side TTFT reading to this record.
+    pub response_body_id: Option<String>,
     pub content_chars: u64,
     /// Sum of characters in `choices[0].delta.reasoning_content` across
     /// frames. 0 when the upstream emitted no reasoning deltas.
@@ -689,6 +729,17 @@ impl Drop for TappedStream {
 /// same as the ones this proxy emits itself.
 #[derive(Debug, Deserialize)]
 struct SseFrame {
+    /// The TOP-LEVEL response id of this frame's completion - the `"id"` the
+    /// upstream put on the response body, which is exactly what the client
+    /// echoes back as `responseId`.
+    ///
+    /// This is NOT `choices[].delta.tool_calls[].id`: that is a per-tool-call
+    /// id (`call_...`) used as a de-duplication key for fragments. The two
+    /// are different objects and must never be substituted for one another:
+    /// a completion record carrying a tool-call id in this field would join
+    /// to nothing on the client side while looking like success.
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     choices: Vec<SseChoice>,
     /// Terminal usage accounting, sent by upstreams the client asked for
@@ -1267,6 +1318,60 @@ mod tests {
         assert_eq!(
             outcome.tool_call_distinct, 1,
             "one logical call: the continuations must join the first fragment by index"
+        );
+    }
+    /// The tap records the TOP-LEVEL response id, which is the id the client
+    /// echoes back as `responseId`.
+    ///
+    /// The fixture deliberately carries BOTH ids in the same frame: the
+    /// top-level response-body id and a tool-call id inside
+    /// `choices[].delta.tool_calls[]`. A tap that read the nested id would
+    /// still populate the field and would still pass a "is Some" assertion,
+    /// so the assertion names the expected value AND denies the wrong one.
+    /// That is the difference between a field that joins to the client and a
+    /// field that looks populated while joining to nothing.
+    #[tokio::test]
+    async fn response_body_id_is_the_frame_top_level_id_not_the_tool_call_id() {
+        let f1 = "data: {\"id\":\"chatcmpl-8e3aa1b2c3\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc123\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}\n\n";
+        let f2 = "data: {\"id\":\"chatcmpl-8e3aa1b2c3\",\"choices\":[{\"index\":0,\"delta\":{\"function\":{\"arguments\":\"echo hi\"}}},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let outcome = feed(&[f1, f2, "data: [DONE]\n\n"]).await;
+        assert_eq!(
+            outcome.response_body_id.as_deref(),
+            Some("chatcmpl-8e3aa1b2c3"),
+            "the completion record must carry the response-body id the client echoes"
+        );
+        assert_ne!(
+            outcome.response_body_id.as_deref(),
+            Some("call_abc123"),
+            "a tool-call id is a different object; recording it would populate the field with a value no client ever echoes"
+        );
+        assert_eq!(
+            outcome.tool_call_distinct, 1,
+            "the same fixture still exercises the tool-call path, so the two ids are present together"
+        );
+    }
+
+    /// A stream whose frames repeat the same top-level id records it once, and
+    /// a stream whose frames omit it records nothing rather than inventing an
+    /// id.
+    #[tokio::test]
+    async fn repeated_frame_ids_record_once_and_absent_ids_record_nothing() {
+        let repeated = feed(&[
+            "data: {\"id\":\"resp-1\",\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+            "data: {\"id\":\"resp-1\",\"choices\":[{\"delta\":{\"content\":\"b\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+        assert_eq!(repeated.response_body_id.as_deref(), Some("resp-1"));
+
+        let absent = feed(&[
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+        assert_eq!(
+            absent.response_body_id, None,
+            "no frame carried an id, so the honest reading is None, never a synthesised one"
         );
     }
 }

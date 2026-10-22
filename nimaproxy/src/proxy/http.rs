@@ -464,6 +464,10 @@ pub async fn completions(
                         // request failed anyway. `None` keeps "no tool calls"
                         // and "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     continue;
                 }
@@ -674,6 +678,10 @@ pub async fn embeddings(
                         // request failed anyway. `None` keeps "no tool calls"
                         // and "not observed" distinguishable.
                         response_tool_calls: None,
+                        // Not known on any path that has not observed the response body:
+                        // ttfb and failure records, and the non-streaming body id is filled
+                        // in where the body is assembled.
+                        response_body_id: None,
                     });
                     continue;
                 }
@@ -806,6 +814,11 @@ pub struct StreamCompletion {
     /// `guard_stall`, `upstream_error`). What answers "guard abort or
     /// upstream close" on the next truncation without any capture infra.
     pub ended_by: String,
+    /// TOP-LEVEL `id` of the upstream's response body - the id the client
+    /// echoes back as `responseId`. The tap reads it off the SSE frames; the
+    /// non-streaming path fills the same field from the assembled body.
+    /// `None` when the upstream sent no top-level id.
+    pub response_body_id: Option<String>,
 }
 
 /// Log the completion of a streamed turn.
@@ -896,6 +909,11 @@ pub(crate) fn build_completion_record(
         // first-byte time; the two share `request_id`, so a query reads the
         // count off either half of the pair.
         response_tool_calls: Some(completion.tool_call_distinct),
+        // The response body's top-level id - what the client echoes as its
+        // `responseId`. This is the join key the client-side TTFT
+        // measurement needs: client.responseId == this field -> the record's
+        // request_id -> the first-byte record's latency.
+        response_body_id: completion.response_body_id.clone(),
     });
     record.record_kind = TurnLog::RECORD_KIND_COMPLETION.to_string();
     record.request_id = completion.request_id.clone();
@@ -907,6 +925,12 @@ pub(crate) fn build_completion_record(
     record.body_bytes = Some(completion.body_bytes);
     record.max_inter_chunk_gap_ms = completion.max_gap_ms;
     record.stream_ended_by = Some(completion.ended_by.clone());
+    // The response-body id, so this completion can be joined to the client's
+    // own per-message `responseId`. Only the completion path fills it in: the
+    // paired ttfb record keeps `None` because a first byte says nothing about
+    // which response body it belongs to, and on the non-streaming path the id
+    // does not exist until the body is assembled.
+    record.response_body_id = completion.response_body_id.clone();
     // Only when the upstream actually reported usage. A completion record with
     // no usage frame keeps the fields `None`, so a query can tell "0 tokens"
     // from "unknown".
@@ -973,6 +997,10 @@ pub(crate) fn build_loop_record(
         // A loop summary is not a request and has no response of its own. The
         // response-side counts already live in the dedicated `loop_*` fields.
         response_tool_calls: None,
+        // Not known on any path that has not observed the response body:
+        // ttfb and failure records, and the non-streaming body id is filled
+        // in where the body is assembled.
+        response_body_id: None,
     });
     record.record_kind = TurnLog::RECORD_KIND_LOOP.to_string();
     record.loop_started_at = Some(summary.started_at);
@@ -1149,6 +1177,7 @@ mod tests {
             },
             max_gap_ms: Some(12),
             ended_by: "clean".to_string(),
+            response_body_id: None,
         }
     }
 
@@ -1231,6 +1260,10 @@ mod tests {
             request_has_tools: Some(true),
             request_max_tokens: None,
             response_tool_calls: None,
+            // Not known on any path that has not observed the response body:
+            // ttfb and failure records, and the non-streaming body id is filled
+            // in where the body is assembled.
+            response_body_id: None,
         });
         assert_eq!(
             first_byte.response_tool_calls, None,
@@ -1331,6 +1364,10 @@ mod tests {
                 request_has_tools: has_tools,
                 request_max_tokens: max_tokens,
                 response_tool_calls: None,
+                // Not known on any path that has not observed the response body:
+                // ttfb and failure records, and the non-streaming body id is filled
+                // in where the body is assembled.
+                response_body_id: None,
             }
         }
         let json = serde_json::to_string(&TurnLog::new(record(Some(true), Some(32000)))).unwrap();
@@ -1354,5 +1391,111 @@ mod tests {
         let old: TurnLog = serde_json::from_str(&old_json).unwrap();
         assert_eq!(old.request_has_tools, None);
         assert_eq!(old.request_max_tokens, None);
+    }
+    /// The completion record carries the upstream's response-body id under the
+    /// exact key the client join needs, and the paired first-byte record does
+    /// not carry it at all.
+    ///
+    /// The join is `client.responseId == log.response_body_id`, so the key
+    /// name is part of the contract, and the value must be the id verbatim.
+    /// The ttfb half must OMIT the key, not write null: a first byte says
+    /// nothing about which response body it belongs to, and on the
+    /// non-streaming path the id does not exist until the body is assembled.
+    #[test]
+    fn test_completion_record_carries_response_body_id_and_ttfb_does_not() {
+        use crate::turn_log::TurnLog;
+
+        let turn = test_turn_context();
+        let completion = StreamCompletion {
+            response_body_id: Some("chatcmpl-8e3aa1b2c3".to_string()),
+            ..test_completion(true)
+        };
+
+        let written = build_completion_record(&turn, &completion);
+        assert_eq!(written.record_kind, TurnLog::RECORD_KIND_COMPLETION);
+        assert_eq!(
+            written.response_body_id.as_deref(),
+            Some("chatcmpl-8e3aa1b2c3"),
+            "the completion record must carry the upstream's response-body id"
+        );
+
+        // The serialized key is the join contract, so it is asserted on the
+        // bytes rather than on the struct.
+        let body = serde_json::to_string(&written).unwrap();
+        assert!(
+            body.contains("\"response_body_id\":\"chatcmpl-8e3aa1b2c3\""),
+            "the field must serialize under the exact key response_body_id, got {body}"
+        );
+        // And it must round-trip, so the writer's own type reads back what it
+        // wrote.
+        let read_back: TurnLog = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            read_back.response_body_id.as_deref(),
+            Some("chatcmpl-8e3aa1b2c3"),
+            "the field must round-trip through the log's serde format"
+        );
+
+        // The first-byte record for the same turn omits the key entirely.
+        let first_byte = TurnLog::new(crate::turn_log::TurnRecord {
+            requested_model: turn.requested_model.clone(),
+            responding_model: turn.responding_model.clone(),
+            latency_ms: 1,
+            success: true,
+            status_code: 200,
+            request_message_count: turn.message_count,
+            response_message_count: 1,
+            has_tool_calls: turn.has_tool_calls,
+            tool_call_count: turn.tool_call_count,
+            key_label: None,
+            is_racing: false,
+            error: None,
+            request_tokens: None,
+            response_tokens: None,
+            loop_key: None,
+            request_has_tools: None,
+            request_max_tokens: None,
+            response_tool_calls: None,
+            response_body_id: None,
+        });
+        assert_eq!(
+            first_byte.record_kind,
+            TurnLog::RECORD_KIND_TTFB,
+            "TurnLog::new builds the first-byte record"
+        );
+        assert_eq!(
+            first_byte.response_body_id, None,
+            "a first byte says nothing about which response body it belongs to"
+        );
+        let ttfb_body = serde_json::to_string(&first_byte).unwrap();
+        assert!(
+            !ttfb_body.contains("response_body_id"),
+            "the ttfb record must omit the key rather than write null, got {ttfb_body}"
+        );
+
+        // A record written before the field existed stays valid: the key is
+        // absent, and it deserializes to None rather than failing.
+        let old_value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&written).unwrap()).unwrap();
+        let mut old_map = old_value.as_object().unwrap().clone();
+        old_map.remove("response_body_id");
+        let old: TurnLog = serde_json::from_value(serde_json::Value::Object(old_map)).unwrap();
+        assert_eq!(
+            old.response_body_id, None,
+            "a pre-existing record must read back as None, not fail"
+        );
+    }
+
+    /// A completion whose upstream sent no top-level id records `None` rather
+    /// than an empty string, so a reader can tell "unlabelled response" from
+    /// "labelled with nothing".
+    #[test]
+    fn test_completion_record_without_a_body_id_stays_none() {
+        let written = build_completion_record(&test_turn_context(), &test_completion(true));
+        assert_eq!(written.response_body_id, None);
+        let body = serde_json::to_string(&written).unwrap();
+        assert!(
+            !body.contains("response_body_id"),
+            "None must serialize absent, got {body}"
+        );
     }
 }
