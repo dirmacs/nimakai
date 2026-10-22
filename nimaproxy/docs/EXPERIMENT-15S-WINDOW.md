@@ -868,22 +868,29 @@ SNAP=$LOGDIR/snapshot-$(date -u +%Y%m%dT%H%M%SZ).jsonl
 #    it is a lexicographic prefix of the rotated names, so a glob would put
 #    it first and the window would concatenate backwards in time.
 mkdir -p "$SNAP.d"
+# 2. Capture the BEFORE state BEFORE the copies — the guard compares
+#    against it after, so capturing it after the loop is vacuous.
+#    The live file is identified by INODE, not size: the log grows
+#    ~1.07 MB/h, so size equality false-fires on every close, and it
+#    can pass a rotation that lands inside the copy. An inode change
+#    means the live path was replaced (rotation); same inode means the
+#    same file, however much it grew.
+BEFORE_ROTATED=$(ls -1 "$LOGDIR"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort)
+BEFORE_INODE=$(stat -c '%i' "$LOGDIR"/turns.jsonl)
 for f in $(ls -1 "$LOGDIR"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort); do
   cp -- "$f" "$SNAP.d/"
 done
 cp -- "$LOGDIR"/turns.jsonl "$SNAP.d/turns.jsonl.LIVE-last"
-
-# 2. Re-check that nothing moved while the copies were taken. The BEFORE
-#    state has to be captured BEFORE the copies, or there is nothing to
-#    compare against: if a NEW rotated file appeared, or the live file's
-#    size changed, re-copy.
-BEFORE_ROTATED=$(ls -1 "$LOGDIR"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort)
-BEFORE_SIZE=$(stat -c '%s' "$LOGDIR"/turns.jsonl)
-# ... take the copies here ...
+# Re-check that nothing moved while the copies were taken: if a NEW
+# rotated file appeared, or the live path was replaced, re-copy.
 AFTER_ROTATED=$(ls -1 "$LOGDIR"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort)
-AFTER_SIZE=$(stat -c '%s' "$LOGDIR"/turns.jsonl)
+AFTER_INODE=$(stat -c '%i' "$LOGDIR"/turns.jsonl)
 [ "$BEFORE_ROTATED" = "$AFTER_ROTATED" ] || { echo "FAIL: a rotation landed during the copy"; exit 1; }
-[ "$BEFORE_SIZE" = "$AFTER_SIZE" ] || { echo "FAIL: the live file grew during the copy"; exit 1; }
+[ "$BEFORE_INODE" = "$AFTER_INODE" ] || { echo "FAIL: the live file was replaced during the copy"; exit 1; }
+# The copied set must equal the source set: the step-4 count check
+# re-counts the copied files, so it cannot catch an omission on its
+# own (SUM == GOT by construction when a file never made it over).
+[ "$(ls -1 "$SNAP.d"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort | xargs -n1 basename | LC_ALL=C sort)" = "$(echo "$AFTER_ROTATED" | xargs -n1 basename | LC_ALL=C sort)" ] || { echo "FAIL: the copied set differs from the source set"; exit 1; }
 
 # 3. Concatenate, rotated first and the live file LAST, and record a manifest:
 #    every file, its line count, and the combined sha256.
