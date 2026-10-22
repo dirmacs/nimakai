@@ -258,8 +258,9 @@ added before the window's floor.
   only in a response **header**, and the transcript records the body and metadata, not
   headers. Of 37 472 `provider == "nimaproxy"` records, **zero** carry a proxy request id.
   The cheapest fix is a **turn-log field** carrying the response body's `id` — the key the
-  client already records — which the proxy already parses on both the streaming and the
-  non-streaming path. That is a **binary change**, so it must be deployed **before** this
+  client already records — which the proxy does **not** parse today on either path: the
+  top-level frame id and the top-level body id must BOTH be extracted, which is new work
+  rather than a reuse. That is a **binary change**, so it must be deployed **before** this
   window's floor, or the window splits across two binaries.
 - **So Q3's status depends on a decision that is not yet made**, and the design says which
   decision: either the log field is added before the floor (and Q3 becomes computable in
@@ -772,7 +773,9 @@ as things stand.
 ### 7.0.1 The cheapest fix, and it is not a client change
 
 **The key the client already has is the one the log is missing.** The client's
-`responseId` is the response body's `id`, and the proxy **already sees** that id:
+`responseId` is the response body's `id`, and the proxy **already sees** that id — it
+passes through the proxy in the bytes. Seeing it is not extracting it, and the two
+differ here:
 
 - **non-streaming**: the proxy assembles the body (`chat.rs:750-753`), so the id is in the
   body bytes — but it is **not extracted from them**. The body is parsed for usage
