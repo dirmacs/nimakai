@@ -41,8 +41,14 @@ fn make_live_state_with_routing(models: Vec<String>, _strategy: &str) -> Option<
     }))
 }
 
-fn skip_if_no_api_key() -> bool {
-    get_api_key().is_none()
+/// Fail loudly when no live key is present. A live test that cannot run must
+/// FAIL, never pass: an early `return` records `ok` and the suite reads
+/// green while asserting nothing (nimakai#49). Run with NVIDIA_API_KEY set,
+/// or `cargo test -- --skip live_` to exclude the live targets explicitly.
+fn require_api_key(test: &str) {
+    if get_api_key().is_none() {
+        panic!("{test} needs NVIDIA_API_KEY set; refusing to pass vacuously (nimakai#49)");
+    }
 }
 
 async fn send_chat_request(state: &Arc<AppState>, model: &str) -> u16 {
@@ -73,10 +79,7 @@ async fn send_chat_request(state: &Arc<AppState>, model: &str) -> u16 {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_routing_round_robin() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_routing_round_robin: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_routing_round_robin");
 
     // Use models that are typically available
     let test_models = vec![
@@ -144,10 +147,7 @@ async fn test_live_routing_round_robin() {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_routing_latency_aware() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_routing_latency_aware: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_routing_latency_aware");
 
     let test_models = vec![
         "openai/gpt-oss-20b".to_string(),

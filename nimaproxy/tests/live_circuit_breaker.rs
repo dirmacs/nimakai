@@ -50,8 +50,14 @@ fn make_live_state_with_circuit_breaker() -> Option<Arc<AppState>> {
     }))
 }
 
-fn skip_if_no_api_key() -> bool {
-    get_api_key().is_none()
+/// Fail loudly when no live key is present. A live test that cannot run must
+/// FAIL, never pass: an early `return` records `ok` and the suite reads
+/// green while asserting nothing (nimakai#49). Run with NVIDIA_API_KEY set,
+/// or `cargo test -- --skip live_` to exclude the live targets explicitly.
+fn require_api_key(test: &str) {
+    if get_api_key().is_none() {
+        panic!("{test} needs NVIDIA_API_KEY set; refusing to pass vacuously (nimakai#49)");
+    }
 }
 
 async fn send_chat_request(state: &Arc<AppState>, model: &str, content: &str) -> u16 {
@@ -82,10 +88,7 @@ async fn send_chat_request(state: &Arc<AppState>, model: &str, content: &str) ->
 /// ============================================================================
 #[tokio::test]
 async fn test_live_circuit_breaker_degradation() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_circuit_breaker_degradation: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_circuit_breaker_degradation");
 
     let state = make_live_state_with_circuit_breaker().expect("Failed to create live state");
 
@@ -143,10 +146,7 @@ async fn test_live_circuit_breaker_degradation() {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_circuit_breaker_recovery() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_circuit_breaker_recovery: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_circuit_breaker_recovery");
 
     let state = make_live_state_with_circuit_breaker().expect("Failed to create live state");
 

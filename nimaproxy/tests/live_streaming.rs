@@ -41,8 +41,14 @@ fn make_live_state() -> Option<Arc<AppState>> {
     }))
 }
 
-fn skip_if_no_api_key() -> bool {
-    get_api_key().is_none()
+/// Fail loudly when no live key is present. A live test that cannot run must
+/// FAIL, never pass: an early `return` records `ok` and the suite reads
+/// green while asserting nothing (nimakai#49). Run with NVIDIA_API_KEY set,
+/// or `cargo test -- --skip live_` to exclude the live targets explicitly.
+fn require_api_key(test: &str) {
+    if get_api_key().is_none() {
+        panic!("{test} needs NVIDIA_API_KEY set; refusing to pass vacuously (nimakai#49)");
+    }
 }
 
 /// ============================================================================
@@ -51,10 +57,7 @@ fn skip_if_no_api_key() -> bool {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_streaming_chunked_response() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_streaming_chunked_response: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_streaming_chunked_response");
 
     let state = make_live_state().expect("Failed to create live state");
 
@@ -160,10 +163,7 @@ async fn test_live_streaming_chunked_response() {
 /// ============================================================================
 #[tokio::test]
 async fn test_live_streaming_early_termination() {
-    if skip_if_no_api_key() {
-        eprintln!("[SKIP] test_live_streaming_early_termination: NVIDIA_API_KEY not set");
-        return;
-    }
+    require_api_key("test_live_streaming_early_termination");
 
     let state = make_live_state().expect("Failed to create live state");
 

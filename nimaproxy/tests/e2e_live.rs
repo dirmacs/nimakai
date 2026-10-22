@@ -212,14 +212,19 @@ async fn test_e2e_chat_via_proxy() {
         eprintln!("[e2e] error body: {}", String::from_utf8_lossy(&body_bytes));
     }
 
+    // Retired/unprovisioned model is a DISTINCT failure, not a pass (nimakai#49):
+    // "the model is gone" and "the proxy is broken" must not share an outcome.
+    assert!(
+        status_code != 404 && status_code != 410,
+        "live model retired/unprovisioned (status {status_code}); re-derive the pool, do not read this as proxy failure",
+    );
     assert!(
         status_code == 200
             || status_code == 400
             || status_code == 429
             || status_code == 401
-            || status_code == 500
-            || status_code == 404,
-        "got status {}, expected 200/400/429/401/500/404",
+            || status_code == 500,
+        "got status {}, expected 200/400/429/401/500",
         status_code
     );
 }
@@ -267,12 +272,15 @@ async fn test_e2e_racing_uses_preallocated_keys() {
         );
     }
 
+    // Retired/unprovisioned model fails distinctly (nimakai#49).
+    assert!(
+        status_code != 404 && status_code != 410,
+        "live model retired/unprovisioned (status {status_code}); re-derive the pool",
+    );
     assert!(
         status_code == 200
             || status_code == 400
             || status_code == 401
-            || status_code == 404
-            || status_code == 410
             || status_code == 429
             || status_code == 500
             || status_code == 502
@@ -302,8 +310,11 @@ async fn test_e2e_racing_responds_with_key_label_header() {
     let parts = response.into_parts().0;
     let status = parts.status.as_u16();
 
-    // Skip if API is unavailable or the proxy returned a local gateway error.
-    if matches!(status, 401 | 404 | 410 | 429 | 502 | 503 | 504) {
+    // Retired model fails distinctly; transient unavailability still skips (nimakai#49).
+    if matches!(status, 404 | 410) {
+        panic!("live model retired/unprovisioned (status={status}); re-derive the pool");
+    }
+    if matches!(status, 401 | 429 | 502 | 503 | 504) {
         eprintln!(
             "[racing] skipping header check - API unavailable (status={})",
             status
