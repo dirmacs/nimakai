@@ -12,7 +12,7 @@ pub mod state;
 #[cfg(test)]
 mod tests;
 
-use self::aimd::KeyWindow;
+use self::aimd::{AimdMode, KeyWindow};
 
 const DEFAULT_MAX_IN_FLIGHT_PER_KEY: usize = 1_000_000;
 
@@ -40,6 +40,18 @@ pub struct KeyPool {
     permits: Vec<Arc<Semaphore>>,
     windows: Vec<Mutex<KeyWindow>>,
     max_in_flight_per_key: usize,
+    /// Which recovery rule the windows follow. `Fixed` (the default) is
+    /// today's behaviour exactly; only `PressureAdaptive` reads the pressure
+    /// ratio and the decayed credit.
+    aimd_mode: AimdMode,
+    /// Operator ceiling on the pressure-derived success bar. Only consulted
+    /// when `aimd_mode` is [`AimdMode::PressureAdaptive`].
+    aimd_max_success_bar: usize,
+    /// Ceiling on how long a rate-limit bench lasts, in seconds. `None` = no
+    /// cap, which is today's behaviour exactly. The cap is a MAXIMUM: it can
+    /// only shorten a bench, never extend one, so an upstream that asks for
+    /// 120 s is still benched for the full 120 s unless the cap is lower.
+    rate_limit_bench_cap_secs: Option<u64>,
     /// Cumulative count of upstream 401/403 (auth failure) responses observed per key.
     auth_failures: Vec<AtomicU64>,
     /// Cumulative count of upstream *stalls* observed per key: requests that
@@ -70,6 +82,48 @@ impl KeyPool {
     }
 
     pub fn with_max_in_flight(keys: Vec<KeyEntry>, max_in_flight_per_key: usize) -> Self {
+        Self::with_max_in_flight_and_aimd(keys, max_in_flight_per_key, AimdMode::Fixed)
+    }
+
+    /// The constructor the proxy uses. `mode` selects the recovery rule;
+    /// `AimdMode::Fixed` reproduces [`KeyPool::with_max_in_flight`] exactly.
+    pub(crate) fn with_max_in_flight_and_aimd(
+        keys: Vec<KeyEntry>,
+        max_in_flight_per_key: usize,
+        aimd_mode: AimdMode,
+    ) -> Self {
+        Self::with_max_in_flight_aimd_and_bench_cap(keys, max_in_flight_per_key, aimd_mode, None)
+    }
+
+    /// The constructor the proxy uses when either knob is set (`None` for
+    /// both reproduces [`KeyPool::with_max_in_flight_and_aimd`] exactly).
+    /// `rate_limit_bench_cap_secs: None` reproduces
+    /// [`KeyPool::with_max_in_flight_and_aimd`] exactly.
+    pub(crate) fn with_max_in_flight_aimd_and_bench_cap(
+        keys: Vec<KeyEntry>,
+        max_in_flight_per_key: usize,
+        aimd_mode: AimdMode,
+        rate_limit_bench_cap_secs: Option<u64>,
+    ) -> Self {
+        Self::with_max_in_flight_aimd_bench_cap_and_bar(
+            keys,
+            max_in_flight_per_key,
+            aimd_mode,
+            rate_limit_bench_cap_secs,
+            self::aimd::AIMD_BAR_MAX,
+        )
+    }
+
+    /// The full constructor: recovery mode, bench cap and the operator's
+    /// ceiling on the derived success bar. The ceiling is only read when the
+    /// mode is [`AimdMode::PressureAdaptive`].
+    pub(crate) fn with_max_in_flight_aimd_bench_cap_and_bar(
+        keys: Vec<KeyEntry>,
+        max_in_flight_per_key: usize,
+        aimd_mode: AimdMode,
+        rate_limit_bench_cap_secs: Option<u64>,
+        aimd_max_success_bar: usize,
+    ) -> Self {
         let n = keys.len();
         let max_in_flight_per_key = max_in_flight_per_key.max(1);
         KeyPool {
@@ -80,14 +134,12 @@ impl KeyPool {
                 .map(|_| Arc::new(Semaphore::new(max_in_flight_per_key)))
                 .collect(),
             windows: (0..n)
-                .map(|_| {
-                    Mutex::new(KeyWindow {
-                        current: max_in_flight_per_key,
-                        successes_since_increase: 0,
-                    })
-                })
+                .map(|_| Mutex::new(KeyWindow::new(max_in_flight_per_key)))
                 .collect(),
             max_in_flight_per_key,
+            aimd_mode,
+            rate_limit_bench_cap_secs,
+            aimd_max_success_bar,
             auth_failures: (0..n).map(|_| AtomicU64::new(0)).collect(),
             stalls: (0..n).map(|_| AtomicU64::new(0)).collect(),
         }

@@ -160,6 +160,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "max_in_flight": s.max_in_flight,
                 "configured_max_in_flight": s.configured_max_in_flight,
                 "auth_failures": s.auth_failures,
+                "rate_limit_ratio": s.rate_limit_ratio,
             })
         })
         .collect();
@@ -180,6 +181,9 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "upstream_in_flight": metrics.upstream_in_flight,
             "max_upstream_in_flight": state.max_upstream_in_flight,
             "max_in_flight_per_key": state.max_in_flight_per_key,
+            "aimd_pressure_adaptive": state.aimd_pressure_adaptive,
+            "aimd_max_success_bar": state.aimd_max_success_bar,
+            "rate_limit_bench_cap_secs": state.rate_limit_bench_cap_secs,
             "key_window_capacity": state.pool.window_capacity(),
             "key_available_permits": state.pool.available_permits(),
             "admission_wait_ms": state.admission_wait_ms,

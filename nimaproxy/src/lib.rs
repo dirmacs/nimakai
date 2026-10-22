@@ -83,6 +83,14 @@ pub struct AppState {
     pub model_compat: config::ModelCompat,
     pub max_upstream_in_flight: usize,
     pub max_in_flight_per_key: usize,
+    /// Pressure-adaptive AIMD recovery opt-in, mirrored into the pool.
+    pub aimd_pressure_adaptive: bool,
+    /// Ceiling on the derived success bar; only read when
+    /// `aimd_pressure_adaptive` is true.
+    pub aimd_max_success_bar: usize,
+    /// Ceiling on a rate-limit bench, in seconds. `None` = no cap = today's
+    /// behaviour exactly.
+    pub rate_limit_bench_cap_secs: Option<u64>,
     pub admission_wait_ms: u64,
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
@@ -121,6 +129,14 @@ pub struct RuntimeControls {
     pub racing_max_total_request_ms: u64,
     pub max_upstream_in_flight: usize,
     pub max_in_flight_per_key: usize,
+    /// Pressure-adaptive AIMD recovery opt-in. `false` = today's rule.
+    pub aimd_pressure_adaptive: bool,
+    /// Ceiling on the derived success bar. Only read when
+    /// `aimd_pressure_adaptive` is true.
+    pub aimd_max_success_bar: usize,
+    /// Ceiling on a rate-limit bench, in seconds. `None` = no cap = today's
+    /// behaviour exactly.
+    pub rate_limit_bench_cap_secs: Option<u64>,
     pub admission_wait_ms: u64,
     pub min_dynamic_timeout_ms: u64,
     pub dynamic_sample_floor: usize,
@@ -144,6 +160,9 @@ impl Default for RuntimeControls {
             racing_max_total_request_ms: 30000,
             max_upstream_in_flight: 48,
             max_in_flight_per_key: 3,
+            aimd_pressure_adaptive: false,
+            aimd_max_success_bar: 8,
+            rate_limit_bench_cap_secs: None,
             admission_wait_ms: 1500,
             min_dynamic_timeout_ms: 8000,
             dynamic_sample_floor: 10,
@@ -426,8 +445,19 @@ impl AppState {
             .expect("failed to build HTTP client");
 
         let available_models = collect_configured_models(router.as_ref(), &racing_models, &[]);
+        let aimd_mode = if controls.aimd_pressure_adaptive {
+            key_pool::aimd::AimdMode::PressureAdaptive
+        } else {
+            key_pool::aimd::AimdMode::Fixed
+        };
         Arc::new(AppState {
-            pool: KeyPool::with_max_in_flight(keys, controls.max_in_flight_per_key),
+            pool: KeyPool::with_max_in_flight_aimd_bench_cap_and_bar(
+                keys,
+                controls.max_in_flight_per_key,
+                aimd_mode,
+                controls.rate_limit_bench_cap_secs,
+                controls.aimd_max_success_bar,
+            ),
             client,
             target,
             router,
@@ -453,6 +483,9 @@ impl AppState {
             model_compat,
             max_upstream_in_flight: controls.max_upstream_in_flight.max(1),
             max_in_flight_per_key: controls.max_in_flight_per_key.max(1),
+            aimd_pressure_adaptive: controls.aimd_pressure_adaptive,
+            aimd_max_success_bar: controls.aimd_max_success_bar,
+            rate_limit_bench_cap_secs: controls.rate_limit_bench_cap_secs,
             admission_wait_ms: controls.admission_wait_ms,
             min_dynamic_timeout_ms: controls.min_dynamic_timeout_ms.max(1000),
             dynamic_sample_floor: controls.dynamic_sample_floor.max(2),

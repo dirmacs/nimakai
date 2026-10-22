@@ -151,6 +151,24 @@ pub struct LimitsConfig {
     pub max_upstream_in_flight: Option<usize>,
     pub max_in_flight_per_key: Option<usize>,
     pub admission_wait_ms: Option<u64>,
+    /// Opt in to the pressure-adaptive AIMD recovery rule: the successes
+    /// needed to regain one in-flight slot are derived from the key's own
+    /// recent 429 ratio instead of the fixed `AIMD_SUCCESS_THRESHOLD`, and
+    /// the recovery credit is decayed rather than zeroed by a 429. Default
+    /// `false`, which is today's behaviour exactly. See
+    /// [`Config::aimd_pressure_adaptive`].
+    pub aimd_pressure_adaptive: Option<bool>,
+    /// Optional ceiling on the derived success bar (default 8). Only read
+    /// when `aimd_pressure_adaptive` is true.
+    pub aimd_max_success_bar: Option<usize>,
+    /// Ceiling (seconds) on how long a 429 benches a key. `None` (the default)
+    /// keeps today's behaviour exactly: the bench is whatever duration the
+    /// caller asks for, which on the live path is the upstream's `Retry-After`
+    /// header falling back to 60 s when it is absent. The cap is a MAXIMUM —
+    /// it can only shorten a bench, never extend one, so an upstream that asks
+    /// for 120 s is still benched for the full 120 s unless the cap is lower.
+    /// See [`Config::rate_limit_bench_cap_secs`].
+    pub rate_limit_bench_cap_secs: Option<u64>,
     /// Cooldown (seconds) applied to a key after an upstream 401/403 (auth failure).
     /// Default 900 (15 min). `0` disables auth-failure quarantine.
     pub auth_failure_cooldown_secs: Option<u64>,
@@ -324,6 +342,31 @@ impl Config {
             .max(1)
     }
 
+    /// Whether the pressure-adaptive AIMD recovery rule is enabled.
+    ///
+    /// Default `false`. With it false the per-key recovery curve is exactly
+    /// the fixed `ceil(AIMD_SUCCESS_THRESHOLD / deficit)` one, so a binary
+    /// built from this tree can be deployed inert and the live config is what
+    /// turns the rule on.
+    pub fn aimd_pressure_adaptive(&self) -> bool {
+        self.limits
+            .as_ref()
+            .and_then(|l| l.aimd_pressure_adaptive)
+            .unwrap_or(false)
+    }
+
+    /// Operator ceiling on the derived success bar. Default 8 — the
+    /// calibration point of the fixed constant, so a lightly throttled key
+    /// under the adaptive rule pays the same as it does today. Only read when
+    /// [`Config::aimd_pressure_adaptive`] is true.
+    pub fn aimd_max_success_bar(&self) -> usize {
+        self.limits
+            .as_ref()
+            .and_then(|l| l.aimd_max_success_bar)
+            .unwrap_or(8)
+            .clamp(1, 8)
+    }
+
     pub fn admission_wait_ms(&self) -> u64 {
         self.limits
             .as_ref()
@@ -334,6 +377,16 @@ impl Config {
     /// Cooldown (seconds) applied to a key after an upstream 401/403 (auth failure) on any
     /// inference path. Default 900 (15 min). `0` disables auth-failure quarantine — the
     /// failure is still counted, but the key is not cooled down.
+    /// Ceiling on how long a rate-limit bench lasts, in seconds. `None` means
+    /// no cap: the upstream's `Retry-After` is honoured in full, which is
+    /// today's behaviour exactly. A cap can only SHORTEN a bench, never extend
+    /// one.
+    pub fn rate_limit_bench_cap_secs(&self) -> Option<u64> {
+        self.limits
+            .as_ref()
+            .and_then(|l| l.rate_limit_bench_cap_secs)
+    }
+
     pub fn auth_failure_cooldown_secs(&self) -> u64 {
         self.limits
             .as_ref()
