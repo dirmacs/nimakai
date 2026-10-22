@@ -1,3 +1,4 @@
+use super::aimd::{pressure_success_cost_capped, static_success_cost, AimdMode};
 use super::BenchReason;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -13,6 +14,12 @@ pub struct KeyStatus {
     pub in_flight: usize,
     pub max_in_flight: usize,
     pub configured_max_in_flight: usize,
+    /// The key's recent 429 ratio (EWMA, 1.0 = every outcome was a 429). This
+    /// is the *input* to the pressure-adaptive recovery rule, exposed next to
+    /// `max_in_flight` (its output) so a measurement window can see both. With
+    /// the adaptive knob off it is still maintained, because it is a
+    /// measurement of the upstream rather than of the policy.
+    pub rate_limit_ratio: f64,
     /// Cumulative count of upstream 401/403 (auth failure) responses observed for this key.
     pub auth_failures: u64,
     /// Cumulative count of upstream stalls observed for this key: connected
@@ -63,6 +70,13 @@ impl super::KeyPool {
     pub fn mark_rate_limited(&self, idx: usize, secs: u64) {
         if idx < self.cooldowns.len() {
             self.record_rate_limited(idx);
+            // The cap is a MAXIMUM, never an extension: the upstream's own
+            // Retry-After is honoured in full unless it is longer than the
+            // cap. With no cap configured this is today's behaviour exactly.
+            let secs = match self.rate_limit_bench_cap_secs {
+                Some(cap) => secs.min(cap),
+                None => secs,
+            };
             let mut cd = self.cooldowns[idx].lock();
             *cd = Some((
                 Instant::now() + Duration::from_secs(secs),
@@ -97,14 +111,31 @@ impl super::KeyPool {
     pub fn record_rate_limited(&self, idx: usize) {
         if let Some(window) = self.windows.get(idx) {
             let mut window = window.lock();
+            // Penalty side, unchanged: one 429 halves the window, floored at 1.
             window.current = (window.current / 2).max(1);
-            window.successes_since_increase = 0;
+            // Fold the 429 into the pressure ratio, which is what the
+            // adaptive bar reads.
+            Self::fold_outcome(&mut window, true);
+            if self.aimd_mode == AimdMode::Fixed {
+                // Today's behaviour: the consecutive-success credit is zeroed.
+                window.successes_since_increase = 0;
+            } else {
+                // The credit is decayed, not zeroed. A 429 also benches the key
+                // (`mark_rate_limited`), and a benched key receives no traffic
+                // — so it earns no successes — which means a zeroed credit can
+                // never be re-earned before the next 429 arrives. That is the
+                // measured ratchet: every key pinned at a window of 1 against
+                // a configured 4.
+                window.successes_since_increase /= super::aimd::AIMD_CREDIT_DECAY;
+            }
+            window.pressure_successes /= super::aimd::AIMD_CREDIT_DECAY;
         }
     }
 
     pub fn record_success(&self, idx: usize) {
         if let Some(window) = self.windows.get(idx) {
             let mut window = window.lock();
+            Self::fold_outcome(&mut window, false);
             if window.current < self.max_in_flight_per_key {
                 // Proportional recovery. Shrink is multiplicative and
                 // instantaneous (one 429 halves the window), so a fixed
@@ -121,20 +152,44 @@ impl super::KeyPool {
                 // recover at the full threshold, since an unused slot being
                 // held back cannot help anyone.
                 let deficit = self.max_in_flight_per_key - window.current;
-                let needed = if deficit <= 1 {
-                    1
-                } else {
-                    super::aimd::AIMD_SUCCESS_THRESHOLD.div_ceil(deficit)
-                };
                 window.successes_since_increase += 1;
-                if window.successes_since_increase >= needed {
+                window.pressure_successes += 1;
+                let grown = if self.aimd_mode == AimdMode::Fixed {
+                    window.successes_since_increase >= static_success_cost(deficit)
+                } else {
+                    // The bar is derived from the key's own recent 429 ratio,
+                    // so a heavily throttled key pays less than a lightly
+                    // throttled one. The credit it reads is the decayed one,
+                    // which is why the cost is not the same number even at the
+                    // same ratio.
+                    let needed = pressure_success_cost_capped(
+                        deficit,
+                        window.pressure_ratio,
+                        self.aimd_max_success_bar,
+                    );
+                    window.pressure_successes >= needed
+                };
+                if grown {
                     window.current += 1;
                     window.successes_since_increase = 0;
+                    window.pressure_successes = 0;
                 }
             } else {
                 window.successes_since_increase = 0;
+                window.pressure_successes = 0;
             }
         }
+    }
+
+    /// Fold one per-key outcome into that key's 429 ratio (EWMA).
+    ///
+    /// Kept on the *fixed* path too: it is a measurement of the upstream, and
+    /// a window that starts with the knob off must be able to show the
+    /// pressure it was measured against.
+    fn fold_outcome(window: &mut super::aimd::KeyWindow, rate_limited: bool) {
+        let sample = if rate_limited { 1.0 } else { 0.0 };
+        let w = super::aimd::AIMD_RATIO_WEIGHT;
+        window.pressure_ratio = window.pressure_ratio * (1.0 - w) + sample * w;
     }
 
     pub(crate) fn current_window(&self, idx: usize) -> usize {

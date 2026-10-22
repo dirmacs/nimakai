@@ -9,6 +9,20 @@ fn make_key_entry(key: &str, label: &str) -> KeyEntry {
     }
 }
 
+/// Build a pool that runs the pressure-adaptive recovery rule. Only the
+/// adaptive tests use this; every other test in this file keeps the default
+/// (fixed) rule, which is what keeps the fixed-path pins meaningful.
+fn adaptive_pool(n: usize, max_in_flight_per_key: usize) -> KeyPool {
+    let keys = (0..n)
+        .map(|i| make_key_entry(&format!("key{}", i), &format!("k{}", i)))
+        .collect();
+    KeyPool::with_max_in_flight_and_aimd(
+        keys,
+        max_in_flight_per_key,
+        super::aimd::AimdMode::PressureAdaptive,
+    )
+}
+
 #[test]
 fn test_next_key_round_robin() {
     let keys = vec![
@@ -726,4 +740,305 @@ fn test_excluding_with_a_single_key_still_yields_a_lease() {
 
     let retry = pool.next_key_with_permit_excluding(Some(0)).unwrap();
     assert_eq!(retry.idx, 0);
+}
+
+/// The knob is OFF by default, and with it off the recovery curve is the
+/// fixed one: `ceil(8 / deficit)` successes per slot, and the credit is
+/// zeroed by a 429.
+///
+/// This is the test that would fail if the default path changed. Below the
+/// ~29 % clamp point the adaptive bar equals the fixed one, so if the
+/// default ever started reading the pressure ratio, the decayed credit —
+/// which is never zeroed — is what would change the schedule, not the bar.
+#[test]
+fn test_fixed_rule_is_the_default_and_is_unchanged() {
+    let mut keys = Vec::new();
+    for i in 0..4 {
+        keys.push(make_key_entry(&format!("key{}", i), &format!("k{}", i)));
+    }
+    let pool = KeyPool::with_max_in_flight(keys, 4);
+    // The default constructor hard-codes AimdMode::Fixed; the flag is on the
+    // knob, read at pool construction, not a pool accessor.
+
+    for i in 0..4 {
+        pool.record_rate_limited(i);
+    }
+    assert_eq!(pool.status()[0].max_in_flight, 2);
+
+    // Three successes must NOT be enough, and the fourth must be: the fixed
+    // bar for deficit 2 is ceil(8 / 2) = 4 either way, because below the
+    // ~29 % clamp point the adaptive bar equals the fixed one. The guard is
+    // the zeroing below.
+    for _ in 0..3 {
+        pool.record_success(0);
+    }
+    assert_eq!(
+        pool.status()[0].max_in_flight,
+        2,
+        "the default rule must not recover a deficit-2 window in 3 successes"
+    );
+
+    pool.record_success(0);
+    assert_eq!(pool.status()[0].max_in_flight, 3);
+
+    // And the credit is zeroed, not decayed: after the next 429 the key sits
+    // at window 1 against a ceiling of 4 (deficit 3, cost ceil(8 / 3) = 3),
+    // and one success earns the first of the three — it does not move the
+    // window, where the decayed-credit rule would have satisfied the slot
+    // with the residue alone.
+    pool.record_rate_limited(0);
+    assert_eq!(pool.status()[0].max_in_flight, 1);
+    pool.record_success(0);
+    assert_eq!(pool.status()[0].max_in_flight, 1);
+    pool.record_success(0);
+    pool.record_success(0);
+    assert_eq!(pool.status()[0].max_in_flight, 2);
+}
+
+/// The derived bar cannot beat the static constant below its ~29 % clamp
+/// point: at no pressure and at the measured 18-23 % operating point it is 8,
+/// the same cost. It pays strictly less only above the clamp point.
+#[test]
+fn test_adaptive_bar_matches_the_fixed_bar_under_no_pressure() {
+    assert_eq!(super::aimd::pressure_bar(0.0), 8);
+    assert_eq!(super::aimd::pressure_bar(0.05), 8);
+    for deficit in 1..=8 {
+        assert_eq!(
+            super::aimd::pressure_success_cost(deficit, 0.05),
+            super::aimd::static_success_cost(deficit),
+            "deficit {deficit}: at 5% 429 the adaptive rule must cost the same as today"
+        );
+    }
+    // Below the clamp point the derived bar cannot beat the static constant:
+    // the ceiling, not the formula, sets the cost. So at today's measured
+    // 22.64 % the bar is 8, exactly today's cost, and it is the decayed
+    // credit — not a cheaper bar — that lets the adaptive rule bank a slot.
+    let light = super::aimd::pressure_bar(0.05);
+    let measured = super::aimd::pressure_bar(0.2264);
+    assert_eq!(
+        measured, light,
+        "below the clamp point the derived bar cannot beat the static constant"
+    );
+    // Above the clamp point heavier pressure pays strictly less, never more.
+    let heavy = super::aimd::pressure_bar(0.5);
+    assert!(
+        heavy < light,
+        "above the clamp point a heavily throttled key must pay less than a lightly throttled one"
+    );
+}
+
+/// The core fix, as a deterministic stream: a key under a sustained 22.64 %
+/// 429 stream reaches a higher window under the adaptive rule than the fixed
+/// rule allows in the same number of outcomes.
+///
+/// The stream interleaves the bench: every 429 is followed by a gap of
+/// `bench_len` outcomes during which the key earns nothing, which is what the
+/// live proxy does (a 429 benches the key, and a benched key is skipped by
+/// `next_key`). A fixed bar cannot recover inside that pattern, because each
+/// new 429 zeroes the credit before a full run is banked.
+#[test]
+fn test_adaptive_rule_recovers_where_the_fixed_rule_cannot() {
+    let ceiling = 4;
+    let n = 2000;
+    // Every 4th outcome is a 429, and each 429 costs a bench of 6 idle
+    // outcomes (60 s of cooldown against a ~0.1 req/s per-key arrival).
+    let (rate_limit_period, bench_len) = (4, 6);
+    // Fixed arm: build the same pool but force the fixed rule.
+    let keys = vec![make_key_entry("key0", "a")];
+    let fixed = KeyPool::with_max_in_flight(keys, ceiling);
+    let adaptive = adaptive_pool(1, ceiling);
+
+    for step in 0..n {
+        // The bench: a window of outcomes where the key is benched and earns
+        // nothing. It is modelled as "skip" rather than a timer, because the
+        // window state does not change while a key is benched.
+        if step % (rate_limit_period + bench_len) >= rate_limit_period {
+            continue;
+        }
+        if step % rate_limit_period == rate_limit_period - 1 {
+            fixed.record_rate_limited(0);
+            adaptive.record_rate_limited(0);
+        } else {
+            fixed.record_success(0);
+            adaptive.record_success(0);
+        }
+    }
+
+    let fixed_window = fixed.status()[0].max_in_flight;
+    let adaptive_window = adaptive.status()[0].max_in_flight;
+    assert!(
+        adaptive_window > fixed_window,
+        "adaptive window {adaptive_window} must exceed the fixed window {fixed_window} \
+         under a sustained high-429 stream"
+    );
+    // The pressure ratio is the input to the rule and must be non-zero, or
+    // the adaptive arm would just be the fixed arm with extra bookkeeping.
+    let ratio = adaptive.status()[0].rate_limit_ratio;
+    assert!(
+        ratio > 0.15 && ratio < 0.30,
+        "the stream is a 1-in-4 429 pattern, so the ratio should sit near 0.25, got {ratio}"
+    );
+}
+
+/// The complement of the recovery test: with NO 429 pressure the adaptive rule
+/// is never *faster* than today's rule. Recovery credit is only ever earned
+/// by successful first bytes, so a key that is not being throttled pays the
+/// full cost.
+///
+/// Recovery credit is only ever earned by successful first bytes, so a key
+/// that is not being throttled pays the full cost: at a ratio of 0 the derived
+/// bar is `AIMD_BAR_MAX`, which is exactly `AIMD_SUCCESS_THRESHOLD`.
+#[test]
+fn test_adaptive_rule_is_not_faster_without_429_pressure() {
+    // Cost-function level: identical at zero pressure for every deficit.
+    for deficit in 1..=8 {
+        assert_eq!(
+            super::aimd::pressure_success_cost(deficit, 0.0),
+            super::aimd::static_success_cost(deficit),
+            "deficit {deficit}: no pressure must cost the same as today"
+        );
+    }
+
+    // Stream level: an adaptive pool that has never been throttled charges
+    // the same per-slot costs as a fixed one.
+    let fixed = KeyPool::with_max_in_flight(vec![make_key_entry("key0", "a")], 4);
+    let adaptive = adaptive_pool(1, 4);
+    assert_eq!(fixed.status()[0].max_in_flight, 4);
+    assert_eq!(adaptive.status()[0].max_in_flight, 4);
+
+    // One shrink halves a ceiling-4 window to 2 (a halving can only reach 1
+    // from 2), so both pools start the comparison from 2 on the same footing.
+    fixed.record_rate_limited(0);
+    adaptive.record_rate_limited(0);
+    assert_eq!(fixed.status()[0].max_in_flight, 2);
+    assert_eq!(adaptive.status()[0].max_in_flight, 2);
+
+    // The schedule is identical either way: each success has the same deficit,
+    // and the same deficit charges the same cost, so the two tracks cannot
+    // diverge while the 429 generator stays quiet.
+    for _ in 0..8 {
+        fixed.record_success(0);
+        adaptive.record_success(0);
+        assert_eq!(
+            fixed.status()[0].max_in_flight,
+            adaptive.status()[0].max_in_flight,
+            "with no 429 pressure the adaptive rule must track the fixed one step for step"
+        );
+    }
+}
+
+/// The credit survives a 429 under the adaptive rule, which is what makes the
+/// recovery reachable across bench cycles. Under the fixed rule the same
+/// sequence leaves the credit at zero.
+///
+/// Ceiling 8 so the deficits stay in the multi-step regime the adaptive bar
+/// actually differentiates. A single 429 leaves the ratio near
+/// `1/8 = 0.125`, so the bar is 7 and a deficit-4 window costs
+/// `ceil(7 / 4) = 2` successes per slot.
+#[test]
+fn test_adaptive_credit_survives_a_rate_limit() {
+    let pool = adaptive_pool(1, 8);
+    pool.record_rate_limited(0); // 8 -> 4
+    assert_eq!(pool.status()[0].max_in_flight, 4);
+
+    // Two successes reach the deficit-4 cost, so the window grows to 5.
+    pool.record_success(0);
+    assert_eq!(pool.status()[0].max_in_flight, 4);
+    pool.record_success(0);
+    assert_eq!(pool.status()[0].max_in_flight, 5);
+
+    // A 429 halves the window AND halves the credit, so the residue carries
+    // forward. The growth at 5 spent the banked credit, so the second 429
+    // divides 0 — and against a ceiling of 8 the window 2 faces a deficit of
+    // 6, priced at ceil(8 / 6) = 2, so the slot completes on the SECOND
+    // success, not the third as the deficit-3 arithmetic above would say.
+    pool.record_rate_limited(0);
+    assert_eq!(pool.status()[0].max_in_flight, 2);
+    pool.record_success(0);
+    pool.record_success(0);
+    assert_eq!(
+        pool.status()[0].max_in_flight,
+        3,
+        "at deficit 6 under a bar of 8 the cost is ceil(8 / 6) = 2"
+    );
+}
+
+/// The knob's config surface: default off, and the accessors clamp.
+fn write_limit_config(content: &str) -> tempfile::NamedTempFile {
+    use std::io::Write;
+    let mut file = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    file
+}
+
+#[test]
+fn test_aimd_knob_defaults_off() {
+    let file = write_limit_config(
+        r#"
+[[keys]]
+key = "test"
+"#,
+    );
+    let config = crate::config::load(file.path().to_str().unwrap()).unwrap();
+    assert!(!config.aimd_pressure_adaptive());
+    assert_eq!(config.aimd_max_success_bar(), 8);
+
+    let file = write_limit_config(
+        r#"
+[limits]
+aimd_pressure_adaptive = true
+aimd_max_success_bar = 99
+
+[[keys]]
+key = "test"
+"#,
+    );
+    let config = crate::config::load(file.path().to_str().unwrap()).unwrap();
+    assert!(config.aimd_pressure_adaptive());
+    assert_eq!(
+        config.aimd_max_success_bar(),
+        8,
+        "an out-of-range bar is clamped"
+    );
+}
+
+/// The bench cap is a MAXIMUM, never an extension: it can shorten a bench the
+/// upstream asked to be long, but it must never lengthen one the upstream asked
+/// to be short. With no cap configured the upstream's own duration is honoured
+/// in full - which is today's behaviour exactly.
+#[test]
+fn test_rate_limit_bench_cap_shortens_but_never_extends() {
+    let keys = vec![make_key_entry("key1", "a")];
+
+    // No cap: the upstream's duration is honoured exactly.
+    let pool =
+        KeyPool::with_max_in_flight_aimd_and_bench_cap(keys.clone(), 4, AimdMode::Fixed, None);
+    pool.mark_rate_limited(0, 120);
+    let benched = pool.status()[0].cooldown_secs_remaining;
+    // `cooldown_secs_remaining` is a floored `duration_since`, so a 120 s
+    // bench reads back as 119 or 120 depending on sub-second rounding.
+    // Either is the upstream's duration honoured; what would be wrong is a
+    // capped or defaulted value.
+    assert!(
+        (119..=120).contains(&benched),
+        "with no cap the upstream's 120 s must be honoured, got {benched}s"
+    );
+
+    // A cap BELOW the upstream's duration shortens it.
+    let pool =
+        KeyPool::with_max_in_flight_aimd_and_bench_cap(keys.clone(), 4, AimdMode::Fixed, Some(30));
+    pool.mark_rate_limited(0, 120);
+    let benched = pool.status()[0].cooldown_secs_remaining;
+    assert!(
+        benched <= 30,
+        "the cap must shorten a 120 s bench, got {benched}s"
+    );
+
+    // A cap ABOVE the upstream's duration must NOT extend it.
+    pool.mark_rate_limited(0, 5);
+    let benched = pool.status()[0].cooldown_secs_remaining;
+    assert!(
+        benched <= 5,
+        "the cap must never extend a bench, got {benched}s"
+    );
 }

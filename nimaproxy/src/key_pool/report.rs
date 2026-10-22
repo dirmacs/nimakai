@@ -87,6 +87,10 @@ impl super::KeyPool {
                     .max_in_flight_per_key
                     .saturating_sub(self.permits[i].available_permits());
                 let max_in_flight = window.current;
+                // Read under the same critical section, so the ratio and the
+                // window describe the same instant rather than a state that
+                // never existed.
+                let rate_limit_ratio = window.pressure_ratio;
                 let hint = if k.key.len() >= 4 {
                     format!("...{}", &k.key[k.key.len() - 4..])
                 } else {
@@ -102,6 +106,7 @@ impl super::KeyPool {
                     configured_max_in_flight: self.max_in_flight_per_key,
                     auth_failures: self.auth_failures_for(i),
                     stalls: self.stalls_for(i),
+                    rate_limit_ratio,
                     bench_reason,
                 }
             })
