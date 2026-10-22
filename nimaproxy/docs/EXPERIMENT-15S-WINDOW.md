@@ -870,10 +870,15 @@ SNAP=$LOGDIR/snapshot-$(date -u +%Y%m%dT%H%M%SZ).jsonl
 mkdir -p "$SNAP.d"
 # 2. Capture the BEFORE state BEFORE the copies — the guard compares
 #    against it after, so capturing it after the loop is vacuous.
-#    The live file is identified by INODE, not size: the log grows
-#    ~1.07 MB/h, so size equality false-fires on every close, and it
-#    can pass a rotation that lands inside the copy. An inode change
-#    means the live path was replaced (rotation); same inode means the
+#    The live file is identified by INODE, not size: the log's growth rate
+#    is regime-dependent, so size equality false-fires on every close, and it
+#    can pass a rotation that lands inside the copy. Measured 2026-10-22
+#    (nimakai#56): pre-rotation 2026-10-21T14:50:43Z floor 50,603,788 bytes
+#    to 2026-10-22T09:51:48Z rotation 67,109,329 bytes = ~0.83 MB/h over
+#    19.0 h; post-rotation 09:51:48Z to 14:50:43Z close = ~0.50 MB/h over
+#    5.0 h (live file still writing, ~0.36 MB/h at 17:23Z). The old single
+#    figure (~1.07 MB/h) matched neither regime and is withdrawn. An inode
+#    change means the live path was replaced (rotation); same inode means the
 #    same file, however much it grew.
 BEFORE_ROTATED=$(ls -1 "$LOGDIR"/turns.jsonl.20* 2>/dev/null | LC_ALL=C sort)
 BEFORE_INODE=$(stat -c '%i' "$LOGDIR"/turns.jsonl)
