@@ -137,8 +137,10 @@ behaviour and the Q1/Q2 pre-registration stays valid.
 the first floor is taken would put it inside the window that was supposed to measure the old
 behaviour, and confound the Q1/Q2 population exactly the way the 15 s window confounded its bars.
 
-The 45 000 ms long-timeout window — the blocked benefit side of the cutoff question — is scheduled
-**after** this window, not before it.
+The 45 000 ms long-timeout window — the blocked benefit side of the cutoff question — runs **before**
+this window, not after it (R3, 2026-10-22: the benefit side is measured first, on the floor binary,
+so no cutoff value is published until BOTH the Q1 verdict and a measured benefit side exist; R4 holds
+this change's deploy behind the 45 s run). The sequence is floor → 45 s benefit window → AIMD window.
 
 ## 8. What this change does NOT do
 
