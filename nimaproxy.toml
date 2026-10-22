@@ -1,6 +1,5 @@
 listen = "0.0.0.0:8080"
 target = "https://integrate.api.nvidia.com"
-
 [[keys]]
 key = "${NIMAPROXY_KEY_DOLTARES}"
 label = "doltares"
@@ -136,70 +135,14 @@ models = [
 ]
 
 
-[model_params."deepseek-ai/deepseek-v4-pro"]
-temperature = 1.0
-top_p = 0.95
-max_tokens = 16384
-stream = false
-chat_template_kwargs = { thinking = false }
-
-[model_params."nvidia/nemotron-3-ultra-550b-a55b"]
-temperature = 1.0
-top_p = 0.95
-max_tokens = 16384
-# reasoning_budget dropped 2026-09-02: NIM V2 model runner returns 400
-# "thinking_token_budget is not yet supported" when it is sent.
-stream = true
-chat_template_kwargs = { enable_thinking = true }
-
-# Same nemotron-3 family as nemotron-3-ultra-550b-a55b above; NVIDIA docs recommend
-# temperature=1.0/top_p=0.95 "across all tasks and serving backends" for this family.
-[model_params."nvidia/nemotron-3-super-120b-a12b"]
-temperature = 1.0
-top_p = 0.95
-max_tokens = 16384
-# reasoning_budget dropped 2026-09-02: NIM V2 model runner returns 400
-# "thinking_token_budget is not yet supported" when it is sent.
-stream = true
-chat_template_kwargs = { enable_thinking = true }
-
-# build.nvidia.com snippet defaults (temperature=1, top_p=1); supports configurable
-# reasoning_effort (low/medium/high).
-[model_params."openai/gpt-oss-120b"]
-temperature = 1.0
-top_p = 1.0
-max_tokens = 16384
-stream = false
-reasoning_effort = "medium"
-
-[model_params."openai/gpt-oss-20b"]
-temperature = 1.0
-top_p = 1.0
-max_tokens = 16384
-stream = false
-reasoning_effort = "medium"
-
-[model_params."deepseek-ai/deepseek-v4-flash"]
-temperature = 1.0
-top_p = 0.95
-max_tokens = 16384
-stream = false
-chat_template_kwargs = { thinking = true, reasoning_effort = "high" }
-
-[model_params."mistralai/mistral-medium-3.5-128b"]
-temperature = 0.7
-top_p = 1.0
-max_tokens = 16384
-stream = false
-reasoning_effort = "high"
-
-[model_params."z-ai/glm-5.1"]
-temperature = 1.0
-top_p = 1.0
-max_tokens = 16384
-stream = true
-seed = 42
-
+# 2026-10-21: the 13 unreachable models' model_params blocks were removed. They
+# were dead config: `[routing].models`, `[racing].models`, `fast_models` and
+# `fallback_models` all listed only step-5-preview, and a request naming any
+# other model is refused by validate_model_exists with HTTP 400 "model not
+# found in configured models" (measured live). Their max_tokens ceilings
+# therefore governed nothing, and the 16384 cap that issue #38 tracked as a
+# residual exposure was never reachable. Re-enabling a model means adding its
+# block back, deliberately.
 [model_params."stepfun-ai/step-5-preview"]
 # 2026-10-21 (model-card audit): builder settings temperature=1.0/top_p=0.95/
 # top_k=0 per build.nvidia.com/stepfun-ai/step-5-preview. top_k=0 validated
@@ -216,39 +159,6 @@ top_k = 0
 max_tokens = 32768
 stream = true
 reasoning_effort = "high"
-
-[model_params."stepfun-ai/step-3.7-flash"]
-temperature = 1.0
-top_p = 0.95
-max_tokens = 16384
-stream = false
-
-[model_params."moonshotai/kimi-k2.6"]
-temperature = 1.0
-top_p = 1.0
-max_tokens = 16384
-stream = false
-
-[model_params."qwen/qwen3.5-397b-a17b"]
-temperature = 0.6
-top_p = 0.95
-top_k = 20
-presence_penalty = 0.0
-repetition_penalty = 1.0
-max_tokens = 16384
-stream = false
-
-[model_params."minimaxai/minimax-m3"]
-temperature = 1.0
-top_p = 0.95
-max_tokens = 8192
-stream = false
-
-[model_params."minimaxai/minimax-m2.7"]
-temperature = 1.0
-top_p = 0.95
-max_tokens = 8192
-stream = false
 
 [model_compat]
 # NVIDIA NIM does NOT support 'developer' role - transform all models (default behavior)
