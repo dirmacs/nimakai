@@ -1042,3 +1042,275 @@ fn test_rate_limit_bench_cap_shortens_but_never_extends() {
         "the cap must never extend a bench, got {benched}s"
     );
 }
+
+/// `bench_key` is the COOLDOWN-ONLY half of a rate-limit reaction: it must
+/// make the key unselectable for the requested duration without touching the
+/// AIMD window, the 429 ratio, or the recovery credit.
+///
+/// The racing path depends on this distinction. A single racing leg can
+/// produce a 429 while other legs are in flight; if the post-join bench also
+/// applied the AIMD penalty, one upstream event would shrink the window more
+/// than once.
+#[test]
+fn test_bench_key_applies_cooldown_without_aimd_penalty() {
+    let keys = vec![make_key_entry("key1", "a")];
+    let pool = KeyPool::with_max_in_flight(keys, 4);
+
+    let before = pool.status()[0].clone();
+    assert_eq!(before.max_in_flight, 4);
+    assert_eq!(before.rate_limit_ratio, 0.0);
+
+    pool.bench_key(0, 60);
+
+    let after = pool.status()[0].clone();
+    assert!(
+        !after.active,
+        "bench_key must take the key out of selection"
+    );
+    assert!(
+        after.cooldown_secs_remaining > 0 && after.cooldown_secs_remaining <= 60,
+        "bench_key must apply the requested cooldown, got {}s",
+        after.cooldown_secs_remaining
+    );
+    assert_eq!(
+        after.bench_reason,
+        Some(BenchReason::RateLimit),
+        "bench_key must record a rate-limit bench"
+    );
+    assert_eq!(
+        after.max_in_flight, before.max_in_flight,
+        "bench_key must NOT halve the AIMD window"
+    );
+    assert_eq!(
+        after.rate_limit_ratio, before.rate_limit_ratio,
+        "bench_key must NOT fold a 429 into the pressure ratio"
+    );
+    assert_eq!(
+        after.auth_failures, 0,
+        "bench_key must not be counted as an auth failure"
+    );
+    assert_eq!(
+        after.stalls, 0,
+        "bench_key must not be counted as an upstream stall"
+    );
+
+    // The recovery credit must survive a bench as well. In the fixed rule the
+    // credit is the number of banked successes below the ceiling, so it is
+    // observable: shrink the window to 2 of 4 (cost: 4 successes for the next
+    // slot), bank 2 successes, bench the key, and then 2 more successes must
+    // be enough to reopen a slot. A bench that zeroed the credit would need 4.
+    let credit_pool = KeyPool::with_max_in_flight(vec![make_key_entry("key2", "b")], 4);
+    credit_pool.record_rate_limited(0);
+    credit_pool.record_success(0);
+    credit_pool.record_success(0);
+    assert_eq!(
+        credit_pool.status()[0].max_in_flight,
+        2,
+        "the two banked successes are not enough to reopen a slot yet"
+    );
+
+    let before_bench = credit_pool.status()[0].clone();
+    credit_pool.bench_key(0, 60);
+    let after_bench = credit_pool.status()[0].clone();
+    assert_eq!(
+        after_bench.max_in_flight, before_bench.max_in_flight,
+        "bench_key must NOT halve the AIMD window"
+    );
+    assert_eq!(
+        after_bench.rate_limit_ratio, before_bench.rate_limit_ratio,
+        "bench_key must NOT fold a 429 into the pressure ratio"
+    );
+
+    credit_pool.record_success(0);
+    credit_pool.record_success(0);
+    assert_eq!(
+        credit_pool.status()[0].max_in_flight,
+        3,
+        "the banked recovery credit must survive a bench-only cooldown"
+    );
+}
+
+/// The complementary contract: `mark_rate_limited` applies EXACTLY ONE AIMD
+/// penalty and one bench. Calling it twice must therefore halve the window
+/// twice (4 -> 2 -> 1), never once more or less than that.
+#[test]
+fn test_mark_rate_limited_applies_exactly_one_aimd_penalty_and_bench() {
+    let keys = vec![make_key_entry("key1", "a")];
+    let pool = KeyPool::with_max_in_flight(keys, 4);
+
+    pool.mark_rate_limited(0, 60);
+
+    let after = pool.status()[0].clone();
+    assert_eq!(
+        after.max_in_flight, 2,
+        "one 429 must halve the window exactly once"
+    );
+    assert!(!after.active, "mark_rate_limited must bench the key");
+    assert_eq!(
+        after.bench_reason,
+        Some(BenchReason::RateLimit),
+        "mark_rate_limited must record a rate-limit bench"
+    );
+    assert!(
+        after.cooldown_secs_remaining > 0 && after.cooldown_secs_remaining <= 60,
+        "mark_rate_limited must apply the requested cooldown, got {}s",
+        after.cooldown_secs_remaining
+    );
+
+    // A second event is a second penalty: 2 -> 1, floored at one slot.
+    pool.mark_rate_limited(0, 60);
+    assert_eq!(
+        pool.status()[0].max_in_flight,
+        1,
+        "a second 429 must halve the window exactly once again"
+    );
+}
+
+/// The bench cap applies to the cooldown-only operation too, and remains a
+/// MAXIMUM: it shortens a long upstream-requested bench, preserves it when
+/// unset, and never extends a short one.
+#[test]
+fn test_bench_key_honours_bench_cap_as_maximum() {
+    let keys = vec![make_key_entry("key1", "a")];
+
+    // No cap: the requested duration is preserved.
+    let pool =
+        KeyPool::with_max_in_flight_aimd_and_bench_cap(keys.clone(), 4, AimdMode::Fixed, None);
+    pool.bench_key(0, 120);
+    let benched = pool.status()[0].cooldown_secs_remaining;
+    assert!(
+        (119..=120).contains(&benched),
+        "with no cap bench_key must preserve the requested 120 s, got {benched}s"
+    );
+    assert_eq!(
+        pool.status()[0].max_in_flight,
+        4,
+        "bench_key must not change the AIMD window while applying a cap"
+    );
+
+    // A cap BELOW the requested duration shortens it.
+    let pool =
+        KeyPool::with_max_in_flight_aimd_and_bench_cap(keys.clone(), 4, AimdMode::Fixed, Some(30));
+    pool.bench_key(0, 120);
+    let benched = pool.status()[0].cooldown_secs_remaining;
+    assert!(
+        (29..=30).contains(&benched),
+        "the cap must shorten a 120 s bench to 30 s, got {benched}s"
+    );
+
+    // A cap ABOVE the requested duration must NOT extend it.
+    pool.bench_key(0, 5);
+    let benched = pool.status()[0].cooldown_secs_remaining;
+    assert!(
+        (4..=5).contains(&benched),
+        "the cap must never extend a bench, got {benched}s"
+    );
+}
+
+/// An active auth quarantine is credential-level evidence. A later transient
+/// rate-limit bench must not downgrade it to `RateLimit`, shorten its
+/// duration to the configured bench cap, or misreport its reason.
+#[test]
+fn test_active_auth_quarantine_survives_later_bench_key() {
+    let keys = vec![make_key_entry("key1", "a")];
+    let pool = KeyPool::with_max_in_flight_aimd_and_bench_cap(keys, 4, AimdMode::Fixed, Some(30));
+    pool.mark_auth_failed(0, Duration::from_secs(900));
+
+    pool.bench_key(0, 30);
+
+    let after = pool.status()[0].clone();
+    assert_eq!(
+        after.bench_reason,
+        Some(BenchReason::AuthFailure),
+        "an active auth quarantine must survive a later rate-limit bench"
+    );
+    assert!(
+        after.cooldown_secs_remaining > 30,
+        "an active auth quarantine must not be shortened to the rate-limit bench cap, got {}s",
+        after.cooldown_secs_remaining
+    );
+    assert!(
+        !after.active,
+        "the preserved auth quarantine must keep the key inactive"
+    );
+}
+
+/// With no existing quarantine, the cooldown-only operation still applies the
+/// ordinary rate-limit bench.
+#[test]
+fn test_bench_key_without_quarantine_applies_rate_limit_bench() {
+    let keys = vec![make_key_entry("key1", "a")];
+    let pool = KeyPool::with_max_in_flight(keys, 4);
+
+    pool.bench_key(0, 60);
+
+    let after = pool.status()[0].clone();
+    assert_eq!(
+        after.bench_reason,
+        Some(BenchReason::RateLimit),
+        "a key without a quarantine must receive a rate-limit bench"
+    );
+    assert!(
+        !after.active,
+        "the rate-limit bench must make the key inactive"
+    );
+    assert!(
+        after.cooldown_secs_remaining > 0 && after.cooldown_secs_remaining <= 60,
+        "the rate-limit bench must apply the requested cooldown, got {}s",
+        after.cooldown_secs_remaining
+    );
+}
+
+/// Once an auth quarantine has expired, it is no longer active and a
+/// rate-limit bench may replace it.
+#[test]
+fn test_expired_auth_cooldown_can_be_replaced_by_rate_limit_bench() {
+    let keys = vec![make_key_entry("key1", "a")];
+    let pool = KeyPool::with_max_in_flight(keys, 4);
+    pool.mark_auth_failed(0, Duration::from_millis(1));
+    std::thread::sleep(Duration::from_millis(10));
+    assert!(
+        pool.status()[0].active,
+        "the short auth quarantine must be expired before the bench"
+    );
+
+    pool.bench_key(0, 60);
+
+    let after = pool.status()[0].clone();
+    assert_eq!(
+        after.bench_reason,
+        Some(BenchReason::RateLimit),
+        "an expired auth cooldown must be replaceable by a rate-limit bench"
+    );
+    assert!(
+        !after.active,
+        "the replacement rate-limit bench must make the key inactive"
+    );
+    assert!(
+        after.cooldown_secs_remaining > 0 && after.cooldown_secs_remaining <= 60,
+        "the replacement rate-limit bench must apply the requested cooldown, got {}s",
+        after.cooldown_secs_remaining
+    );
+}
+
+/// Preserving the auth cooldown must not suppress the AIMD penalty:
+/// `mark_rate_limited` still applies exactly one penalty (4 -> 2 slots).
+#[test]
+fn test_mark_rate_limited_applies_exactly_one_aimd_penalty_with_active_auth_quarantine() {
+    let keys = vec![make_key_entry("key1", "a")];
+    let pool = KeyPool::with_max_in_flight(keys, 4);
+    pool.mark_auth_failed(0, Duration::from_secs(900));
+
+    pool.mark_rate_limited(0, 60);
+
+    let after = pool.status()[0].clone();
+    assert_eq!(
+        after.max_in_flight, 2,
+        "mark_rate_limited must apply exactly one AIMD penalty while preserving auth quarantine"
+    );
+    assert_eq!(
+        after.bench_reason,
+        Some(BenchReason::AuthFailure),
+        "the AIMD penalty must not change which cooldown survives"
+    );
+}

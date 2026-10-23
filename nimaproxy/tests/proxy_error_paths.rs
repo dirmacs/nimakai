@@ -3177,3 +3177,241 @@ async fn test_stream_longer_than_whole_request_cap_survives() {
         "paused time must keep this fast in wall-clock; took {wall_elapsed:?}"
     );
 }
+
+// ============================================================================
+// Upstream Retry-After on the legacy HTTP paths
+// ============================================================================
+
+/// `/v1/completions` must honour the upstream's numeric `Retry-After` when it
+/// benches a rate-limited key.
+///
+/// The handler used to hardcode a 60 s bench, so an upstream asking for a 7 s
+/// wait parked the key for 60 s — long enough to turn one throttled key into
+/// an admission failure for every later request that needed it.
+#[tokio::test]
+async fn test_completions_honours_upstream_retry_after() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "7")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect(1)
+        .create();
+
+    let state = make_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "prompt": "test",
+        "max_tokens": 10
+    });
+
+    let resp = nimaproxy::completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+    let status = resp.status();
+
+    mock.assert();
+    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    let cooldown = statuses[0].cooldown_secs_remaining;
+    assert!(cooldown > 0, "a 429 must bench the key, got {cooldown}s");
+    assert!(
+        cooldown <= 7,
+        "the bench must follow the upstream Retry-After (7s), got {cooldown}s"
+    );
+}
+
+/// `/v1/embeddings` must honour the upstream's numeric `Retry-After` too — it
+/// shares the legacy HTTP path with `/v1/completions` and had the same
+/// hardcoded 60 s bench.
+#[tokio::test]
+async fn test_embeddings_honours_upstream_retry_after() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/embeddings")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "4")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect(1)
+        .create();
+
+    let state = make_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "input": "test"
+    });
+
+    let resp = nimaproxy::embeddings(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+    let status = resp.status();
+
+    mock.assert();
+    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    let cooldown = statuses[0].cooldown_secs_remaining;
+    assert!(cooldown > 0, "a 429 must bench the key, got {cooldown}s");
+    assert!(
+        cooldown <= 4,
+        "the bench must follow the upstream Retry-After (4s), got {cooldown}s"
+    );
+}
+
+/// Without a usable `Retry-After`, both legacy paths fall back to 60 s.
+#[tokio::test]
+async fn test_completions_without_retry_after_falls_back_to_60s() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect(1)
+        .create();
+
+    let state = make_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "prompt": "test",
+        "max_tokens": 10
+    });
+
+    let resp = nimaproxy::completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    mock.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    let cooldown = state.pool.status()[0].cooldown_secs_remaining;
+    assert!(
+        (55..=60).contains(&cooldown),
+        "a missing Retry-After must fall back to a 60s bench, got {cooldown}s"
+    );
+}
+
+// ============================================================================
+// Racing: one AIMD penalty per 429 leg
+// ============================================================================
+
+/// Two keys, each with a window of 4 slots, and a 5 s cap on rate-limit
+/// benches. The cap is deliberately far below the upstream's `Retry-After` so
+/// the bench assertion can only pass if the cap is applied as a maximum.
+fn make_racing_state_two_keys_capped(api_url: String) -> Arc<AppState> {
+    let key_entries = vec![
+        KeyEntry {
+            key: "key-a".to_string(),
+            label: Some("key-a".to_string()),
+            disabled: false,
+        },
+        KeyEntry {
+            key: "key-b".to_string(),
+            label: Some("key-b".to_string()),
+            disabled: false,
+        },
+    ];
+    AppState::new_with_controls(
+        AppStateParams {
+            keys: key_entries,
+            target: api_url,
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_max_parallel: 2,
+            racing_timeout_ms: 8000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            max_in_flight_per_key: 4,
+            rate_limit_bench_cap_secs: Some(5),
+            ..RuntimeControls::default()
+        },
+    )
+}
+
+/// A racing leg that returns 429 must cost the key EXACTLY ONE AIMD penalty.
+///
+/// The racing path used to record the penalty per leg AND apply
+/// `mark_rate_limited` again after the join, so one 429 leg halved the key's
+/// window twice (4 -> 2 -> 1) and pinned it at the floor. The post-join step
+/// is now bench-only, so one leg halves the window once (4 -> 2).
+#[tokio::test]
+async fn test_racing_429_applies_one_aimd_penalty_per_leg() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "30")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect_at_least(1)
+        .create();
+
+    let state = make_racing_state_two_keys_capped(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = nimaproxy::proxy::chat::chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    mock.assert();
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        "a race where every leg returns 429 must surface 429"
+    );
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 2);
+    for (idx, status) in statuses.iter().enumerate() {
+        assert_eq!(
+            status.max_in_flight, 2,
+            "key {idx} took more than one AIMD penalty for a single 429 leg: window is {}",
+            status.max_in_flight
+        );
+        assert!(
+            status.cooldown_secs_remaining > 0,
+            "key {idx} must be benched after a 429"
+        );
+        assert!(
+            status.cooldown_secs_remaining <= 5,
+            "key {idx} bench must be capped at 5s, got {}s",
+            status.cooldown_secs_remaining
+        );
+    }
+}

@@ -14,7 +14,26 @@
 //!
 //! Both are prevented by making the decision one function.
 
+use axum::http::HeaderMap;
 use std::time::{Duration, Instant};
+
+/// Parse an upstream `Retry-After` duration in seconds.
+///
+/// Only the numeric delta-seconds form is supported. The HTTP-date form is
+/// intentionally unsupported and, like a missing, malformed, or non-numeric
+/// value, falls back to 60 seconds.
+///
+/// This helper replaces the identical inline parsers previously duplicated
+/// across the chat, fallback, racing, and HTTP request paths. Keeping one
+/// implementation is the point: the duplicated copies were the defect being
+/// removed, so they must not grow another parsing variant.
+pub(crate) fn upstream_retry_after_secs(headers: &HeaderMap) -> u64 {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(60)
+}
 
 /// Total wall-clock ceiling for a request's upstream attempts, as a multiple
 /// of one timeout window. With a 15000 ms window this permits exactly one

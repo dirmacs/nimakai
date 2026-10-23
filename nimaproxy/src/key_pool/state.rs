@@ -64,25 +64,47 @@ impl super::KeyPool {
     /// Mark a key as rate-limited for `secs` seconds.
     ///
     /// Reserved for a real upstream 429, i.e. the upstream explicitly saying
-    /// this key is throttled. This both benches the key and halves its window,
-    /// which is correct for a per-key limit but wrong for an upstream-wide
-    /// stall — use [`KeyPool::note_upstream_stall`] for that.
+    /// this key is throttled. This applies exactly one AIMD penalty and one
+    /// temporary bench. Use [`KeyPool::record_rate_limited`] when only the
+    /// penalty is wanted, or [`KeyPool::bench_key`] when only the temporary
+    /// bench is wanted.
     pub fn mark_rate_limited(&self, idx: usize, secs: u64) {
-        if idx < self.cooldowns.len() {
-            self.record_rate_limited(idx);
-            // The cap is a MAXIMUM, never an extension: the upstream's own
-            // Retry-After is honoured in full unless it is longer than the
-            // cap. With no cap configured this is today's behaviour exactly.
-            let secs = match self.rate_limit_bench_cap_secs {
-                Some(cap) => secs.min(cap),
-                None => secs,
-            };
-            let mut cd = self.cooldowns[idx].lock();
-            *cd = Some((
-                Instant::now() + Duration::from_secs(secs),
-                BenchReason::RateLimit,
-            ));
+        self.record_rate_limited(idx);
+        self.bench_key(idx, secs);
+    }
+
+    /// Bench a key for `secs` seconds without changing its AIMD window.
+    ///
+    /// This applies only a temporary [`BenchReason::RateLimit`] cooldown. It
+    /// does not halve the key's window, fold a 429 into its pressure ratio,
+    /// or change its recovery credit. The configured bench cap is a
+    /// MAXIMUM, never an extension: the requested duration is honoured in full
+    /// unless it is longer than the cap. With no cap configured the requested
+    /// duration is preserved exactly.
+    ///
+    /// An active [`BenchReason::AuthFailure`] quarantine is preserved: a
+    /// credential-level 401/403 must not be downgraded by a later transient
+    /// 429. An expired auth quarantine, like an active rate-limit cooldown,
+    /// may be replaced by this bench.
+    pub fn bench_key(&self, idx: usize, secs: u64) {
+        if idx >= self.cooldowns.len() {
+            return;
         }
+        let secs = match self.rate_limit_bench_cap_secs {
+            Some(cap) => secs.min(cap),
+            None => secs,
+        };
+        let mut cd = self.cooldowns[idx].lock();
+        if matches!(
+            *cd,
+            Some((expiry, BenchReason::AuthFailure)) if Instant::now() < expiry
+        ) {
+            return;
+        }
+        *cd = Some((
+            Instant::now() + Duration::from_secs(secs),
+            BenchReason::RateLimit,
+        ));
     }
 
     /// Mark a key as having failed upstream auth (401/403 response). This is a distinct

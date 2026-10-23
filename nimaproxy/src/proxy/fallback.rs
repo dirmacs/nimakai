@@ -8,6 +8,7 @@ use crate::proxy::messages::{
     normalize_assistant_messages, sanitize_tool_calls, transform_message_roles,
 };
 use crate::proxy::racing::{racing_deadline_response, timeout_before_deadline};
+use crate::proxy::retry::upstream_retry_after_secs;
 use crate::proxy::timeouts::request_shape_summary;
 use crate::proxy::timeouts::request_turn_summary;
 use crate::proxy::timeouts::{record_model_timeout, timeout_for_model};
@@ -187,12 +188,7 @@ pub(crate) async fn solo_model_fallback(
             let status = resp.status();
             if status == StatusCode::TOO_MANY_REQUESTS {
                 state.gateway_metrics.record_rate_limit();
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(60);
+                let retry_after = upstream_retry_after_secs(resp.headers());
                 state.pool.mark_rate_limited(key_idx, retry_after);
                 last_error = Some((
                     StatusCode::TOO_MANY_REQUESTS,

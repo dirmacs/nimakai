@@ -7,6 +7,7 @@ use crate::proxy::messages::{
     fix_message_ordering, inject_mistral_tool_params, normalize_assistant_messages,
     sanitize_tool_calls, transform_message_roles,
 };
+use crate::proxy::retry::upstream_retry_after_secs;
 use crate::proxy::timeouts::{
     prompt_chars, record_model_timeout, request_shape_summary, request_turn_summary,
     timeout_for_model,
@@ -279,12 +280,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                 Ok(Ok(resp)) => {
                     let latency = t0.elapsed().as_millis() as f64;
                     let status = resp.status();
-                    let retry_after_secs: u64 = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .unwrap_or(60);
+                    let retry_after_secs: u64 = upstream_retry_after_secs(resp.headers());
                     let record_outcome = |ok: bool| {
                         if let Some(ref label) = key_label {
                             state_clone.model_stats.record_with_key(
@@ -776,7 +772,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
         }
     }
     for (key_idx, retry_after_secs) in pending_rate_limited_keys {
-        state.pool.mark_rate_limited(key_idx, retry_after_secs);
+        state.pool.bench_key(key_idx, retry_after_secs);
     }
     if saw_non_rate_limit_failure {
         state.gateway_metrics.record_all_racers_failed();

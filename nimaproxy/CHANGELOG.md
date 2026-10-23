@@ -4,6 +4,25 @@ All notable changes to nimaproxy will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Rate-limit recovery now charges exactly one AIMD penalty per upstream 429 event. The racing path
+  previously halved a key's concurrency window once for the 429 leg and again after the race joined,
+  pinning a key at the floor; the post-race step is now bench-only.
+- `/v1/completions` and `/v1/embeddings` now honour the upstream's numeric `Retry-After` header
+  when benching a rate-limited key, falling back to 60 seconds when the header is absent or
+  malformed. The configured `rate_limit_bench_cap_secs` remains a maximum on the requested bench.
+- A rate-limit bench no longer downgrades an active auth quarantine. A 401/403 is credential-level
+  evidence, so a later transient 429 cannot replace it, shorten it to `rate_limit_bench_cap_secs`,
+  or relabel it from `AuthFailure` to `RateLimit` in `/stats` and `/health`. The AIMD penalty is
+  unchanged: a 429 still costs exactly one penalty.
+
+### Added
+
+- `/stats` and `/health` now report each key's `bench_reason` and `stalls`; `/stats.gateway` adds
+  `keys_benched_rate_limit`, counting keys currently benched for rate limiting and excluding auth
+  quarantines.
+
 ## [0.15.7] - 2026-09-02
 
 ### Added

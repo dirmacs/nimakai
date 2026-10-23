@@ -1,6 +1,8 @@
+use crate::key_pool::BenchReason;
 use crate::proxy::admission::acquire_gateway_permits;
 use crate::proxy::chat::MAX_RETRIES;
 use crate::proxy::messages::extract_response_metrics;
+use crate::proxy::retry::upstream_retry_after_secs;
 use crate::turn_log::TurnRecord;
 use crate::AppState;
 use axum::{
@@ -15,6 +17,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
+
 pub async fn models(State(state): State<Arc<AppState>>) -> Response {
     let configured_models = state.configured_models();
     if !configured_models.is_empty() {
@@ -92,6 +95,8 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "in_flight": s.in_flight,
                 "max_in_flight": s.max_in_flight,
                 "configured_max_in_flight": s.configured_max_in_flight,
+                "bench_reason": s.bench_reason,
+                "stalls": s.stalls,
             })
         })
         .collect();
@@ -146,9 +151,12 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             })
         })
         .collect();
-    let keys_json: Vec<Value> = state
-        .pool
-        .status()
+    let key_statuses = state.pool.status();
+    let keys_benched_rate_limit = key_statuses
+        .iter()
+        .filter(|s| s.bench_reason == Some(BenchReason::RateLimit))
+        .count();
+    let keys_json: Vec<Value> = key_statuses
         .iter()
         .map(|s| {
             serde_json::json!({
@@ -161,6 +169,8 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "configured_max_in_flight": s.configured_max_in_flight,
                 "auth_failures": s.auth_failures,
                 "rate_limit_ratio": s.rate_limit_ratio,
+                "bench_reason": s.bench_reason,
+                "stalls": s.stalls,
             })
         })
         .collect();
@@ -192,6 +202,7 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "timeout_count": metrics.timeout_count,
             "truncated_streams": metrics.truncated_streams,
             "rate_limit_count": metrics.rate_limit_count,
+            "keys_benched_rate_limit": keys_benched_rate_limit,
             "fanout_total": metrics.fanout_total,
             "fanout_samples": metrics.fanout_samples,
             "fanout_avg": metrics.fanout_avg,
@@ -409,7 +420,8 @@ pub async fn completions(
                 let ok = status.is_success();
                 if status == StatusCode::TOO_MANY_REQUESTS {
                     state.gateway_metrics.record_rate_limit();
-                    state.pool.mark_rate_limited(key_lease.idx, 60);
+                    let retry_after = upstream_retry_after_secs(resp.headers());
+                    state.pool.mark_rate_limited(key_lease.idx, retry_after);
                     continue;
                 }
                 if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -623,7 +635,8 @@ pub async fn embeddings(
                 let ok = status.is_success();
                 if status == StatusCode::TOO_MANY_REQUESTS {
                     state.gateway_metrics.record_rate_limit();
-                    state.pool.mark_rate_limited(key_lease.idx, 60);
+                    let retry_after = upstream_retry_after_secs(resp.headers());
+                    state.pool.mark_rate_limited(key_lease.idx, retry_after);
                     continue;
                 }
                 if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
