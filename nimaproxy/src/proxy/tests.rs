@@ -1,10 +1,9 @@
 use crate::proxy::admission::{try_acquire_gateway_permits, GatewayAcquireError};
 use crate::proxy::chat::chat_completions;
 use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params, count_repetitions};
-use crate::proxy::messages::is_minimax_model;
 use crate::proxy::messages::{
-    extract_response_metrics, inject_minimax_system_message, inject_mistral_tool_params,
-    normalize_assistant_messages, sanitize_tool_calls, validate_model_exists,
+    extract_response_metrics, inject_mistral_tool_params, normalize_assistant_messages,
+    sanitize_tool_calls, validate_model_exists,
 };
 use crate::proxy::racing::{
     adaptive_racing_parallel, prompt_parallel_cap, race_models, solo_candidate_model,
@@ -396,75 +395,6 @@ fn test_extract_response_metrics_multiple_choices() {
     assert_eq!(tokens, 20);
     assert!(tool);
 }
-// ============ inject_minimax_system_message tests ============
-#[test]
-fn test_inject_minimax_system_message_adds_to_empty_messages() {
-    let mut json = json!({
-        "model": "minimaxai/minimax-01",
-        "messages": []
-    });
-    inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
-    assert_eq!(json["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(json["messages"][0]["role"], "system");
-    assert!(json["messages"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("When using tools, output JSON"));
-}
-#[test]
-fn test_inject_minimax_system_message_prepends_to_existing_system() {
-    let mut json = json!({
-        "model": "minimaxai/minimax-01",
-        "messages": [
-            {"role": "system", "content": "Original system message"}
-        ]
-    });
-    inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
-    let content = json["messages"][0]["content"].as_str().unwrap();
-    assert!(content.contains("Original system message"));
-    assert!(content.contains("When using tools, output JSON"));
-}
-#[test]
-fn test_inject_minimax_system_message_prepends_to_non_system_first_message() {
-    let mut json = json!({
-        "model": "minimaxai/minimax-01",
-        "messages": [
-            {"role": "user", "content": "Hello"}
-        ]
-    });
-    inject_minimax_system_message(&mut json, "minimaxai/minimax-01");
-    assert_eq!(json["messages"].as_array().unwrap().len(), 2);
-    assert_eq!(json["messages"][0]["role"], "system");
-    assert_eq!(json["messages"][1]["role"], "user");
-    assert!(json["messages"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("When using tools, output JSON"));
-}
-#[test]
-fn test_inject_minimax_system_message_only_for_minimax_models() {
-    let mut json_gpt = json!({
-        "model": "openai/gpt-4",
-        "messages": []
-    });
-    inject_minimax_system_message(&mut json_gpt, "openai/gpt-4");
-    assert_eq!(json_gpt["messages"].as_array().unwrap().len(), 0);
-    let mut json_mistral = json!({
-        "model": "mistralai/mistral-medium-3.5-128b",
-        "messages": []
-    });
-    inject_minimax_system_message(&mut json_mistral, "mistralai/mistral-medium-3.5-128b");
-    assert_eq!(json_mistral["messages"].as_array().unwrap().len(), 0);
-}
-#[test]
-fn test_inject_minimax_system_message_empty_model_string() {
-    let mut json = json!({
-        "model": "",
-        "messages": []
-    });
-    inject_minimax_system_message(&mut json, "");
-    assert_eq!(json["messages"].as_array().unwrap().len(), 0);
-}
 // ============ inject_mistral_tool_params tests ============
 #[test]
 fn test_inject_mistral_tool_params_adds_generation_prompt_for_tool_messages() {
@@ -699,11 +629,6 @@ fn test_sanitize_tool_calls_mixed_valid_and_empty_tools() {
     assert_eq!(tools[1]["function"]["name"], "tool2");
 }
 // ============ Additional edge case tests ============
-#[test]
-fn test_is_minimax_model_true_for_minimaxai_prefix() {
-    assert!(is_minimax_model("minimaxai/minimax-01"));
-    assert!(is_minimax_model("minimaxai/minimax-02"));
-}
 // Test for lines 160-166: HTTP client error handling
 #[test]
 fn test_proxy_http_error_recording() {
