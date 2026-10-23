@@ -4,9 +4,8 @@ use crate::proxy::chat_helpers::accept_header_for_body;
 use crate::proxy::chat_helpers::apply_model_params;
 use crate::proxy::http::log_turn_request;
 use crate::proxy::messages::{
-    fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params,
-    mistral_validation_error, normalize_assistant_messages, sanitize_tool_calls,
-    transform_message_roles,
+    fix_message_ordering, inject_mistral_tool_params, mistral_validation_error,
+    normalize_assistant_messages, sanitize_tool_calls, transform_message_roles,
 };
 use crate::proxy::racing::{racing_deadline_response, timeout_before_deadline};
 use crate::proxy::timeouts::request_shape_summary;
@@ -30,7 +29,6 @@ fn prepare_model_body(state: &AppState, body: &Bytes, model_id: &str) -> Option<
     let mut json: Value = serde_json::from_slice(body).ok()?;
     json["model"] = Value::String(model_id.to_string());
     inject_mistral_tool_params(&mut json, model_id);
-    inject_minimax_system_message(&mut json, model_id);
     sanitize_tool_calls(&mut json);
     transform_message_roles(&mut json, model_id, state);
     fix_message_ordering(&mut json);

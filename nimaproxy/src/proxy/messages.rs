@@ -581,37 +581,6 @@ pub(crate) fn has_tool_messages(json: &Value) -> bool {
 pub(crate) fn is_mistral_model(model_id: &str) -> bool {
     model_id.contains("mistral") || model_id.contains("devstral")
 }
-/// Check if model is MiniMax (requires JSON tool calling format hint)
-pub(crate) fn is_minimax_model(model_id: &str) -> bool {
-    model_id.starts_with("minimaxai/")
-}
-/// Inject system message for MiniMax models to use JSON tool calling format
-pub(crate) fn inject_minimax_system_message(json: &mut Value, model_id: &str) {
-    if !is_minimax_model(model_id) {
-        return;
-    }
-    let minmax_instruction = r#"When using tools, output JSON in this exact format:
-{"tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "function_name", "arguments": {"arg": "value"}}}]}
-Do NOT use XML tags like <minimax:tool_call> or <invoke>."#;
-    if let Some(messages) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
-        if let Some(first) = messages.get_mut(0) {
-            if first.get("role").and_then(|r| r.as_str()) == Some("system") {
-                if let Some(content) = first.get_mut("content") {
-                    if let Some(s) = content.as_str() {
-                        *content = Value::String(format!("{}\n\n{}", s, minmax_instruction));
-                    }
-                }
-            } else {
-                let system_msg =
-                    serde_json::json!({"role": "system", "content": minmax_instruction});
-                messages.insert(0, system_msg);
-            }
-        } else {
-            let system_msg = serde_json::json!({"role": "system", "content": minmax_instruction});
-            messages.insert(0, system_msg);
-        }
-    }
-}
 /// Check if the last message in the conversation is from the assistant.
 pub(crate) fn is_last_message_from_assistant(json: &Value) -> bool {
     if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
@@ -666,8 +635,6 @@ pub fn resolve_model(body: Bytes, state: &AppState) -> (String, Bytes) {
     // Inject Mistral-specific parameters BEFORE message transformations
     // so has_tool_messages() can detect tool messages in the original JSON
     inject_mistral_tool_params(&mut json, &model_id);
-    // Inject MiniMax system message for JSON tool calling
-    inject_minimax_system_message(&mut json, &model_id);
     // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
     sanitize_tool_calls(&mut json);
     // Transform roles first (developer→user) so fix_message_ordering sees the

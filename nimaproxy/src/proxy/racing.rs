@@ -4,8 +4,8 @@ use crate::proxy::chat_helpers::{accept_header_for_json, apply_model_params};
 use crate::proxy::fallback::solo_model_fallback;
 use crate::proxy::http::log_turn_request;
 use crate::proxy::messages::{
-    fix_message_ordering, inject_minimax_system_message, inject_mistral_tool_params,
-    normalize_assistant_messages, sanitize_tool_calls, transform_message_roles,
+    fix_message_ordering, inject_mistral_tool_params, normalize_assistant_messages,
+    sanitize_tool_calls, transform_message_roles,
 };
 use crate::proxy::timeouts::{
     prompt_chars, record_model_timeout, request_shape_summary, request_turn_summary,
@@ -207,11 +207,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
             Err(_) => continue,
         };
         json["model"] = Value::String(model_id.clone());
-        // Inject Mistral-specific parameters BEFORE message transformations
-        // so has_tool_messages() can detect tool messages in the original JSON
         inject_mistral_tool_params(&mut json, model_id);
-        // Inject MiniMax system message for JSON tool calling
-        inject_minimax_system_message(&mut json, model_id);
         // Sanitize tool_calls to remove entries with empty names (Azure OpenAI rejects these)
         sanitize_tool_calls(&mut json);
         // Transform roles first (developer→user) so fix_message_ordering sees the
