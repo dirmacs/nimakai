@@ -8,6 +8,7 @@ use crate::proxy::messages::{
     normalize_assistant_messages, sanitize_tool_calls, transform_message_roles,
 };
 use crate::proxy::racing::{racing_deadline_response, timeout_before_deadline};
+use crate::proxy::retry::upstream_retry_after_secs;
 use crate::proxy::timeouts::request_shape_summary;
 use crate::proxy::timeouts::request_turn_summary;
 use crate::proxy::timeouts::{record_model_timeout, timeout_for_model};
@@ -144,6 +145,7 @@ pub(crate) async fn solo_model_fallback(
                 }
                 Err(_) => {
                     state.gateway_metrics.record_timeout();
+                    state.pool.note_upstream_stall(key_idx);
                     let msg = if send_timeout_ms < request_timeout_ms {
                         format!(
                             "racing deadline exceeded after {}ms",
@@ -187,12 +189,7 @@ pub(crate) async fn solo_model_fallback(
             let status = resp.status();
             if status == StatusCode::TOO_MANY_REQUESTS {
                 state.gateway_metrics.record_rate_limit();
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(60);
+                let retry_after = upstream_retry_after_secs(resp.headers());
                 state.pool.mark_rate_limited(key_idx, retry_after);
                 last_error = Some((
                     StatusCode::TOO_MANY_REQUESTS,
@@ -212,6 +209,8 @@ pub(crate) async fn solo_model_fallback(
                 .to_string();
             let Some(body_timeout_ms) = timeout_before_deadline(deadline, request_timeout_ms)
             else {
+                // The remaining request deadline cut this admitted wait short.
+                state.pool.note_upstream_stall(key_idx);
                 return racing_deadline_response(&state);
             };
             let body_bytes = match timeout(Duration::from_millis(body_timeout_ms), resp.bytes())
@@ -252,6 +251,7 @@ pub(crate) async fn solo_model_fallback(
                 }
                 Err(_) => {
                     state.gateway_metrics.record_timeout();
+                    state.pool.note_upstream_stall(key_idx);
                     let msg = if body_timeout_ms < request_timeout_ms {
                         format!(
                             "racing deadline exceeded after {}ms",

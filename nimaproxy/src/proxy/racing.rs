@@ -7,6 +7,7 @@ use crate::proxy::messages::{
     fix_message_ordering, inject_mistral_tool_params, normalize_assistant_messages,
     sanitize_tool_calls, transform_message_roles,
 };
+use crate::proxy::retry::upstream_retry_after_secs;
 use crate::proxy::timeouts::{
     prompt_chars, record_model_timeout, request_shape_summary, request_turn_summary,
     timeout_for_model,
@@ -279,12 +280,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                 Ok(Ok(resp)) => {
                     let latency = t0.elapsed().as_millis() as f64;
                     let status = resp.status();
-                    let retry_after_secs: u64 = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .unwrap_or(60);
+                    let retry_after_secs: u64 = upstream_retry_after_secs(resp.headers());
                     let record_outcome = |ok: bool| {
                         if let Some(ref label) = key_label {
                             state_clone.model_stats.record_with_key(
@@ -313,7 +309,13 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         .await
                         {
                             Ok(Ok(bytes)) => bytes,
-                            Ok(Err(_)) | Err(_) => Bytes::new(),
+                            // A body read timeout is an elapsed wait; a body I/O
+                            // error is not, so only the timeout arm is a stall.
+                            Ok(Err(_)) => Bytes::new(),
+                            Err(_) => {
+                                state_clone.pool.note_upstream_stall(key_idx_for_spawn);
+                                Bytes::new()
+                            }
                         };
                         let body_str = String::from_utf8_lossy(&body_bytes);
                         // Auth failure (401/403): this racing leg's KEY is bad, not the
@@ -417,6 +419,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                     key_label.as_deref(),
                                     timeout_ms_for_model,
                                 );
+                                state_clone.pool.note_upstream_stall(key_idx_for_spawn);
                                 log_turn_request(TurnRecord {
                                     requested_model: "auto".to_string(),
                                     responding_model: model_id_clone.clone(),
@@ -484,6 +487,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         }
                         Err(_) => {
                             state_clone.gateway_metrics.record_timeout();
+                            state_clone.pool.note_upstream_stall(key_idx_for_spawn);
                             let timeout_error = if body_timeout_ms < timeout_ms_for_model {
                                 format!(
                                     "racing deadline exceeded after {}ms",
@@ -668,6 +672,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                 }
                 Err(_) => {
                     state_clone.gateway_metrics.record_timeout();
+                    state_clone.pool.note_upstream_stall(key_idx_for_spawn);
                     let timeout_error = if send_timeout_ms_for_model < timeout_ms_for_model {
                         format!(
                             "racing deadline exceeded after {}ms",
@@ -776,7 +781,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
         }
     }
     for (key_idx, retry_after_secs) in pending_rate_limited_keys {
-        state.pool.mark_rate_limited(key_idx, retry_after_secs);
+        state.pool.bench_key(key_idx, retry_after_secs);
     }
     if saw_non_rate_limit_failure {
         state.gateway_metrics.record_all_racers_failed();

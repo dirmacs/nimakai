@@ -5,6 +5,18 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+/// Safety clamp for a rate-limit bench whose effective duration cannot be
+/// represented as an `Instant` offset.
+///
+/// `Instant` is backed by a platform time representation and does not support
+/// every `u64` second offset. An upstream such as
+/// `Retry-After: 18446744073709551615` must not panic the request handler,
+/// so an unrepresentable duration is deterministically clamped to 24 hours.
+/// This is shorter than the requested duration and long enough to preserve
+/// the temporary-throttle contract while keeping the key recoverable without
+/// operator intervention.
+const UNREPRESENTABLE_BENCH_CLAMP_SECS: u64 = 24 * 60 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyStatus {
     pub label: String,
@@ -22,10 +34,16 @@ pub struct KeyStatus {
     pub rate_limit_ratio: f64,
     /// Cumulative count of upstream 401/403 (auth failure) responses observed for this key.
     pub auth_failures: u64,
-    /// Cumulative count of upstream stalls observed for this key: connected
-    /// and admitted, but no usable bytes inside the timeout window.
+    /// Cumulative count of admitted upstream attempts whose effective wait for
+    /// usable bytes elapsed. This includes send, first-byte, and body timeouts;
+    /// the mid-stream idle rail; and the proxy's remaining request deadline
+    /// cutting the wait short. Connection and body I/O errors are not stalls.
+    /// Counted on the chat, racing, fallback, and
+    /// legacy completions/embeddings request paths.
+    ///
     /// Observational only — a stall never changes this key's window or
-    /// cooldown, because it is the upstream degrading rather than the key.
+    /// cooldown. This counter is not a rate-limit bench: a key being benched
+    /// for rate limiting and a key with observed stalls are separate states.
     pub stalls: u64,
     /// Why this key is benched, if it is. `RateLimit` means a temporary 429 —
     /// wait it out. `AuthFailure` means the credential is bad — replace the
@@ -37,24 +55,16 @@ pub struct KeyStatus {
 impl super::KeyPool {
     /// Note that an upstream *stall* was observed on this key.
     ///
-    /// A stall is a request that connected, was admitted, and then produced no
-    /// usable bytes within the timeout window. It is deliberately NOT treated
-    /// as evidence that the key is degraded, because on this host it is not:
-    /// all four keys are NVIDIA keys on one shared account, and the measured
-    /// stall rate is roughly even across them (27%–57%) while successful
-    /// latency stays fast (p50 1427 ms, p90 1780 ms, max 3617 ms — a request
-    /// that succeeds would not have timed out). The stall is the upstream
-    /// degrading, not the key.
+    /// A stall is an admitted upstream attempt whose effective wait for usable
+    /// bytes elapsed. The effective wait may be a send, first-byte, or body
+    /// timeout; the mid-stream idle rail; or the proxy's remaining request
+    /// deadline cutting the wait short. Connection and body I/O errors are not
+    /// stalls. This is counted on all request paths:
+    /// chat, racing, fallback, and legacy completions/embeddings.
     ///
-    /// Punishing the key here is what produced the fleet-wide lockout measured
-    /// on 2026-10-15: benching the key and halving its window concentrated the
-    /// same upstream load onto the remaining keys, which then stalled and got
-    /// benched too — a death spiral that took admitted traffic from 753
-    /// requests down to 97 (12.9%), with 503/429 for the rest.
-    ///
-    /// So this records the observation for observability and leaves the key's
-    /// window and cooldown untouched. A real 429 is what tells us this key is
-    /// throttled, and that still goes through `mark_rate_limited`.
+    /// This method is observational only: it never changes the key's window or
+    /// cooldown. A stall is also not the same thing as a rate-limit bench; only
+    /// an explicit upstream 429 benches a key for rate limiting.
     pub fn note_upstream_stall(&self, idx: usize) {
         if let Some(counter) = self.stalls.get(idx) {
             counter.fetch_add(1, Ordering::Relaxed);
@@ -64,24 +74,52 @@ impl super::KeyPool {
     /// Mark a key as rate-limited for `secs` seconds.
     ///
     /// Reserved for a real upstream 429, i.e. the upstream explicitly saying
-    /// this key is throttled. This both benches the key and halves its window,
-    /// which is correct for a per-key limit but wrong for an upstream-wide
-    /// stall — use [`KeyPool::note_upstream_stall`] for that.
+    /// this key is throttled. This applies exactly one AIMD penalty and one
+    /// temporary bench. Use [`KeyPool::record_rate_limited`] when only the
+    /// penalty is wanted, or [`KeyPool::bench_key`] when only the temporary
+    /// bench is wanted.
     pub fn mark_rate_limited(&self, idx: usize, secs: u64) {
-        if idx < self.cooldowns.len() {
-            self.record_rate_limited(idx);
-            // The cap is a MAXIMUM, never an extension: the upstream's own
-            // Retry-After is honoured in full unless it is longer than the
-            // cap. With no cap configured this is today's behaviour exactly.
-            let secs = match self.rate_limit_bench_cap_secs {
-                Some(cap) => secs.min(cap),
-                None => secs,
-            };
-            let mut cd = self.cooldowns[idx].lock();
-            *cd = Some((
-                Instant::now() + Duration::from_secs(secs),
-                BenchReason::RateLimit,
-            ));
+        self.record_rate_limited(idx);
+        self.bench_key(idx, secs);
+    }
+
+    /// Bench a key for `secs` seconds without changing its AIMD window.
+    ///
+    /// This applies only a temporary [`BenchReason::RateLimit`] cooldown. It
+    /// does not halve the key's window, fold a 429 into its pressure ratio,
+    /// or change its recovery credit. The configured bench cap is a
+    /// MAXIMUM, never an extension: the requested duration is honoured in full
+    /// unless it is longer than the cap. With no cap configured the requested
+    /// duration is preserved exactly when it is representable as an
+    /// `Instant` offset. A duration that cannot be represented is clamped
+    /// to `UNREPRESENTABLE_BENCH_CLAMP_SECS` so hostile upstream input
+    /// cannot panic the request handler.
+    ///
+    /// An active [`BenchReason::AuthFailure`] quarantine is preserved: a
+    /// credential-level 401/403 must not be downgraded by a later transient
+    /// 429. An expired auth quarantine, like an active rate-limit cooldown,
+    /// may be replaced by this bench.
+    pub fn bench_key(&self, idx: usize, secs: u64) {
+        if idx >= self.cooldowns.len() {
+            return;
+        }
+        let secs = match self.rate_limit_bench_cap_secs {
+            Some(cap) => secs.min(cap),
+            None => secs,
+        };
+        let mut cd = self.cooldowns[idx].lock();
+        if matches!(
+            *cd,
+            Some((expiry, BenchReason::AuthFailure)) if Instant::now() < expiry
+        ) {
+            return;
+        }
+        let now = Instant::now();
+        let expiry = now
+            .checked_add(Duration::from_secs(secs))
+            .or_else(|| now.checked_add(Duration::from_secs(UNREPRESENTABLE_BENCH_CLAMP_SECS)));
+        if let Some(expiry) = expiry {
+            *cd = Some((expiry, BenchReason::RateLimit));
         }
     }
 

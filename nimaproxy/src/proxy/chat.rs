@@ -6,7 +6,7 @@ use crate::proxy::messages::{
     mistral_validation_error, normalize_requested_model, resolve_model, validate_model_exists,
 };
 use crate::proxy::racing::race_models;
-use crate::proxy::retry::RetryPolicy;
+use crate::proxy::retry::{upstream_retry_after_secs, RetryPolicy};
 use crate::proxy::timeouts::{
     conversation_identity, first_byte_timeout_for_model, idle_timeout_for_model,
     record_model_timeout, request_shape_summary, request_turn_summary, sanitize_session,
@@ -242,8 +242,8 @@ pub async fn chat_completions(
                     std::time::Duration::from_millis(request_timeout_ms),
                     retry_policy.budget(),
                 );
+                state.pool.note_upstream_stall(idx);
                 if may_retry {
-                    state.pool.note_upstream_stall(idx);
                     failed_key_idx = Some(idx);
                     log_turn_request(TurnRecord {
                         requested_model: original_model.to_string(),
@@ -356,12 +356,7 @@ pub async fn chat_completions(
                 let status = resp.status();
                 if status == 429 {
                     state.gateway_metrics.record_rate_limit();
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .unwrap_or(60);
+                    let retry_after = upstream_retry_after_secs(resp.headers());
                     state.pool.mark_rate_limited(idx, retry_after);
                     eprintln!("[nimaproxy] key {} rate-limited {}s", idx, retry_after);
                     // A 429 retries on the NEXT key, never the same one: the
@@ -470,7 +465,13 @@ pub async fn chat_completions(
                     .await
                     {
                         Ok(Ok(parts)) => Bytes::from(parts.concat()),
-                        _ => Bytes::new(),
+                        // A body read timeout is an elapsed wait; a body I/O
+                        // error is not, so only the timeout arm is a stall.
+                        Ok(Err(_)) => Bytes::new(),
+                        Err(_) => {
+                            state.pool.note_upstream_stall(idx);
+                            Bytes::new()
+                        }
                     };
                     let body_str = std::str::from_utf8(&err_body).unwrap_or("");
                     let error_excerpt = body_str.chars().take(400).collect::<String>();
@@ -1050,6 +1051,11 @@ pub async fn chat_completions(
                             tokio::time::sleep(Duration::from_millis(25)).await;
                         }
                         let outcome = tap_for_completion.outcome();
+                        // Only the idle guard's abort is an elapsed wait; a
+                        // clean end or upstream I/O error is not a stall.
+                        if outcome.ended_by == crate::proxy::sse_tap::StreamEnd::GuardStall {
+                            state.pool.note_upstream_stall(idx);
+                        }
                         let abort_reason = if outcome.stream_ended_cleanly {
                             None
                         } else {

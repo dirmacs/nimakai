@@ -929,6 +929,349 @@ async fn test_direct_chat_request_uses_configured_timeout() {
     assert_eq!(slow.total, 2);
 }
 
+/// Every timed-out chat attempt must be recorded as an upstream stall.
+///
+/// The send-timeout path used to increment the per-key stall counter only
+/// when a retry was admitted. That made the terminal attempt invisible: with
+/// one key and one admitted retry, the old behavior reported one stall for two
+/// timed-out attempts. The raw upstream accepts each connection and never
+/// answers, so both attempts end in the send-timeout branch.
+#[tokio::test]
+async fn test_chat_timeout_records_every_upstream_stall() {
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _peer)) = listener.accept().await {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                drop(socket);
+            });
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            first_byte_timeout_ms: Some(250),
+            mid_stream_idle_timeout_ms: 250,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "timeout-stall-model",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+
+    let snapshot = state.model_stats.snapshot();
+    let timed_out = snapshot
+        .iter()
+        .find(|s| s.id == "timeout-stall-model")
+        .expect("the timed-out model must be recorded");
+    assert_eq!(timed_out.success, 0);
+    assert_eq!(
+        timed_out.total, 2,
+        "the single-key chat loop must make exactly two timed-out attempts"
+    );
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].stalls, timed_out.total,
+        "every timed-out attempt must count as a per-key upstream stall"
+    );
+}
+
+/// A send timeout on the legacy completions path is an admitted upstream
+/// stall, so it must be counted without benching the key.
+#[tokio::test]
+async fn test_completions_send_timeout_records_upstream_stall() {
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _peer)) = listener.accept().await {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                drop(socket);
+            });
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 250,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "stall-model",
+        "prompt": "hello"
+    });
+
+    let resp = nimaproxy::completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].stalls, 1,
+        "the admitted upstream send timeout must count as one stall"
+    );
+    assert_eq!(
+        statuses[0].cooldown_secs_remaining, 0,
+        "recording an upstream stall must not bench the key"
+    );
+}
+
+/// A connection failure is an I/O error, not an upstream stall.
+#[tokio::test]
+async fn test_completions_connection_error_is_not_an_upstream_stall() {
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 250,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "connection-error-model",
+        "prompt": "hello"
+    });
+
+    let resp = nimaproxy::completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].stalls, 0,
+        "an upstream connection error must not count as a stall"
+    );
+}
+
+/// A send timeout on the legacy embeddings path is an admitted upstream
+/// stall, so it must be counted without benching the key.
+#[tokio::test]
+async fn test_embeddings_send_timeout_records_upstream_stall() {
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _peer)) = listener.accept().await {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                drop(socket);
+            });
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 250,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "stall-model",
+        "input": "hello"
+    });
+
+    let resp = nimaproxy::embeddings(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].stalls, 1,
+        "the admitted upstream send timeout must count as one stall"
+    );
+    assert_eq!(
+        statuses[0].cooldown_secs_remaining, 0,
+        "recording an upstream stall must not bench the key"
+    );
+}
+
+/// A connection failure is an I/O error, not an upstream stall.
+#[tokio::test]
+async fn test_embeddings_connection_error_is_not_an_upstream_stall() {
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "test-key".to_string(),
+                label: Some("test".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 3,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            mid_stream_idle_timeout_ms: 250,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "stall-model",
+        "input": "hello"
+    });
+
+    let resp = nimaproxy::embeddings(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].stalls, 0,
+        "an upstream connection error must not count as a stall"
+    );
+}
+
 /// A timed-out upstream call must be retried on another key, and the total
 /// client wait must stay bounded to roughly one timeout window rather than
 /// one window per key.
@@ -3175,5 +3518,596 @@ async fn test_stream_longer_than_whole_request_cap_survives() {
     assert!(
         wall_elapsed < Duration::from_secs(60),
         "paused time must keep this fast in wall-clock; took {wall_elapsed:?}"
+    );
+}
+
+// ============================================================================
+// Upstream Retry-After on the legacy HTTP paths
+// ============================================================================
+
+/// `/v1/completions` must honour the upstream's numeric `Retry-After` when it
+/// benches a rate-limited key.
+///
+/// The handler used to hardcode a 60 s bench, so an upstream asking for a 7 s
+/// wait parked the key for 60 s — long enough to turn one throttled key into
+/// an admission failure for every later request that needed it.
+#[tokio::test]
+async fn test_completions_honours_upstream_retry_after() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "7")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect(1)
+        .create();
+
+    let state = make_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "prompt": "test",
+        "max_tokens": 10
+    });
+
+    let resp = nimaproxy::completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+    let status = resp.status();
+
+    mock.assert();
+    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    let cooldown = statuses[0].cooldown_secs_remaining;
+    assert!(
+        (6..=7).contains(&cooldown),
+        "the bench must follow the upstream Retry-After (7s), got {cooldown}s"
+    );
+}
+
+/// `/v1/embeddings` must honour the upstream's numeric `Retry-After` too — it
+/// shares the legacy HTTP path with `/v1/completions` and had the same
+/// hardcoded 60 s bench.
+#[tokio::test]
+async fn test_embeddings_honours_upstream_retry_after() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/embeddings")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "4")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect(1)
+        .create();
+
+    let state = make_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "input": "test"
+    });
+
+    let resp = nimaproxy::embeddings(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+    let status = resp.status();
+
+    mock.assert();
+    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    let cooldown = statuses[0].cooldown_secs_remaining;
+    assert!(
+        (3..=4).contains(&cooldown),
+        "the bench must follow the upstream Retry-After (4s), got {cooldown}s"
+    );
+}
+
+/// Without a usable `Retry-After`, both legacy paths fall back to 60 s.
+#[tokio::test]
+async fn test_completions_without_retry_after_falls_back_to_60s() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect(1)
+        .create();
+
+    let state = make_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "prompt": "test",
+        "max_tokens": 10
+    });
+
+    let resp = nimaproxy::completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    mock.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    let cooldown = state.pool.status()[0].cooldown_secs_remaining;
+    assert!(
+        (55..=60).contains(&cooldown),
+        "a missing Retry-After must fall back to a 60s bench, got {cooldown}s"
+    );
+}
+
+/// `/v1/embeddings` must use the same 60 s fallback when the upstream omits
+/// `Retry-After`.
+#[tokio::test]
+async fn test_embeddings_without_retry_after_falls_back_to_60s() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/embeddings")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect(1)
+        .create();
+
+    let state = make_test_state(server.url());
+    let body = serde_json::json!({
+        "model": "test-model",
+        "input": "test"
+    });
+
+    let resp = nimaproxy::embeddings(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await;
+
+    mock.assert();
+    assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    let cooldown = state.pool.status()[0].cooldown_secs_remaining;
+    assert!(
+        (55..=60).contains(&cooldown),
+        "a missing Retry-After must fall back to a 60s bench, got {cooldown}s"
+    );
+}
+
+// ============================================================================
+// Racing: one AIMD penalty per 429 leg
+// ============================================================================
+
+/// Two keys, each with a window of 4 slots, and a 5 s cap on rate-limit
+/// benches. The cap is deliberately far below the upstream's `Retry-After` so
+/// the bench assertion can only pass if the cap is applied as a maximum.
+fn make_racing_state_two_keys_capped(api_url: String) -> Arc<AppState> {
+    let key_entries = vec![
+        KeyEntry {
+            key: "key-a".to_string(),
+            label: Some("key-a".to_string()),
+            disabled: false,
+        },
+        KeyEntry {
+            key: "key-b".to_string(),
+            label: Some("key-b".to_string()),
+            disabled: false,
+        },
+    ];
+    AppState::new_with_controls(
+        AppStateParams {
+            keys: key_entries,
+            target: api_url,
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_max_parallel: 2,
+            racing_timeout_ms: 8000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            max_in_flight_per_key: 4,
+            rate_limit_bench_cap_secs: Some(5),
+            ..RuntimeControls::default()
+        },
+    )
+}
+
+/// A racing leg that returns 429 must cost the key EXACTLY ONE AIMD penalty.
+///
+/// The racing path used to record the penalty per leg AND apply
+/// `mark_rate_limited` again after the join, so one 429 leg halved the key's
+/// window twice (4 -> 2 -> 1) and pinned it at the floor. The post-join step
+/// is now bench-only, so one leg halves the window once (4 -> 2).
+#[tokio::test]
+async fn test_racing_429_applies_one_aimd_penalty_per_leg() {
+    use mockito::Server;
+
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "30")
+        .with_body(r#"{"error":{"message":"rate limited"}}"#)
+        .expect_at_least(1)
+        .create();
+
+    let state = make_racing_state_two_keys_capped(server.url());
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 5
+    });
+
+    let resp = nimaproxy::proxy::chat::chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    mock.assert();
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        "a race where every leg returns 429 must surface 429"
+    );
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 2);
+    for (idx, status) in statuses.iter().enumerate() {
+        assert_eq!(
+            status.max_in_flight, 2,
+            "key {idx} took more than one AIMD penalty for a single 429 leg: window is {}",
+            status.max_in_flight
+        );
+        assert!(
+            status.cooldown_secs_remaining > 0,
+            "key {idx} must be benched after a 429"
+        );
+        assert!(
+            status.cooldown_secs_remaining <= 5,
+            "key {idx} bench must be capped at 5s, got {}s",
+            status.cooldown_secs_remaining
+        );
+    }
+}
+
+/// A committed SSE stream that goes silent past the idle window is an
+/// elapsed wait, so the detached completion observer must count exactly one
+/// stall for the key that served it.
+#[tokio::test]
+async fn test_chat_committed_sse_idle_stall_counts_a_stall() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n";
+            let framed = format!("{:x}\r\n{}\r\n", chunk.len(), chunk);
+            let _ = sock.write_all(framed.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Stay silent past the idle window so the guard, not an upstream
+            // close, is what ends the committed response.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 1,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            first_byte_timeout_ms: Some(250),
+            mid_stream_idle_timeout_ms: 250,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "committed-stall-model",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": true
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+    let drained = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
+    assert!(
+        drained.is_err(),
+        "a gap past the idle window must abort the committed body"
+    );
+
+    // The completion observer runs after the body ends, so wait for its
+    // observational counter to land before reading it.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state
+                .pool
+                .status()
+                .iter()
+                .map(|status| status.stalls)
+                .sum::<u64>()
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the committed-SSE completion observer must record the guard stall");
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].stalls, 1,
+        "the committed SSE idle guard must count exactly one upstream stall"
+    );
+    assert_eq!(
+        statuses[0].cooldown_secs_remaining, 0,
+        "recording an upstream stall must not bench the key"
+    );
+    assert_eq!(
+        statuses.iter().map(|status| status.stalls).sum::<u64>(),
+        1,
+        "the committed SSE idle guard must not count the same attempt twice"
+    );
+}
+
+/// A 400 whose headers arrived but whose error body never completes is an
+/// elapsed wait, so the key must record one stall; the forwarded response
+/// keeps its 400 status and empty body.
+#[tokio::test]
+async fn test_chat_400_error_body_timeout_counts_a_stall() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: 128\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.flush().await;
+            // The promised body never arrives, so only the proxy's body
+            // timeout can end this admitted wait.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![KeyEntry {
+                key: "k1".to_string(),
+                label: Some("k1".to_string()),
+                disabled: false,
+            }],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 1,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            first_byte_timeout_ms: Some(250),
+            mid_stream_idle_timeout_ms: 250,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "error-body-timeout-model",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    let forwarded = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    assert!(
+        forwarded.is_empty(),
+        "a timed-out 400 error body must still be forwarded empty"
+    );
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0].stalls, 1,
+        "a 400 error-body timeout must count exactly one upstream stall"
+    );
+    assert_eq!(
+        statuses[0].cooldown_secs_remaining, 0,
+        "recording an upstream stall must not bench the key"
+    );
+    assert_eq!(
+        statuses.iter().map(|status| status.stalls).sum::<u64>(),
+        1,
+        "the 400 error-body timeout must not count the same attempt twice"
+    );
+}
+
+/// Each racing leg that receives a 5xx header and then stalls while reading
+/// the error body is one admitted elapsed wait, so every racing key must
+/// record exactly one stall.
+#[tokio::test]
+async fn test_racing_5xx_error_body_timeout_counts_a_stall() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let head = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 128\r\nconnection: close\r\n\r\n";
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.flush().await;
+                // Both legs withhold their promised error body until after
+                // the per-model timeout has elapsed.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            });
+        }
+    });
+
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![
+                KeyEntry {
+                    key: "key-a".to_string(),
+                    label: Some("key-a".to_string()),
+                    disabled: false,
+                },
+                KeyEntry {
+                    key: "key-b".to_string(),
+                    label: Some("key-b".to_string()),
+                    disabled: false,
+                },
+            ],
+            target: format!("http://{}", addr),
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec!["model-a".to_string(), "model-b".to_string()],
+            racing_max_parallel: 2,
+            racing_timeout_ms: 250,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            racing_adaptive: true,
+            racing_min_parallel: 2,
+            racing_pressure_parallel: 2,
+            racing_degraded_parallel: 2,
+            racing_fast_models: vec![],
+            racing_fallback_models: vec![],
+            racing_large_prompt_char_threshold: 0,
+            racing_large_prompt_parallel: 1,
+            racing_solo_fallback: false,
+            racing_max_total_request_ms: 30000,
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 250,
+            dynamic_sample_floor: 10,
+            first_byte_timeout_ms: Some(250),
+            mid_stream_idle_timeout_ms: 250,
+            ..RuntimeControls::default()
+        },
+    );
+
+    let body = serde_json::json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}]
+    });
+
+    let resp = chat_completions(
+        axum::extract::State(state.clone()),
+        HeaderMap::new(),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::BAD_GATEWAY,
+        "two racing legs that both time out on their 5xx bodies must fail the race"
+    );
+
+    let statuses = state.pool.status();
+    assert_eq!(statuses.len(), 2);
+    for (idx, status) in statuses.iter().enumerate() {
+        assert_eq!(
+            status.stalls, 1,
+            "racing key {idx} must record exactly one 5xx error-body timeout"
+        );
+        assert_eq!(
+            status.cooldown_secs_remaining, 0,
+            "recording an upstream stall must not bench racing key {idx}"
+        );
+    }
+    assert_eq!(
+        statuses.iter().map(|status| status.stalls).sum::<u64>(),
+        2,
+        "each admitted racing leg must count exactly one upstream stall"
     );
 }

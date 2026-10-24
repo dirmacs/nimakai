@@ -21,6 +21,7 @@ use crate::{
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use bytes::Bytes;
 use serde_json::json;
 use std::collections::HashMap;
@@ -1309,4 +1310,135 @@ fn test_streaming_committed_stall_refuses_retry() {
         buffered_stalled.can_retry(0, 2, started, idle_window, budget),
         "the identical buffered arm must retry under the same inputs"
     );
+}
+
+/// Build a state with two keys: key 0 is used for the rate-limit bench and
+/// key 1 for the auth quarantine.
+fn create_bench_observability_state() -> Arc<AppState> {
+    AppState::new(crate::AppStateParams {
+        keys: vec![
+            crate::KeyEntry {
+                key: "key-a".to_string(),
+                label: Some("key-a".to_string()),
+                disabled: false,
+            },
+            crate::KeyEntry {
+                key: "key-b".to_string(),
+                label: Some("key-b".to_string()),
+                disabled: false,
+            },
+        ],
+        target: "https://test.api.nvidia.com".to_string(),
+        router: None,
+        model_stats: ModelStatsStore::new(3000.0),
+        racing_models: vec![],
+        racing_max_parallel: 3,
+        racing_timeout_ms: 8000,
+        racing_strategy: "complete".to_string(),
+        model_params: HashMap::new(),
+        model_compat: ModelCompat::default(),
+        loop_idle_timeout: crate::loop_idle_timeout(),
+    })
+}
+
+async fn response_json(response: axum::response::Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// Per-key `/health` and `/stats` payloads must expose a key's bench reason
+/// and upstream stall count. Without these fields, an operator cannot distinguish
+/// a temporary 429 bench from a revoked credential. The operator cannot tell
+/// which keys are rate-limit benched in the current sample or observe a key's
+/// upstream-stall count. The benched fraction still requires sampling over a
+/// measurement window.
+#[tokio::test]
+async fn test_health_and_stats_expose_per_key_bench_reason_and_stalls() {
+    let state = create_bench_observability_state();
+    state.pool.bench_key(0, 60);
+    state.pool.note_upstream_stall(0);
+
+    let health_resp = crate::proxy::http::health(State(state.clone()))
+        .await
+        .into_response();
+    assert_eq!(health_resp.status(), StatusCode::OK);
+    let health_json = response_json(health_resp).await;
+    let health_key = &health_json["keys"][0];
+    assert_eq!(
+        health_key["bench_reason"],
+        json!("RateLimit"),
+        "/health must name the reason a key is benched"
+    );
+    assert_eq!(
+        health_key["stalls"],
+        json!(1),
+        "/health must report the per-key upstream stall count"
+    );
+    assert!(
+        health_key.get("bench_reason").is_some(),
+        "/health per-key payload must carry a bench_reason field"
+    );
+    assert!(
+        health_key.get("stalls").is_some(),
+        "/health per-key payload must carry a stalls field"
+    );
+
+    let stats_resp = crate::proxy::http::stats(State(state.clone()))
+        .await
+        .into_response();
+    assert_eq!(stats_resp.status(), StatusCode::OK);
+    let stats_json = response_json(stats_resp).await;
+    let stats_key = &stats_json["keys"][0];
+    assert_eq!(
+        stats_key["bench_reason"],
+        json!("RateLimit"),
+        "/stats must name the reason a key is benched"
+    );
+    assert_eq!(
+        stats_key["stalls"],
+        json!(1),
+        "/stats must report the per-key upstream stall count"
+    );
+    assert!(
+        stats_key.get("bench_reason").is_some(),
+        "/stats per-key payload must carry a bench_reason field"
+    );
+    assert!(
+        stats_key.get("stalls").is_some(),
+        "/stats per-key payload must carry a stalls field"
+    );
+}
+
+/// `keys_benched_rate_limit` counts only keys benched because of a temporary
+/// upstream 429. An auth-quarantined key is also unselectable, but it is a
+/// different operator action (replace the credential), so it must not inflate
+/// the rate-limit bench count.
+#[tokio::test]
+async fn test_stats_keys_benched_rate_limit_excludes_auth_quarantine() {
+    let state = create_bench_observability_state();
+
+    // Key 0: temporary rate-limit bench.
+    state.pool.bench_key(0, 60);
+    // Key 1: credential quarantine, which is not a rate-limit bench.
+    state.pool.mark_auth_failed(1, Duration::from_secs(900));
+
+    let resp = crate::proxy::http::stats(State(state.clone()))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stats_json = response_json(resp).await;
+
+    assert_eq!(
+        stats_json["gateway"]["keys_benched_rate_limit"],
+        json!(1),
+        "only the rate-limit-benched key must be counted"
+    );
+    assert_eq!(
+        stats_json["keys"][1]["bench_reason"],
+        json!("AuthFailure"),
+        "the quarantined key must still report its own bench reason"
+    );
+    assert_eq!(stats_json["keys"][0]["bench_reason"], json!("RateLimit"));
 }

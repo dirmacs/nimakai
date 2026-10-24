@@ -14,7 +14,29 @@
 //!
 //! Both are prevented by making the decision one function.
 
+use axum::http::HeaderMap;
 use std::time::{Duration, Instant};
+
+/// Parse an upstream `Retry-After` duration in seconds.
+///
+/// Only the numeric delta-seconds form is supported, and the accepted syntax
+/// is exactly a non-empty run of ASCII decimal digits (`delay-seconds =
+/// 1*DIGIT`). A leading sign, surrounding whitespace, a unit suffix, an
+/// empty value, an HTTP-date, or a value that does not fit in `u64` falls
+/// back to 60 seconds.
+///
+/// This helper replaces the identical inline parsers previously duplicated
+/// across the chat, fallback, racing, and HTTP request paths. Keeping one
+/// implementation is the point: the duplicated copies were the defect being
+/// removed, so they must not grow another parsing variant.
+pub(crate) fn upstream_retry_after_secs(headers: &HeaderMap) -> u64 {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(60)
+}
 
 /// Total wall-clock ceiling for a request's upstream attempts, as a multiple
 /// of one timeout window. With a 15000 ms window this permits exactly one
@@ -167,6 +189,65 @@ impl RetryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{header::RETRY_AFTER, HeaderValue};
+
+    fn retry_after_headers(value: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static(value));
+        headers
+    }
+
+    #[test]
+    fn test_upstream_retry_after_numeric_delta_seconds() {
+        assert_eq!(upstream_retry_after_secs(&retry_after_headers("7")), 7);
+    }
+
+    #[test]
+    fn test_upstream_retry_after_numeric_zero() {
+        assert_eq!(upstream_retry_after_secs(&retry_after_headers("0")), 0);
+    }
+
+    #[test]
+    fn test_upstream_retry_after_absent_defaults_to_60() {
+        assert_eq!(upstream_retry_after_secs(&HeaderMap::new()), 60);
+    }
+
+    #[test]
+    fn test_upstream_retry_after_non_numeric_defaults_to_60() {
+        assert_eq!(upstream_retry_after_secs(&retry_after_headers("soon")), 60);
+    }
+
+    #[test]
+    fn test_upstream_retry_after_negative_defaults_to_60() {
+        assert_eq!(upstream_retry_after_secs(&retry_after_headers("-5")), 60);
+    }
+
+    /// RFC 9110's numeric form is `delay-seconds = 1*DIGIT`. Rust's integer
+    /// parser also accepts a leading `+`, so the shared helper must validate
+    /// the grammar itself rather than delegating that choice to `parse`.
+    #[test]
+    fn test_upstream_retry_after_non_digit_spellings_default_to_60() {
+        for value in ["+7", " 7", "7s", "+0"] {
+            assert_eq!(
+                upstream_retry_after_secs(&retry_after_headers(value)),
+                60,
+                "malformed Retry-After {value:?} must use the 60 s fallback"
+            );
+        }
+
+        assert_eq!(upstream_retry_after_secs(&retry_after_headers("0")), 0);
+        assert_eq!(upstream_retry_after_secs(&retry_after_headers("7")), 7);
+    }
+
+    #[test]
+    fn test_upstream_retry_after_http_date_defaults_to_60() {
+        // The numeric-only scope is intentional and documented. HTTP-date is
+        // therefore deliberately unsupported and uses the 60 s fallback.
+        assert_eq!(
+            upstream_retry_after_secs(&retry_after_headers("Wed, 21 Oct 2015 07:28:00 GMT")),
+            60
+        );
+    }
 
     fn policy(max_retries: usize, window_ms: u64, admission_wait_ms: u64) -> RetryPolicy {
         RetryPolicy::new_split(max_retries, window_ms, window_ms, admission_wait_ms)
