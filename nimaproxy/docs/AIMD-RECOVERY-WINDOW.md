@@ -78,7 +78,15 @@ penalties each upstream event costs, and the operator's visibility into it:
   AIMD penalty count is unaffected — a 429 still costs exactly one penalty.
 - **Upstream `Retry-After` on the legacy HTTP paths.** `/v1/completions` and `/v1/embeddings` used
   to hardcode a 60 s bench; they now parse the upstream's numeric `Retry-After` and fall back to
-  60 s when it is missing or malformed, matching the chat, fallback, and racing paths.
+  60 s when it is missing or malformed, matching the chat, fallback, and racing paths. The shared
+  parser accepts exactly RFC 9110 delta-seconds — a non-empty run of ASCII digits — so a signed
+  or whitespace-padded spelling such as `+7` is malformed and takes the 60 s fallback rather than
+  being accepted by the integer parser.
+- **A bounded bench for an unrepresentable duration.** A `Retry-After` value that does not fit in
+  `u64`, and therefore cannot be added to the current `Instant`, no longer panics the request
+  handler. The effective bench is clamped to 24 hours: long enough to preserve the
+  temporary-throttle contract, bounded so the key recovers without operator intervention. The
+  configured bench cap still applies first and remains a maximum that only shortens.
 - **Observability for the benched-fraction instrument.** `/stats` and `/health` now serialize each
   key's `bench_reason` and `stalls`, and `/stats.gateway` exposes `keys_benched_rate_limit`. This
   is an **instantaneous count** of keys currently benched for rate limiting, excluding auth
@@ -89,7 +97,12 @@ penalties each upstream event costs, and the operator's visibility into it:
   `/v1/embeddings` increment the per-key `stalls` counter when an admitted upstream attempt's
   effective wait for usable bytes elapses without completion. This includes send, first-byte, and
   body timeouts, the mid-stream idle rail, and the proxy's remaining request deadline when it cuts
-  the wait short.
+  the wait short. The counter covers every admitted wait it names, including the four waits that
+  were previously invisible: a committed SSE response that stalls under the mid-stream idle rail
+  (counted once, when the guard's abort is observed), a chat 400 error body that times out, a
+  racing 4xx/5xx error body that times out, and a fallback attempt whose remaining request
+  deadline expires before body collection. A plain body I/O error, a clean stream end, and an
+  upstream stream error are not stalls and are not counted.
 
 The correction leaves every **operator-facing default unchanged** — the adaptive recovery rule, the
 success bar, and the bench cap keep their existing defaults, and the per-key window *rule* is

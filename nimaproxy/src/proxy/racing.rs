@@ -309,7 +309,13 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         .await
                         {
                             Ok(Ok(bytes)) => bytes,
-                            Ok(Err(_)) | Err(_) => Bytes::new(),
+                            // A body read timeout is an elapsed wait; a body I/O
+                            // error is not, so only the timeout arm is a stall.
+                            Ok(Err(_)) => Bytes::new(),
+                            Err(_) => {
+                                state_clone.pool.note_upstream_stall(key_idx_for_spawn);
+                                Bytes::new()
+                            }
                         };
                         let body_str = String::from_utf8_lossy(&body_bytes);
                         // Auth failure (401/403): this racing leg's KEY is bad, not the

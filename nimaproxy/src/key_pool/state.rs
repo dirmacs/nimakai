@@ -5,6 +5,18 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+/// Safety clamp for a rate-limit bench whose effective duration cannot be
+/// represented as an `Instant` offset.
+///
+/// `Instant` is backed by a platform time representation and does not support
+/// every `u64` second offset. An upstream such as
+/// `Retry-After: 18446744073709551615` must not panic the request handler,
+/// so an unrepresentable duration is deterministically clamped to 24 hours.
+/// This is shorter than the requested duration and long enough to preserve
+/// the temporary-throttle contract while keeping the key recoverable without
+/// operator intervention.
+const UNREPRESENTABLE_BENCH_CLAMP_SECS: u64 = 24 * 60 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyStatus {
     pub label: String,
@@ -78,7 +90,10 @@ impl super::KeyPool {
     /// or change its recovery credit. The configured bench cap is a
     /// MAXIMUM, never an extension: the requested duration is honoured in full
     /// unless it is longer than the cap. With no cap configured the requested
-    /// duration is preserved exactly.
+    /// duration is preserved exactly when it is representable as an
+    /// `Instant` offset. A duration that cannot be represented is clamped
+    /// to `UNREPRESENTABLE_BENCH_CLAMP_SECS` so hostile upstream input
+    /// cannot panic the request handler.
     ///
     /// An active [`BenchReason::AuthFailure`] quarantine is preserved: a
     /// credential-level 401/403 must not be downgraded by a later transient
@@ -99,10 +114,13 @@ impl super::KeyPool {
         ) {
             return;
         }
-        *cd = Some((
-            Instant::now() + Duration::from_secs(secs),
-            BenchReason::RateLimit,
-        ));
+        let now = Instant::now();
+        let expiry = now
+            .checked_add(Duration::from_secs(secs))
+            .or_else(|| now.checked_add(Duration::from_secs(UNREPRESENTABLE_BENCH_CLAMP_SECS)));
+        if let Some(expiry) = expiry {
+            *cd = Some((expiry, BenchReason::RateLimit));
+        }
     }
 
     /// Mark a key as having failed upstream auth (401/403 response). This is a distinct

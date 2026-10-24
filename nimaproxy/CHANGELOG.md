@@ -12,6 +12,19 @@ All notable changes to nimaproxy will be documented in this file.
 - `/v1/completions` and `/v1/embeddings` now honour the upstream's numeric `Retry-After` header
   when benching a rate-limited key, falling back to 60 seconds when the header is absent or
   malformed. The configured `rate_limit_bench_cap_secs` remains a maximum on the requested bench.
+- Upstream `Retry-After` values are now parsed strictly as RFC 9110 delta-seconds (a non-empty
+  run of ASCII digits). Signed or whitespace-padded spellings such as `+7`, unit suffixes, empty
+  values, HTTP-dates, and values that do not fit in `u64` fall back to 60 seconds instead of
+  being accepted by the integer parser.
+- A rate-limit bench whose effective duration cannot be represented as an `Instant` offset (for
+  example `Retry-After: 18446744073709551615`) is now clamped to 24 hours instead of panicking
+  the request handler. The configured bench cap is still applied first and remains a maximum that
+  only shortens, and an active auth quarantine is still preserved.
+- The per-key upstream-stall counter now also records the admitted waits it previously missed: a
+  committed SSE response that stalls under the mid-stream idle rail, a chat 400 error body that
+  times out, a racing 4xx/5xx error body that times out, and a fallback attempt whose remaining
+  request deadline expires before body collection. A plain body I/O error, a clean stream end, and
+  an upstream stream error are still not stalls.
 - A rate-limit bench no longer downgrades an active auth quarantine. A 401/403 is credential-level
   evidence, so a later transient 429 cannot replace it, shorten it to `rate_limit_bench_cap_secs`,
   or relabel it from `AuthFailure` to `RateLimit` in `/stats` and `/health`. The AIMD penalty is

@@ -1207,6 +1207,72 @@ fn test_bench_key_honours_bench_cap_as_maximum() {
     );
 }
 
+/// An unrepresentable upstream duration must not panic the request handler.
+/// `u64::MAX` seconds is the strongest hostile input: the old `Instant +`
+/// implementation overflowed and aborted the in-flight request. The key must
+/// instead be benched for the documented clamp and remain unavailable.
+#[test]
+fn test_bench_key_clamps_unrepresentable_duration_without_panicking() {
+    let keys = vec![make_key_entry("key1", "a")];
+    let pool = KeyPool::with_max_in_flight(keys, 4);
+
+    pool.bench_key(0, u64::MAX);
+
+    let after = pool.status()[0].clone();
+    assert_eq!(
+        after.bench_reason,
+        Some(BenchReason::RateLimit),
+        "an unrepresentable duration must still produce a rate-limit bench"
+    );
+    assert!(
+        !after.active,
+        "the clamped rate-limit bench must keep the key out of selection"
+    );
+    assert!(
+        (86_399..=86_400).contains(&after.cooldown_secs_remaining),
+        "an unrepresentable duration must clamp to 24 hours, got {}s",
+        after.cooldown_secs_remaining
+    );
+}
+
+/// The configured cap remains a MAXIMUM when the requested duration is
+/// unrepresentable. The cap shortens the request first, so a cap below the
+/// safety clamp wins. A cap that is itself unrepresentable must not extend
+/// the clamped bench.
+#[test]
+fn test_bench_key_clamp_respects_configured_cap_as_maximum() {
+    let keys = vec![make_key_entry("key1", "a")];
+
+    let pool =
+        KeyPool::with_max_in_flight_aimd_and_bench_cap(keys.clone(), 4, AimdMode::Fixed, Some(30));
+    pool.bench_key(0, u64::MAX);
+    let after = pool.status()[0].clone();
+    assert_eq!(
+        after.bench_reason,
+        Some(BenchReason::RateLimit),
+        "an unrepresentable duration under a configured cap must still be a rate-limit bench"
+    );
+    assert!(
+        !after.active,
+        "the capped rate-limit bench must keep the key out of selection"
+    );
+    assert!(
+        (29..=30).contains(&after.cooldown_secs_remaining),
+        "the configured cap must shorten the clamped bench to 30 s, got {}s",
+        after.cooldown_secs_remaining
+    );
+
+    let pool =
+        KeyPool::with_max_in_flight_aimd_and_bench_cap(keys, 4, AimdMode::Fixed, Some(u64::MAX));
+    pool.bench_key(0, u64::MAX);
+    let after = pool.status()[0].clone();
+    assert!(
+        (86_399..=86_400).contains(&after.cooldown_secs_remaining),
+        "an unrepresentable cap must not extend the 24-hour clamp, got {}s",
+        after.cooldown_secs_remaining
+    );
+}
+
 /// An active auth quarantine is credential-level evidence. A later transient
 /// rate-limit bench must not downgrade it to `RateLimit`, shorten its
 /// duration to the configured bench cap, or misreport its reason.

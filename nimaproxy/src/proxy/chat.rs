@@ -465,7 +465,13 @@ pub async fn chat_completions(
                     .await
                     {
                         Ok(Ok(parts)) => Bytes::from(parts.concat()),
-                        _ => Bytes::new(),
+                        // A body read timeout is an elapsed wait; a body I/O
+                        // error is not, so only the timeout arm is a stall.
+                        Ok(Err(_)) => Bytes::new(),
+                        Err(_) => {
+                            state.pool.note_upstream_stall(idx);
+                            Bytes::new()
+                        }
                     };
                     let body_str = std::str::from_utf8(&err_body).unwrap_or("");
                     let error_excerpt = body_str.chars().take(400).collect::<String>();
@@ -1045,6 +1051,11 @@ pub async fn chat_completions(
                             tokio::time::sleep(Duration::from_millis(25)).await;
                         }
                         let outcome = tap_for_completion.outcome();
+                        // Only the idle guard's abort is an elapsed wait; a
+                        // clean end or upstream I/O error is not a stall.
+                        if outcome.ended_by == crate::proxy::sse_tap::StreamEnd::GuardStall {
+                            state.pool.note_upstream_stall(idx);
+                        }
                         let abort_reason = if outcome.stream_ended_cleanly {
                             None
                         } else {

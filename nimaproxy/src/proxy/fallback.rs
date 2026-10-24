@@ -209,6 +209,8 @@ pub(crate) async fn solo_model_fallback(
                 .to_string();
             let Some(body_timeout_ms) = timeout_before_deadline(deadline, request_timeout_ms)
             else {
+                // The remaining request deadline cut this admitted wait short.
+                state.pool.note_upstream_stall(key_idx);
                 return racing_deadline_response(&state);
             };
             let body_bytes = match timeout(Duration::from_millis(body_timeout_ms), resp.bytes())

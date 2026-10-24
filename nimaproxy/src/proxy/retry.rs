@@ -19,9 +19,11 @@ use std::time::{Duration, Instant};
 
 /// Parse an upstream `Retry-After` duration in seconds.
 ///
-/// Only the numeric delta-seconds form is supported. The HTTP-date form is
-/// intentionally unsupported and, like a missing, malformed, or non-numeric
-/// value, falls back to 60 seconds.
+/// Only the numeric delta-seconds form is supported, and the accepted syntax
+/// is exactly a non-empty run of ASCII decimal digits (`delay-seconds =
+/// 1*DIGIT`). A leading sign, surrounding whitespace, a unit suffix, an
+/// empty value, an HTTP-date, or a value that does not fit in `u64` falls
+/// back to 60 seconds.
 ///
 /// This helper replaces the identical inline parsers previously duplicated
 /// across the chat, fallback, racing, and HTTP request paths. Keeping one
@@ -31,6 +33,7 @@ pub(crate) fn upstream_retry_after_secs(headers: &HeaderMap) -> u64 {
     headers
         .get("retry-after")
         .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(60)
 }
@@ -217,6 +220,23 @@ mod tests {
     #[test]
     fn test_upstream_retry_after_negative_defaults_to_60() {
         assert_eq!(upstream_retry_after_secs(&retry_after_headers("-5")), 60);
+    }
+
+    /// RFC 9110's numeric form is `delay-seconds = 1*DIGIT`. Rust's integer
+    /// parser also accepts a leading `+`, so the shared helper must validate
+    /// the grammar itself rather than delegating that choice to `parse`.
+    #[test]
+    fn test_upstream_retry_after_non_digit_spellings_default_to_60() {
+        for value in ["+7", " 7", "7s", "+0"] {
+            assert_eq!(
+                upstream_retry_after_secs(&retry_after_headers(value)),
+                60,
+                "malformed Retry-After {value:?} must use the 60 s fallback"
+            );
+        }
+
+        assert_eq!(upstream_retry_after_secs(&retry_after_headers("0")), 0);
+        assert_eq!(upstream_retry_after_secs(&retry_after_headers("7")), 7);
     }
 
     #[test]
