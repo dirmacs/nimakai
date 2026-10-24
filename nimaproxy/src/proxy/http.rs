@@ -389,18 +389,30 @@ pub async fn completions(
         )
         .await;
         match result {
-            // A send that times out and a send that fails are the same
-            // outcome on this path — no bytes were committed — so both
-            // share the existing error arm rather than growing a second one.
-            Err(_) | Ok(Err(_)) => {
-                let msg = match &result {
-                    Err(_) => format!(
-                        "upstream send timed out after {}ms",
-                        send_window.as_millis()
-                    ),
-                    Ok(Err(e)) => e.to_string(),
-                    Ok(Ok(_)) => unreachable!("matched by the outer pattern"),
-                };
+            // A send timeout is an admitted upstream stall, so it is counted
+            // for the key. A send failure is an I/O error, not a stall.
+            Err(_) => {
+                state.pool.note_upstream_stall(key_lease.idx);
+                let msg = format!(
+                    "upstream send timed out after {}ms",
+                    send_window.as_millis()
+                );
+                if let Some(label) = key_label.as_ref() {
+                    state.model_stats.record_with_key(
+                        &model_id,
+                        label,
+                        t0.elapsed().as_millis() as f64,
+                        false,
+                    );
+                } else {
+                    state
+                        .model_stats
+                        .record(&model_id, t0.elapsed().as_millis() as f64, false);
+                }
+                return (StatusCode::BAD_GATEWAY, msg).into_response();
+            }
+            Ok(Err(e)) => {
+                let msg = e.to_string();
                 if let Some(label) = key_label.as_ref() {
                     state.model_stats.record_with_key(
                         &model_id,
@@ -509,6 +521,9 @@ pub async fn completions(
                     match crate::proxy::streaming::assemble_with_idle_bound(stream, window).await {
                         Ok(bytes) => bytes,
                         Err(e) => {
+                            if crate::proxy::streaming::is_stall(&e) {
+                                state.pool.note_upstream_stall(key_lease.idx);
+                            }
                             return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
                         }
                     };
@@ -604,18 +619,30 @@ pub async fn embeddings(
         )
         .await;
         match result {
-            // A send that times out and a send that fails are the same
-            // outcome on this path — no bytes were committed — so both
-            // share the existing error arm rather than growing a second one.
-            Err(_) | Ok(Err(_)) => {
-                let msg = match &result {
-                    Err(_) => format!(
-                        "upstream send timed out after {}ms",
-                        send_window.as_millis()
-                    ),
-                    Ok(Err(e)) => e.to_string(),
-                    Ok(Ok(_)) => unreachable!("matched by the outer pattern"),
-                };
+            // A send timeout is an admitted upstream stall, so it is counted
+            // for the key. A send failure is an I/O error, not a stall.
+            Err(_) => {
+                state.pool.note_upstream_stall(key_lease.idx);
+                let msg = format!(
+                    "upstream send timed out after {}ms",
+                    send_window.as_millis()
+                );
+                if let Some(label) = key_label.as_ref() {
+                    state.model_stats.record_with_key(
+                        &model_id,
+                        label,
+                        t0.elapsed().as_millis() as f64,
+                        false,
+                    );
+                } else {
+                    state
+                        .model_stats
+                        .record(&model_id, t0.elapsed().as_millis() as f64, false);
+                }
+                return (StatusCode::BAD_GATEWAY, msg).into_response();
+            }
+            Ok(Err(e)) => {
+                let msg = e.to_string();
                 if let Some(label) = key_label.as_ref() {
                     state.model_stats.record_with_key(
                         &model_id,
@@ -720,6 +747,9 @@ pub async fn embeddings(
                     match crate::proxy::streaming::assemble_with_idle_bound(stream, window).await {
                         Ok(bytes) => bytes,
                         Err(e) => {
+                            if crate::proxy::streaming::is_stall(&e) {
+                                state.pool.note_upstream_stall(key_lease.idx);
+                            }
                             return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
                         }
                     };

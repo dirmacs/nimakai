@@ -1348,10 +1348,12 @@ async fn response_json(response: axum::response::Response) -> serde_json::Value 
     serde_json::from_slice(&body).unwrap()
 }
 
-/// The per-key `/health` and `/stats` payloads must expose WHY a key is
-/// benched and how many upstream stalls it has seen. Without these fields an
-/// operator cannot tell a temporary 429 bench from a revoked credential, and
-/// cannot compute the benched-fraction instrument.
+/// Per-key `/health` and `/stats` payloads must expose a key's bench reason
+/// and upstream stall count. Without these fields, an operator cannot distinguish
+/// a temporary 429 bench from a revoked credential. The operator cannot tell
+/// which keys are rate-limit benched in the current sample or observe a key's
+/// upstream-stall count. The benched fraction still requires sampling over a
+/// measurement window.
 #[tokio::test]
 async fn test_health_and_stats_expose_per_key_bench_reason_and_stalls() {
     let state = create_bench_observability_state();

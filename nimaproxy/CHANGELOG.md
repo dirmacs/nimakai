@@ -19,9 +19,10 @@ All notable changes to nimaproxy will be documented in this file.
 
 ### Added
 
-- `/stats` and `/health` now report each key's `bench_reason` and `stalls`; `/stats.gateway` adds
-  `keys_benched_rate_limit`, counting keys currently benched for rate limiting and excluding auth
-  quarantines.
+- `/stats` and `/health` now report each key's `bench_reason` and `stalls`. `/stats.gateway` adds
+  `keys_benched_rate_limit`, an instantaneous snapshot of keys currently benched for rate limiting.
+  This snapshot excludes auth quarantines. Sample it over time to derive the benched fraction. It
+  is not a time-weighted fraction. The per-key `stalls` counter is a separate upstream-stall count.
 
 ## [0.15.7] - 2026-09-02
 

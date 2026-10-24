@@ -145,6 +145,7 @@ pub(crate) async fn solo_model_fallback(
                 }
                 Err(_) => {
                     state.gateway_metrics.record_timeout();
+                    state.pool.note_upstream_stall(key_idx);
                     let msg = if send_timeout_ms < request_timeout_ms {
                         format!(
                             "racing deadline exceeded after {}ms",
@@ -248,6 +249,7 @@ pub(crate) async fn solo_model_fallback(
                 }
                 Err(_) => {
                     state.gateway_metrics.record_timeout();
+                    state.pool.note_upstream_stall(key_idx);
                     let msg = if body_timeout_ms < request_timeout_ms {
                         format!(
                             "racing deadline exceeded after {}ms",

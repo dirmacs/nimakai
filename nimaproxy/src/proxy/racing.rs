@@ -413,6 +413,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                     key_label.as_deref(),
                                     timeout_ms_for_model,
                                 );
+                                state_clone.pool.note_upstream_stall(key_idx_for_spawn);
                                 log_turn_request(TurnRecord {
                                     requested_model: "auto".to_string(),
                                     responding_model: model_id_clone.clone(),
@@ -480,6 +481,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         }
                         Err(_) => {
                             state_clone.gateway_metrics.record_timeout();
+                            state_clone.pool.note_upstream_stall(key_idx_for_spawn);
                             let timeout_error = if body_timeout_ms < timeout_ms_for_model {
                                 format!(
                                     "racing deadline exceeded after {}ms",
@@ -664,6 +666,7 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                 }
                 Err(_) => {
                     state_clone.gateway_metrics.record_timeout();
+                    state_clone.pool.note_upstream_stall(key_idx_for_spawn);
                     let timeout_error = if send_timeout_ms_for_model < timeout_ms_for_model {
                         format!(
                             "racing deadline exceeded after {}ms",

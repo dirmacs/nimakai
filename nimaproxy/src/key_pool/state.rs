@@ -22,10 +22,16 @@ pub struct KeyStatus {
     pub rate_limit_ratio: f64,
     /// Cumulative count of upstream 401/403 (auth failure) responses observed for this key.
     pub auth_failures: u64,
-    /// Cumulative count of upstream stalls observed for this key: connected
-    /// and admitted, but no usable bytes inside the timeout window.
+    /// Cumulative count of admitted upstream attempts whose effective wait for
+    /// usable bytes elapsed. This includes send, first-byte, and body timeouts;
+    /// the mid-stream idle rail; and the proxy's remaining request deadline
+    /// cutting the wait short. Connection and body I/O errors are not stalls.
+    /// Counted on the chat, racing, fallback, and
+    /// legacy completions/embeddings request paths.
+    ///
     /// Observational only — a stall never changes this key's window or
-    /// cooldown, because it is the upstream degrading rather than the key.
+    /// cooldown. This counter is not a rate-limit bench: a key being benched
+    /// for rate limiting and a key with observed stalls are separate states.
     pub stalls: u64,
     /// Why this key is benched, if it is. `RateLimit` means a temporary 429 —
     /// wait it out. `AuthFailure` means the credential is bad — replace the
@@ -37,24 +43,16 @@ pub struct KeyStatus {
 impl super::KeyPool {
     /// Note that an upstream *stall* was observed on this key.
     ///
-    /// A stall is a request that connected, was admitted, and then produced no
-    /// usable bytes within the timeout window. It is deliberately NOT treated
-    /// as evidence that the key is degraded, because on this host it is not:
-    /// all four keys are NVIDIA keys on one shared account, and the measured
-    /// stall rate is roughly even across them (27%–57%) while successful
-    /// latency stays fast (p50 1427 ms, p90 1780 ms, max 3617 ms — a request
-    /// that succeeds would not have timed out). The stall is the upstream
-    /// degrading, not the key.
+    /// A stall is an admitted upstream attempt whose effective wait for usable
+    /// bytes elapsed. The effective wait may be a send, first-byte, or body
+    /// timeout; the mid-stream idle rail; or the proxy's remaining request
+    /// deadline cutting the wait short. Connection and body I/O errors are not
+    /// stalls. This is counted on all request paths:
+    /// chat, racing, fallback, and legacy completions/embeddings.
     ///
-    /// Punishing the key here is what produced the fleet-wide lockout measured
-    /// on 2026-10-15: benching the key and halving its window concentrated the
-    /// same upstream load onto the remaining keys, which then stalled and got
-    /// benched too — a death spiral that took admitted traffic from 753
-    /// requests down to 97 (12.9%), with 503/429 for the rest.
-    ///
-    /// So this records the observation for observability and leaves the key's
-    /// window and cooldown untouched. A real 429 is what tells us this key is
-    /// throttled, and that still goes through `mark_rate_limited`.
+    /// This method is observational only: it never changes the key's window or
+    /// cooldown. A stall is also not the same thing as a rate-limit bench; only
+    /// an explicit upstream 429 benches a key for rate limiting.
     pub fn note_upstream_stall(&self, idx: usize) {
         if let Some(counter) = self.stalls.get(idx) {
             counter.fetch_add(1, Ordering::Relaxed);

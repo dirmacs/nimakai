@@ -242,8 +242,8 @@ pub async fn chat_completions(
                     std::time::Duration::from_millis(request_timeout_ms),
                     retry_policy.budget(),
                 );
+                state.pool.note_upstream_stall(idx);
                 if may_retry {
-                    state.pool.note_upstream_stall(idx);
                     failed_key_idx = Some(idx);
                     log_turn_request(TurnRecord {
                         requested_model: original_model.to_string(),

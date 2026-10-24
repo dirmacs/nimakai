@@ -80,10 +80,16 @@ penalties each upstream event costs, and the operator's visibility into it:
   to hardcode a 60 s bench; they now parse the upstream's numeric `Retry-After` and fall back to
   60 s when it is missing or malformed, matching the chat, fallback, and racing paths.
 - **Observability for the benched-fraction instrument.** `/stats` and `/health` now serialize each
-  key's `bench_reason` and `stalls`, and `/stats.gateway` exposes
-  `keys_benched_rate_limit` — the count of keys currently benched for a rate limit, excluding
-  auth quarantines. That counter is what §6's per-key benched-fraction instrument needs; without
-  it, a rate-limit bench and a revoked credential were indistinguishable in the JSON.
+  key's `bench_reason` and `stalls`, and `/stats.gateway` exposes `keys_benched_rate_limit`. This
+  is an **instantaneous count** of keys currently benched for rate limiting, excluding auth
+  quarantines. Derive the per-key benched **fraction** by sampling that count over the measurement
+  window. The per-key `stalls` counter records upstream stalls separately and is **not** an input to
+  the benched fraction.
+- **Comparable upstream-stall accounting.** Chat, racing, fallback, `/v1/completions`, and
+  `/v1/embeddings` increment the per-key `stalls` counter when an admitted upstream attempt's
+  effective wait for usable bytes elapses without completion. This includes send, first-byte, and
+  body timeouts, the mid-stream idle rail, and the proxy's remaining request deadline when it cuts
+  the wait short.
 
 The correction leaves every **operator-facing default unchanged** — the adaptive recovery rule, the
 success bar, and the bench cap keep their existing defaults, and the per-key window *rule* is
@@ -161,7 +167,10 @@ histogram comes from the proxy's stderr.
 Reported per key and over time:
 
 - the **per-key window sum** — the quantity that must move (4 of 16 during the 06:55–07:00 episode, recovered to 11–12 of 16 by 10:07);
-- the **per-key benched fraction of time** — the term Change A acts on; `/stats.gateway.keys_benched_rate_limit` and the per-key `bench_reason`/`stalls` fields are the instruments that make it measurable (§2a);
+- the **per-key benched fraction of time** — the term Change A acts on. Take
+  `/stats.gateway.keys_benched_rate_limit` as an instantaneous sample and repeat it over the
+  window. Per-key `bench_reason` attributes each benched key to a rate limit (§2a). The per-key
+  `stalls` counter is a separate upstream-stall count and is not part of this term;
 - the three counter deltas of section 5;
 - the per-key 429 histogram of section 2, reported as a **descriptive** observation, not as a
   discriminator between a per-key and an account-level upstream limit.
