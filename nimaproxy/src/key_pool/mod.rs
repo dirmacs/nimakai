@@ -13,8 +13,12 @@ pub mod state;
 mod tests;
 
 use self::aimd::{AimdMode, KeyWindow};
-
 const DEFAULT_MAX_IN_FLIGHT_PER_KEY: usize = 1_000_000;
+
+/// Rank every (key, model) pair starts at before any answer is recorded.
+/// Candidates at the default rank tie, so the round-robin start decides and
+/// an unlearned pool picks exactly as before.
+pub(crate) const RANK_DEFAULT: f64 = 0.0;
 
 /// Why a key is benched.
 ///
@@ -60,6 +64,17 @@ pub struct KeyPool {
     /// changes the key's window or cooldown, because an upstream-wide stall is
     /// not evidence the key is degraded.
     stalls: Vec<AtomicU64>,
+    /// In-memory per-(key, model) answer rank (RFC dirmacs/nimakai#63).
+    ///
+    /// One f64 per `(key_idx, model_id)`, fed ONLY by outcome events for that
+    /// model via [`KeyPool::record_answer`]: a call whose first byte was
+    /// delivered scores as an answer, a call that reached its rail with no
+    /// byte scores as a stall, and a call cancelled because the other call
+    /// won does not score at all. It resets on process start and is never
+    /// written to disk. `next_key_with_permit_excluding` orders candidates by
+    /// this rank within the requested model, BIASING round-robin rather than
+    /// replacing it.
+    ranks: Mutex<std::collections::HashMap<(usize, String), f64>>,
 }
 
 pub struct KeyLease {
@@ -142,6 +157,7 @@ impl KeyPool {
             aimd_max_success_bar,
             auth_failures: (0..n).map(|_| AtomicU64::new(0)).collect(),
             stalls: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            ranks: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -176,7 +192,17 @@ impl KeyPool {
         self.next_key_with_permit_excluding(None)
     }
 
-    /// Pick the next available key that is not `exclude`.
+    /// Pick the next available key that is not `exclude` (plain round-robin,
+    /// no model rank consulted).
+    pub fn next_key_with_permit_excluding(
+        &self,
+        exclude: Option<usize>,
+    ) -> Result<KeyLease, KeyAcquireError> {
+        self.next_key_with_permit_excluding_for_model(exclude, "")
+    }
+
+    /// Pick the next available key that is not `exclude`, ordered by the
+    /// per-(key, model) answer rank within `model`.
     ///
     /// The exclusion is what makes a retry go to *another* key rather than
     /// cycling back to the one that just stalled: plain round-robin hands the
@@ -184,12 +210,14 @@ impl KeyPool {
     /// the pool wraps. Retrying the identical prompt on a fresh key is the
     /// proxy-side half of the same-prompt-as-fresh retry rule.
     ///
-    /// A single-key pool cannot satisfy an exclusion, so it degrades to the
-    /// unexcluded pick: refusing would turn every stall into an admission
-    /// failure, and a stall is observational-only (it never benches the key).
-    pub fn next_key_with_permit_excluding(
+    /// The rank BIASES round-robin rather than replacing it: candidates are
+    /// ordered by descending rank, with the round-robin start breaking ties
+    /// (and every candidate at the default rank, so an unlearned pool picks
+    /// exactly as before).
+    pub fn next_key_with_permit_excluding_for_model(
         &self,
         exclude: Option<usize>,
+        model: &str,
     ) -> Result<KeyLease, KeyAcquireError> {
         let n = self.keys.len();
         if n == 0 {
@@ -201,12 +229,33 @@ impl KeyPool {
         let mut active_seen = false;
         let mut busy_seen = false;
 
+        // Candidate order: descending per-(key, model) rank, with the
+        // round-robin start breaking ties so an unlearned pool (every rank
+        // at the default) picks exactly the old round-robin order. The rank
+        // biases, never replaces, rotation.
+        let rank_of = |idx: usize| {
+            self.ranks
+                .lock()
+                .get(&(idx, model.to_string()))
+                .copied()
+                .unwrap_or(RANK_DEFAULT)
+        };
+        let mut order: Vec<usize> = (0..n).map(|i| (start + i) % n).collect();
+        order.sort_by(|&a, &b| {
+            rank_of(b)
+                .partial_cmp(&rank_of(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                // Ties keep the ROUND-ROBIN order: `order` is already in
+                // start-rotated sequence and sort_by is stable, so an
+                // unlearned pool picks exactly as before.
+                .then(std::cmp::Ordering::Equal)
+        });
+
         // Two passes: the first skips the excluded key, the second drops the
         // exclusion so a single-key pool (or a pool whose other keys are all
         // cooling) still yields a lease rather than failing admission.
         for pass in 0..2 {
-            for i in 0..n {
-                let idx = (start + i) % n;
+            for &idx in &order {
                 if pass == 0 && exclude == Some(idx) {
                     continue;
                 }

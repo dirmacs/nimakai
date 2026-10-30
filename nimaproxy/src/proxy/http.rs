@@ -472,6 +472,9 @@ pub async fn completions(
                         // ttfb and failure records, and the non-streaming body id is filled
                         // in where the body is assembled.
                         response_body_id: None,
+                        attempt_end: None,
+                        rail_ms: None,
+                        won_by_request_id: None,
                     });
                     continue;
                 }
@@ -686,6 +689,9 @@ pub async fn embeddings(
                         // ttfb and failure records, and the non-streaming body id is filled
                         // in where the body is assembled.
                         response_body_id: None,
+                        attempt_end: None,
+                        rail_ms: None,
+                        won_by_request_id: None,
                     });
                     continue;
                 }
@@ -918,6 +924,9 @@ pub(crate) fn build_completion_record(
         // measurement needs: client.responseId == this field -> the record's
         // request_id -> the first-byte record's latency.
         response_body_id: completion.response_body_id.clone(),
+        attempt_end: None,
+        rail_ms: None,
+        won_by_request_id: None,
     });
     record.record_kind = TurnLog::RECORD_KIND_COMPLETION.to_string();
     record.request_id = completion.request_id.clone();
@@ -1005,6 +1014,9 @@ pub(crate) fn build_loop_record(
         // ttfb and failure records, and the non-streaming body id is filled
         // in where the body is assembled.
         response_body_id: None,
+        attempt_end: None,
+        rail_ms: None,
+        won_by_request_id: None,
     });
     record.record_kind = TurnLog::RECORD_KIND_LOOP.to_string();
     record.loop_started_at = Some(summary.started_at);
@@ -1268,6 +1280,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
         assert_eq!(
             first_byte.response_tool_calls, None,
@@ -1372,6 +1387,9 @@ mod tests {
                 // ttfb and failure records, and the non-streaming body id is filled
                 // in where the body is assembled.
                 response_body_id: None,
+                attempt_end: None,
+                rail_ms: None,
+                won_by_request_id: None,
             }
         }
         let json = serde_json::to_string(&TurnLog::new(record(Some(true), Some(32000)))).unwrap();
@@ -1460,6 +1478,9 @@ mod tests {
             request_max_tokens: None,
             response_tool_calls: None,
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
         assert_eq!(
             first_byte.record_kind,

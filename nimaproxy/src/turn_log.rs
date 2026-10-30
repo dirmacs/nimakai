@@ -258,6 +258,23 @@ pub struct TurnLog {
     // exists and is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body_id: Option<String>,
+
+    /// How this attempt ended (`rail` | `other_call_won` | `client_gone`).
+    /// `None` on records written before the field existed and on paths where
+    /// no attempt ran; see [`AttemptEnd`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_end: Option<String>,
+
+    /// The first-byte rail applied to this attempt, in ms. Absent on
+    /// pre-existing records and on paths with no rail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rail_ms: Option<u64>,
+
+    /// `request_id` of the winning attempt; set only on a cancelled attempt
+    /// (`attempt_end = "other_call_won"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub won_by_request_id: Option<String>,
+
     /// Which agent loop this record belongs to, if any.
     ///
     /// `None` for ordinary per-request records and for records written before
@@ -411,6 +428,40 @@ pub struct TurnRecord {
     /// back as `responseId`. Only ever set on completion records; see
     /// [`TurnLog::response_body_id`] for why the ttfb half cannot carry it.
     pub response_body_id: Option<String>,
+    /// How this attempt ended (`rail` | `other_call_won` | `client_gone`);
+    /// see [`AttemptEnd`]. `None` on paths where no attempt ran or the end
+    /// is not one of the three (e.g. auth/400 forwarding).
+    pub attempt_end: Option<AttemptEnd>,
+    /// The first-byte rail that was applied to this attempt, in ms.
+    pub rail_ms: Option<u64>,
+    /// `request_id` of the winning attempt, set on a cancelled attempt
+    /// (`attempt_end = other_call_won`) so it points at the winner.
+    pub won_by_request_id: Option<String>,
+}
+
+/// How one upstream attempt (call) ended. RFC dirmacs/nimakai#63.
+///
+/// Set at the attempt sites in `chat.rs`. Together with the per-attempt
+/// `request_id` this makes a cancelled call and a delivered call different
+/// rows: `latency_ms` or a 504 alone is not the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttemptEnd {
+    /// The call ended at its own first-byte rail with no byte.
+    Rail,
+    /// The call was cancelled because the other call of the hedge won.
+    OtherCallWon,
+    /// The client went away while the call was still open.
+    ClientGone,
+}
+
+impl AttemptEnd {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttemptEnd::Rail => "rail",
+            AttemptEnd::OtherCallWon => "other_call_won",
+            AttemptEnd::ClientGone => "client_gone",
+        }
+    }
 }
 
 impl TurnLog {
@@ -531,6 +582,9 @@ impl TurnLog {
             // the ttfb record, so the field starts `None` here and only the
             // completion path fills it in.
             response_body_id: None,
+            attempt_end: record.attempt_end.map(|a| a.as_str().to_string()),
+            rail_ms: record.rail_ms,
+            won_by_request_id: record.won_by_request_id,
         }
     }
 }
@@ -835,6 +889,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
 
         assert_eq!(turn.requested_model, "auto");
@@ -876,6 +933,9 @@ mod tests {
                 // ttfb and failure records, and the non-streaming body id is filled
                 // in where the body is assembled.
                 response_body_id: None,
+                attempt_end: None,
+                rail_ms: None,
+                won_by_request_id: None,
             }
         }
 
@@ -941,6 +1001,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
         let b = TurnLog::new(TurnRecord {
             requested_model: "auto".to_string(),
@@ -965,6 +1028,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
         assert!(a.request_id.is_some(), "request_id must be populated");
         assert!(b.request_id.is_some(), "request_id must be populated");
@@ -999,6 +1065,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
 
         turn.request_messages = vec![
@@ -1059,6 +1128,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
 
         let json = serde_json::to_string(&turn).unwrap();
@@ -1093,6 +1165,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
         assert_eq!(turn.loop_key, None);
     }
@@ -1130,6 +1205,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         };
         let turn = TurnLog::new(record);
         // The legacy field keeps its meaning and its type: it is the request's
@@ -1180,6 +1258,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
         let json = serde_json::to_string(&turn).unwrap();
         let back: TurnLog = serde_json::from_str(&json).unwrap();
@@ -1217,6 +1298,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         })
     }
 
@@ -1635,6 +1719,9 @@ mod tests {
             // ttfb and failure records, and the non-streaming body id is filled
             // in where the body is assembled.
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
         assert_eq!(
             turn.response_tool_calls,
@@ -1684,6 +1771,9 @@ mod tests {
             request_max_tokens: None,
             response_tool_calls: Some(distinct),
             response_body_id: None,
+            attempt_end: None,
+            rail_ms: None,
+            won_by_request_id: None,
         });
         assert_eq!(turn.response_tool_calls, Some(3));
         assert_ne!(

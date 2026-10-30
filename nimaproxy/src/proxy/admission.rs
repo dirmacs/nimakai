@@ -41,6 +41,21 @@ pub(crate) fn try_acquire_gateway_permits_excluding(
     state: &AppState,
     exclude: Option<usize>,
 ) -> Result<(UpstreamPermit, KeyLease), GatewayAcquireError> {
+    try_acquire_gateway_permits_excluding_for_model(state, exclude, "")
+}
+
+/// Acquire permits while skipping the key at `exclude`, ranking candidates
+/// by the per-(key, model) answer rank within `model`.
+///
+/// Same ordering contract as `try_acquire_gateway_permits_excluding` (the
+/// key lease first, then the global permit, so a failed key acquisition
+/// costs no phantom attempt), but the pool pick is rank-biased round-robin
+/// for the requested model.
+pub(crate) fn try_acquire_gateway_permits_excluding_for_model(
+    state: &AppState,
+    exclude: Option<usize>,
+    model: &str,
+) -> Result<(UpstreamPermit, KeyLease), GatewayAcquireError> {
     // Acquire the KEY LEASE FIRST, then the global permit.
     //
     // `try_acquire_upstream` increments `upstream_attempts` on success
@@ -55,7 +70,10 @@ pub(crate) fn try_acquire_gateway_permits_excluding(
     //
     // Ordering the key lease first means a failed acquisition costs nothing:
     // we only count an attempt once we actually hold a key and a permit.
-    match state.pool.next_key_with_permit_excluding(exclude) {
+    match state
+        .pool
+        .next_key_with_permit_excluding_for_model(exclude, model)
+    {
         Ok(key_lease) => {
             let upstream_permit = state
                 .try_acquire_upstream()

@@ -6,6 +6,7 @@ use axum::{
 };
 use bytes::Bytes;
 use serde_json::Value;
+use tracing::warn;
 pub(crate) fn extract_response_metrics(text: &str) -> (u32, u32, bool) {
     let mut output_tokens = 0u32;
     let repetition_count = count_repetitions(text);
@@ -453,6 +454,11 @@ pub(super) fn validate_mistral_tool_call_ids(
     }
     let mut tool_call_ids = std::collections::HashSet::new();
     let mut tool_response_ids = std::collections::HashSet::new();
+    // Ids this function itself skipped as non-alphanumeric (RFC
+    // dirmacs/nimakai#63). Tracked SEPARATELY from the unmatched count so a
+    // skipped id is never also logged as "no matching call" — that was the
+    // false line: the check's own skip made every tool result look unpaired.
+    let mut skipped_ids = std::collections::HashSet::new();
     let mut has_tool_messages = false;
     if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
         for msg in messages {
@@ -462,7 +468,12 @@ pub(super) fn validate_mistral_tool_call_ids(
                         for tc in tool_calls {
                             if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                                 if !id.chars().all(|c| c.is_alphanumeric()) {
-                                    eprintln!("WARNING: Tool call id '{}' may be invalid for Mistral models.", id);
+                                    // warn!, not eprintln!, so the line is queryable.
+                                    warn!(
+                                        tool_call_id = %id,
+                                        "tool call id skipped as non-alphanumeric for Mistral models"
+                                    );
+                                    skipped_ids.insert(id.to_string());
                                     continue;
                                 }
                                 tool_call_ids.insert(id.to_string());
@@ -479,19 +490,34 @@ pub(super) fn validate_mistral_tool_call_ids(
         }
     }
     if has_tool_messages {
+        // `skipped` and `unmatched` are separate counts: an id this function
+        // just skipped is not "unmatched", it is "skipped".
+        let mut unmatched_calls = 0usize;
         for id in &tool_call_ids {
             if !tool_response_ids.contains(id) {
-                eprintln!("WARNING: Tool call id '{}' has no matching response.", id);
-                continue;
+                unmatched_calls += 1;
+                warn!(tool_call_id = %id, "tool call id has no matching response");
             }
         }
+        let mut unmatched_responses = 0usize;
         for id in &tool_response_ids {
-            if !tool_call_ids.contains(id) {
-                eprintln!("WARNING: Tool response id '{}' has no matching call.", id);
-                continue;
+            if !tool_call_ids.contains(id) && !skipped_ids.contains(id) {
+                unmatched_responses += 1;
+                warn!(tool_call_id = %id, "tool response id has no matching call");
             }
+        }
+        if unmatched_calls > 0 || unmatched_responses > 0 || !skipped_ids.is_empty() {
+            warn!(
+                skipped = skipped_ids.len(),
+                unmatched_calls,
+                unmatched_responses,
+                "mistral tool-call id pairing summary (skipped vs unmatched are separate counts)"
+            );
         }
     }
+    // Ids are forwarded UNCHANGED and the request is never rejected: this
+    // predicate must not touch key lease, the rail, the gap limit, rank, or
+    // loop close.
     Ok(())
 }
 /// Fix message ordering for OpenAI API compatibility.

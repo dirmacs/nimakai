@@ -379,6 +379,9 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                             // ttfb and failure records, and the non-streaming body id is filled
                             // in where the body is assembled.
                             response_body_id: None,
+                            attempt_end: None,
+                            rail_ms: None,
+                            won_by_request_id: None,
                         });
                         return (
                             model_id_for_task,
@@ -442,6 +445,9 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                     // ttfb and failure records, and the non-streaming body id is filled
                                     // in where the body is assembled.
                                     response_body_id: None,
+                                    attempt_end: None,
+                                    rail_ms: None,
+                                    won_by_request_id: None,
                                 });
                                 return (model_id_for_task, Err(msg));
                             }
@@ -479,6 +485,9 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 // ttfb and failure records, and the non-streaming body id is filled
                                 // in where the body is assembled.
                                 response_body_id: None,
+                                attempt_end: None,
+                                rail_ms: None,
+                                won_by_request_id: None,
                             });
                             return (model_id_for_task, Err(format!("body error: {}", e)));
                         }
@@ -523,6 +532,9 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 // ttfb and failure records, and the non-streaming body id is filled
                                 // in where the body is assembled.
                                 response_body_id: None,
+                                attempt_end: None,
+                                rail_ms: None,
+                                won_by_request_id: None,
                             });
                             return (model_id_for_task, Err(timeout_error));
                         }
@@ -560,6 +572,9 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                                 // ttfb and failure records, and the non-streaming body id is filled
                                 // in where the body is assembled.
                                 response_body_id: None,
+                                attempt_end: None,
+                                rail_ms: None,
+                                won_by_request_id: None,
                             });
                             return (
                                 model_id_for_task,
@@ -615,6 +630,9 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         // ttfb and failure records, and the non-streaming body id is filled
                         // in where the body is assembled.
                         response_body_id: None,
+                        attempt_end: None,
+                        rail_ms: None,
+                        won_by_request_id: None,
                     });
                     Ok::<(Response, u16, usize, u64), String>((
                         response,
@@ -663,6 +681,9 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         // ttfb and failure records, and the non-streaming body id is filled
                         // in where the body is assembled.
                         response_body_id: None,
+                        attempt_end: None,
+                        rail_ms: None,
+                        won_by_request_id: None,
                     });
                     Err(format!("request error: {}", e))
                 }
@@ -707,6 +728,9 @@ pub(crate) async fn race_models(state: Arc<AppState>, body: Bytes, models: &[Str
                         // ttfb and failure records, and the non-streaming body id is filled
                         // in where the body is assembled.
                         response_body_id: None,
+                        attempt_end: None,
+                        rail_ms: None,
+                        won_by_request_id: None,
                     });
                     Err(timeout_error)
                 }
