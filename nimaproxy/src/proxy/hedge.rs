@@ -92,6 +92,43 @@ pub fn hedge_slot_available(state: &AppState) -> bool {
     state.upstream_permits_available() * 2 >= state.max_upstream_in_flight
 }
 
+/// Caller-facing identity of the one upstream attempt whose body the client
+/// receives (RFC dirmacs/nimakai#63). This is the ONLY channel for
+/// attempt identity and timings: the SSE body stays a byte-for-byte
+/// passthrough and must never carry them.
+#[derive(Debug, Clone)]
+pub struct AttemptIdentity {
+    /// The winning attempt's own `request_id` (the per-attempt id the turn
+    /// log keys on, also echoed as `x-request-id`).
+    pub request_id: String,
+    /// First-byte wait of the winning attempt, in ms, measured from that
+    /// attempt's own send (`ttfc_ms`).
+    pub first_byte_ms: u64,
+    /// Wall-clock time from the request's first attempt send (`t0`) to the
+    /// response handed to the client, in ms. For a hedged request this
+    /// includes the delay of silence; it is the number the on-call reader
+    /// compares against the rail.
+    pub generation_ms: u64,
+}
+
+/// Response-header name carrying [`AttemptIdentity`] (RFC
+/// dirmacs/nimakai#63: caller-facing attempt identity goes in this RESPONSE
+/// HEADER, never in the SSE body).
+pub const ATTEMPT_HEADER: &str = "x-nimaproxy-attempt";
+
+/// Render the `x-nimaproxy-attempt` header value.
+///
+/// Format (stable, documented here): `<request_id>; first_byte_ms=<u64>;
+/// generation_ms=<u64>` — e.g. `20261030120000.4242.7; first_byte_ms=812;
+/// generation_ms=1030`. The id is the turn-log id (timestamp.pid.seq), which
+/// is ASCII and header-safe, so no escaping is needed.
+pub fn attempt_header_value(attempt: &AttemptIdentity) -> String {
+    format!(
+        "{}; first_byte_ms={}; generation_ms={}",
+        attempt.request_id, attempt.first_byte_ms, attempt.generation_ms
+    )
+}
+
 /// The outcome of one leg of a hedged race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegOutcome {
@@ -334,7 +371,9 @@ where
 /// `FirstOnly` carries the first leg's raw send result so the caller runs
 /// the sequential path unchanged (no second slot was free, or the first leg
 /// ended before the hedge could matter). `Raced` carries the resolved
-/// race: which leg won, and the loser's outcome for logging.
+/// race: which leg won, the loser's outcome for logging, and — when a leg
+/// won with a byte — the winner's first-byte wait so the caller can put the
+/// winning attempt's identity in the `x-nimaproxy-attempt` response header.
 pub enum FirstByteRace {
     FirstOnly(Result<reqwest::Response, reqwest::Error>),
     Raced {
@@ -346,6 +385,9 @@ pub enum FirstByteRace {
         /// The winning leg rebuilt as a `reqwest::Response` when it won with a
         /// byte; `None` when no leg won.
         resolved: Option<Result<reqwest::Response, reqwest::Error>>,
+        /// First-byte wait of the winning leg in ms, measured from that leg's
+        /// own send. `Some` exactly when `resolved` is `Some(Ok(_))`.
+        winner_first_byte_ms: Option<u64>,
     },
 }
 
@@ -376,12 +418,17 @@ pub(crate) async fn race_first_byte_with_hedge(
 ) -> FirstByteRace {
     use tokio::sync::oneshot;
     let winner = WinnerSlot::new();
-    let (leg2_tx, mut leg2_rx) = oneshot::channel::<(usize, LegOutcome, Option<LegFirstByte>)>();
+    let (leg2_tx, mut leg2_rx) =
+        oneshot::channel::<(usize, LegOutcome, Option<LegFirstByte>, u64)>();
 
-    // Leg 1: the first call, spawned at once under its own rail.
+    // Leg 1: the first call, spawned at once under its own rail. Each leg's
+    // first-byte wait is measured from its OWN send instant, so the winner's
+    // `first_byte_ms` can be reported per leg.
     let winner1 = winner.clone();
+    let leg1_t0 = Instant::now();
     let leg1_handle = tokio::spawn(async move {
         let out = leg_first_byte(first_send, rail).await;
+        let first_byte_ms = leg1_t0.elapsed().as_millis() as u64;
         let outcome = match &out {
             LegFirstByte::Byte { .. } => {
                 if winner1.claim() {
@@ -393,7 +440,7 @@ pub(crate) async fn race_first_byte_with_hedge(
             LegFirstByte::RailExpired => LegOutcome::RailExpired,
             LegFirstByte::Failed(_) => LegOutcome::Failed,
         };
-        (0usize, outcome, Some(out))
+        (0usize, outcome, Some(out), first_byte_ms)
     });
 
     // The hedge timer: after `hedge_delay` of silence from the first send,
@@ -430,9 +477,11 @@ pub(crate) async fn race_first_byte_with_hedge(
             .body(body2.clone())
             .send();
         let key_idx = key_lease.idx;
+        let leg2_t0 = Instant::now();
         let _permit_guard = upstream_permit;
         let _lease_guard = key_lease;
         let out = leg_first_byte(send2, rail).await;
+        let first_byte_ms = leg2_t0.elapsed().as_millis() as u64;
         let outcome = match &out {
             LegFirstByte::Byte { .. } => {
                 if winner2.claim() {
@@ -445,43 +494,58 @@ pub(crate) async fn race_first_byte_with_hedge(
             LegFirstByte::Failed(_) => LegOutcome::Failed,
         };
         if let Some(tx) = leg2_tx.lock().unwrap().take() {
-            let _ = tx.send((key_idx, outcome, Some(out)));
+            let _ = tx.send((key_idx, outcome, Some(out), first_byte_ms));
         }
     });
 
     // Drive the race: leg 1's join handle plus leg 2's oneshot.
     let leg1_res = leg1_handle.await;
-    let (leg1_idx, leg1_outcome, leg1_byte) = match leg1_res {
+    let (leg1_idx, leg1_outcome, leg1_byte, leg1_ms) = match leg1_res {
         Ok(v) => v,
-        Err(_) => (0usize, LegOutcome::Failed, None),
+        Err(_) => (0usize, LegOutcome::Failed, None, 0),
     };
-    let leg2_res: Option<(usize, LegOutcome, Option<LegFirstByte>)> = leg2_rx.try_recv().ok();
+    let leg2_res: Option<(usize, LegOutcome, Option<LegFirstByte>, u64)> = leg2_rx.try_recv().ok();
 
     // Resolve the race. The winner is the leg that claimed the slot with a
     // byte; the loser (if any) is reported Lost. When no leg produced a byte,
     // return FirstOnly so the caller runs the sequential path unchanged.
-    let leg2_outcome = leg2_res.as_ref().map(|(_, o, _)| *o);
-    let (winner_leg, winner_byte, loser): (
+    /// The resolved race: winning leg index, winning first-byte payload,
+    /// loser (leg, outcome), and the winner's own first-byte wait in ms.
+    type RaceResolution = (
         usize,
         Option<LegFirstByte>,
         Option<(usize, LegOutcome)>,
-    ) = match (leg1_outcome, leg2_res) {
-        (LegOutcome::Won, None) => (leg1_idx, leg1_byte, None),
-        (LegOutcome::Won, Some((_, LegOutcome::Won, Some(_)))) => {
+        Option<u64>,
+    );
+    let leg2_outcome = leg2_res.as_ref().map(|(_, o, _, _)| *o);
+    let (winner_leg, winner_byte, loser, winner_ms): RaceResolution = match (leg1_outcome, leg2_res)
+    {
+        (LegOutcome::Won, None) => (leg1_idx, leg1_byte, None, Some(leg1_ms)),
+        (LegOutcome::Won, Some((_, LegOutcome::Won, Some(_), _))) => {
             // Both-byte race: leg 1 claimed first, leg 2 is the loser and
             // is NOT scored.
-            (leg1_idx, leg1_byte, Some((1, LegOutcome::Lost)))
+            (
+                leg1_idx,
+                leg1_byte,
+                Some((1, LegOutcome::Lost)),
+                Some(leg1_ms),
+            )
         }
-        (LegOutcome::Won, Some((_, other, _))) => (leg1_idx, leg1_byte, Some((1, other))),
-        (leg1o, Some((_, LegOutcome::Won, Some(byte)))) => (1, Some(byte), Some((leg1_idx, leg1o))),
-        (leg1o, Some((_, other, _))) => (
+        (LegOutcome::Won, Some((_, other, _, _))) => {
+            (leg1_idx, leg1_byte, Some((1, other)), Some(leg1_ms))
+        }
+        (leg1o, Some((_, LegOutcome::Won, Some(byte), ms))) => {
+            (1, Some(byte), Some((leg1_idx, leg1o)), Some(ms))
+        }
+        (leg1o, Some((_, other, _, _))) => (
             usize::MAX,
             leg1_byte,
             Some((1, other))
                 .filter(|_| leg1o == LegOutcome::Lost)
                 .or(None),
+            None,
         ),
-        (_leg1o, None) => (usize::MAX, leg1_byte, None),
+        (_leg1o, None) => (usize::MAX, leg1_byte, None, None),
     };
     let both_rail_expired = winner_leg == usize::MAX
         && matches!(winner_byte, Some(LegFirstByte::RailExpired) | None)
@@ -519,6 +583,7 @@ pub(crate) async fn race_first_byte_with_hedge(
                 loser,
                 both_rail_expired,
                 resolved: Some(Ok(resp)),
+                winner_first_byte_ms: winner_ms,
             }
         }
         _ => FirstByteRace::Raced {
@@ -527,6 +592,7 @@ pub(crate) async fn race_first_byte_with_hedge(
             loser,
             both_rail_expired,
             resolved: None,
+            winner_first_byte_ms: None,
         },
     }
 }

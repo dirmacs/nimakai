@@ -301,9 +301,15 @@ pub async fn chat_completions(
                     loser: None,
                     both_rail_expired: false,
                     resolved: None,
+                    winner_first_byte_ms: None,
                 },
             }
         };
+        // The winning leg's own first-byte wait, when a leg won the race with
+        // a byte. Threaded into the `x-nimaproxy-attempt` response header on
+        // the success path below (RFC dirmacs/nimakai#63); `None` on every
+        // path that delivers no body.
+        let mut winner_first_byte_ms: Option<u64> = None;
         // A leg won the race: forward the winning response directly and end
         // this request. The loser is logged as `other_call_won` inside the
         // handler; the client body stays a byte-for-byte passthrough.
@@ -316,6 +322,7 @@ pub async fn chat_completions(
                 hedge::FirstByteRace::Raced {
                     resolved: Some(Ok(resp)),
                     loser,
+                    winner_first_byte_ms: fb,
                     ..
                 } => {
                     // Log the loser as `other_call_won` (not scored, not an
@@ -329,6 +336,7 @@ pub async fn chat_completions(
                         t0,
                         request_timeout_ms,
                     );
+                    winner_first_byte_ms = fb;
                     Ok(Ok(resp))
                 }
                 hedge::FirstByteRace::FirstOnly(r) => {
@@ -1185,6 +1193,24 @@ pub async fn chat_completions(
                 response.headers_mut().insert(
                     "x-request-id",
                     HeaderValue::from_str(request_id.as_deref().unwrap_or("unknown"))
+                        .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                );
+                // RFC dirmacs/nimakai#63: the caller-facing identity of the
+                // ONE attempt whose body the client receives — its request id,
+                // its own first-byte wait, and the request's generation wall
+                // time — goes in this RESPONSE HEADER, never in the SSE body
+                // (the body stays a byte-for-byte passthrough). On a hedged
+                // request `first_byte_ms` is the WINNING leg's own wait (the
+                // loser never produces a client response); on a non-hedged
+                // request it is this attempt's `ttfc_ms`.
+                let attempt = hedge::AttemptIdentity {
+                    request_id: request_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                    first_byte_ms: winner_first_byte_ms.unwrap_or(ttfc_ms as u128 as u64),
+                    generation_ms: t0.elapsed().as_millis() as u64,
+                };
+                response.headers_mut().insert(
+                    hedge::ATTEMPT_HEADER,
+                    HeaderValue::from_str(&hedge::attempt_header_value(&attempt))
                         .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                 );
 

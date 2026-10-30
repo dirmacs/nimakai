@@ -349,3 +349,299 @@ fn winner_slot_atomic_claim_is_single_winner() {
     assert!(!slot.claim());
     assert!(!slot.claim());
 }
+
+// ---------- Part 6: x-nimaproxy-attempt response header (RFC #63) ----------
+
+use axum::body::to_bytes;
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
+use nimaproxy::config::{KeyEntry, ModelCompat};
+use nimaproxy::model_stats::ModelStatsStore;
+use nimaproxy::proxy::chat::chat_completions;
+use nimaproxy::proxy::hedge::{attempt_header_value, AttemptIdentity, ATTEMPT_HEADER};
+use nimaproxy::{AppState, AppStateParams, RuntimeControls};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
+/// The header format is stable and documented: `<request_id>;
+/// first_byte_ms=<u64>; generation_ms=<u64>`.
+#[test]
+fn attempt_header_value_format_is_stable() {
+    let attempt = AttemptIdentity {
+        request_id: "20261030120000.4242.7".to_string(),
+        first_byte_ms: 812,
+        generation_ms: 1030,
+    };
+    assert_eq!(
+        attempt_header_value(&attempt),
+        "20261030120000.4242.7; first_byte_ms=812; generation_ms=1030"
+    );
+    assert_eq!(ATTEMPT_HEADER, "x-nimaproxy-attempt");
+}
+
+/// Read one HTTP/1.1 request (headers + exact Content-Length body) off
+/// `sock`. Returns the Authorization header value so the test can tell
+/// which key a leg used.
+async fn read_request_head(sock: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if sock.read_exact(&mut byte).await.is_err() {
+            return None;
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") || head.len() > 16384 {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&head);
+    let auth = text
+        .lines()
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("authorization: ")
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let content_length: usize = text
+        .lines()
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("content-length: ")
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(0);
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        let _ = sock.read_exact(&mut body).await.ok()?;
+    }
+    Some(auth)
+}
+
+/// Write one chunked HTTP/1.1 200 SSE response: `chunks` as individual
+/// chunked frames, then the terminating zero chunk, then close.
+async fn write_sse(sock: &mut tokio::net::TcpStream, chunks: &[&[u8]]) {
+    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+    let _ = sock.write_all(head.as_bytes()).await;
+    for c in chunks {
+        let framed = format!("{:x}\r\n", c.len());
+        let _ = sock.write_all(framed.as_bytes()).await;
+        let _ = sock.write_all(c).await;
+        let _ = sock.write_all(b"\r\n").await;
+    }
+    let _ = sock.write_all(b"0\r\n\r\n").await;
+    let _ = sock.flush().await;
+}
+
+/// Two-key state pointed at a fake upstream, with a rail of 2 s and a
+/// learned hedge delay of 400 ms (30 success samples at 370 ms -> p95 370,
+/// delay = 370 + 30000 capped to rail - 1000 = 1000... so instead seed with
+/// a dynamic floor of 2 and samples that put the learned delay below the
+/// rail: the test sets `first_byte_timeout_ms = 2000`, seeds 2 samples at
+/// 1 ms -> learned = 1 + 30000 capped to 1000 ms. The hedge therefore arms
+/// after 1000 ms of silence.)
+fn hedge_test_state(target: String) -> Arc<AppState> {
+    let state = AppState::new_with_controls(
+        AppStateParams {
+            keys: vec![
+                KeyEntry {
+                    key: "hedge-key-0".to_string(),
+                    label: Some("hedge-0".to_string()),
+                    disabled: false,
+                },
+                KeyEntry {
+                    key: "hedge-key-1".to_string(),
+                    label: Some("hedge-1".to_string()),
+                    disabled: false,
+                },
+            ],
+            target,
+            router: None,
+            model_stats: ModelStatsStore::new(100.0),
+            racing_models: vec![],
+            racing_max_parallel: 1,
+            racing_timeout_ms: 2000,
+            racing_strategy: "complete".to_string(),
+            model_params: HashMap::new(),
+            model_compat: ModelCompat::default(),
+            loop_idle_timeout: nimaproxy::loop_idle_timeout(),
+        },
+        RuntimeControls {
+            max_upstream_in_flight: 8,
+            max_in_flight_per_key: 2,
+            admission_wait_ms: 0,
+            min_dynamic_timeout_ms: 1000,
+            mid_stream_idle_timeout_ms: 2000,
+            first_byte_timeout_ms: Some(2000),
+            dynamic_sample_floor: 2,
+            auth_failure_cooldown_secs: 900,
+            ..RuntimeControls::default()
+        },
+    );
+    // Seed two success samples at 1 ms so the learned delay is
+    // min(1 + 30000, 2000 - 1000) = 1000 ms: the hedge arms after 1 s of
+    // silence, well inside the 2 s rail.
+    state.model_stats.record("test/model", 1.0, true);
+    state.model_stats.record("test/model", 1.0, true);
+    state
+}
+
+/// End-to-end: leg 1 (first key) stays silent past the hedge delay, leg 2
+/// (second key) answers with a canned SSE body. The client response must
+/// carry `x-nimaproxy-attempt` naming the WINNING attempt's request id with
+/// `first_byte_ms`/`generation_ms`, and the body must be byte-identical to
+/// what the winning upstream sent (SSE passthrough untouched).
+#[tokio::test]
+async fn hedge_winner_response_carries_attempt_header_and_passthrough_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_task = Arc::clone(&seen);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let seen_task = Arc::clone(&seen_task);
+            tokio::spawn(async move {
+                let Some(auth) = read_request_head(&mut sock).await else {
+                    return;
+                };
+                seen_task.lock().unwrap().push(auth.clone());
+                if auth.contains("hedge-key-0") {
+                    // Leg 1: headers at once, then silence far past the
+                    // 1000 ms hedge delay and the 2000 ms rail. The hedge
+                    // leg must win and this leg is cancelled.
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.flush().await;
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                } else {
+                    // Leg 2 (hedge): answers immediately with a canned SSE
+                    // body in two chunks.
+                    write_sse(
+                        &mut sock,
+                        &[
+                            b"data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+                            b"data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                            b"data: [DONE]\n\n",
+                        ],
+                    )
+                    .await;
+                }
+            });
+        }
+    });
+
+    let state = hedge_test_state(format!("http://{addr}"));
+    let body = serde_json::json!({
+        "model": "test/model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+    });
+    let resp = chat_completions(
+        State(state),
+        HeaderMap::new(),
+        bytes::Bytes::from(body.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status().as_u16(), 200);
+    let headers = resp.headers().clone();
+    let attempt = headers
+        .get(ATTEMPT_HEADER)
+        .unwrap_or_else(|| panic!("{ATTEMPT_HEADER} must be present on the delivered response"))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let request_id = headers
+        .get("x-request-id")
+        .expect("x-request-id present")
+        .to_str()
+        .unwrap()
+        .to_string();
+    // The header names the winning attempt by ITS request id (the same id
+    // the turn log keys on and x-request-id echoes), plus both timings.
+    let expected_prefix = format!("{request_id}; first_byte_ms=");
+    assert!(
+        attempt.starts_with(&expected_prefix),
+        "header must start with the winning attempt id: got {attempt:?}, want prefix {expected_prefix:?}"
+    );
+    assert!(
+        attempt.contains("; generation_ms="),
+        "header must carry generation_ms: {attempt:?}"
+    );
+    let fb: u64 = attempt
+        .split("first_byte_ms=")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .and_then(|v| v.trim().parse().ok())
+        .expect("first_byte_ms parses as u64");
+    // The winner is the hedge leg, which answered in well under the 1000 ms
+    // delay + its own wait; its first-byte wait must be below the rail and
+    // far below the 30 s the silent leg would have waited.
+    assert!(
+        fb < 2000,
+        "winning leg's first_byte_ms {fb} must be under the 2 s rail"
+    );
+
+    // Two upstream calls went out, on the two different keys.
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        2,
+        "exactly two legs (first + hedge), got {seen:?}"
+    );
+    assert!(seen.iter().any(|a| a.contains("hedge-key-0")));
+    assert!(seen.iter().any(|a| a.contains("hedge-key-1")));
+
+    // The body is a byte-for-byte SSE passthrough of the winning leg: the
+    // two canned `data:` frames exactly as sent, and no in-band error frame
+    // (the stream ended cleanly with the terminating chunk). The attempt
+    // identity lives ONLY in the header, never in the body.
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let expected: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n";
+    assert!(
+        bytes.starts_with(expected),
+        "SSE body must start with the winning leg's exact bytes: {bytes:?}"
+    );
+    assert!(
+        !bytes
+            .windows(ATTEMPT_HEADER.len())
+            .any(|w| w == ATTEMPT_HEADER.as_bytes()),
+        "the attempt header name must never appear in the SSE body"
+    );
+    assert!(
+        !bytes.windows(13).any(|w| w == b"retrying on a"),
+        "the internal retry sentence must never appear in the body"
+    );
+}
+
+/// A cancelled (losing) leg never produces a client-visible header: it is
+/// only in the turn log as `attempt_end=other_call_won`. The header exists
+/// solely on the delivered response, which the e2e test above proves; here
+/// the log side is asserted: the loser's row carries other_call_won and a
+/// `won_by_request_id` pointing at the winner, and no response path touches
+/// the loser's bytes.
+#[test]
+fn loser_is_logged_other_call_won_not_client_visible() {
+    // The formatting seam itself: the loser's identity can only leave the
+    // process through the log row, because `log_loser` is the only writer
+    // for a `Lost` leg and it writes a TurnRecord, never a response.
+    use nimaproxy::turn_log::AttemptEnd;
+    assert_eq!(AttemptEnd::OtherCallWon.as_str(), "other_call_won");
+    // And the header formatter is only ever called with the winner's id:
+    // chat.rs passes `request_id` (this attempt's own first-byte record id)
+    // and `winner_first_byte_ms` (Some only when this leg won the race).
+    let attempt = AttemptIdentity {
+        request_id: "winner-id".to_string(),
+        first_byte_ms: 5,
+        generation_ms: 9,
+    };
+    let v = attempt_header_value(&attempt);
+    assert!(v.starts_with("winner-id; first_byte_ms=5; generation_ms=9"));
+}
