@@ -540,9 +540,7 @@ pub(crate) async fn race_first_byte_with_hedge(
         (leg1o, Some((_, other, _, _))) => (
             usize::MAX,
             leg1_byte,
-            Some((1, other))
-                .filter(|_| leg1o == LegOutcome::Lost)
-                .or(None),
+            (leg1o == LegOutcome::Lost).then_some((1, other)),
             None,
         ),
         (_leg1o, None) => (usize::MAX, leg1_byte, None, None),
