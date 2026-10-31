@@ -589,6 +589,12 @@ impl AppState {
             metrics: self.gateway_metrics.clone(),
         })
     }
+
+    /// Available permits on the global upstream semaphore. Read-only probe
+    /// for the concurrent-hedge cap; never an acquire.
+    pub fn upstream_permits_available(&self) -> usize {
+        self.upstream_permits.available_permits()
+    }
 }
 
 use std::cell::RefCell;

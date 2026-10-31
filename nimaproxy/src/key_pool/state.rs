@@ -1,9 +1,13 @@
 use super::aimd::{pressure_success_cost_capped, static_success_cost, AimdMode};
-use super::BenchReason;
+use super::{BenchReason, RANK_DEFAULT};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+/// Weight of one answer outcome in the per-(key, model) rank EWMA.
+/// Small enough that a single stall or answer moves the rank gradually.
+pub(crate) const RANK_WEIGHT: f64 = 0.1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyStatus {
@@ -130,6 +134,36 @@ impl super::KeyPool {
             }
             window.pressure_successes /= super::aimd::AIMD_CREDIT_DECAY;
         }
+    }
+
+    /// Record one answer outcome for the per-(key, model) rank
+    /// (RFC dirmacs/nimakai#63), next to `record_success`/`record_rate_limited`.
+    ///
+    /// The only writes are outcome events for that model: `won == true` is a
+    /// call whose first byte was delivered to the client (an answer),
+    /// `won == false` is a call that reached its rail with no byte (a stall).
+    /// A call cancelled because the other call won is NOT recorded here at
+    /// all — it had no chance to finish, so it scores nothing. The rank is
+    /// in-memory only and resets on process start; nothing is written to
+    /// disk. The hedge code does not own the rank: it only reports outcomes.
+    pub fn record_answer(&self, idx: usize, model: &str, won: bool) {
+        let mut ranks = self.ranks.lock();
+        let entry = ranks
+            .entry((idx, model.to_string()))
+            .or_insert(RANK_DEFAULT);
+        // EWMA-style update, bounded so a single event cannot dominate:
+        // an answer moves the rank up, a stall moves it down.
+        let sample = if won { 1.0 } else { -1.0 };
+        *entry = (*entry * (1.0 - RANK_WEIGHT)) + sample * RANK_WEIGHT;
+    }
+
+    /// Current rank of `(idx, model)`; [`RANK_DEFAULT`] before any answer.
+    pub fn rank_of(&self, idx: usize, model: &str) -> f64 {
+        self.ranks
+            .lock()
+            .get(&(idx, model.to_string()))
+            .copied()
+            .unwrap_or(RANK_DEFAULT)
     }
 
     pub fn record_success(&self, idx: usize) {

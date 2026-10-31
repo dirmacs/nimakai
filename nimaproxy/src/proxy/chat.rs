@@ -1,6 +1,7 @@
 use crate::loop_tracker::SESSION_HEADER;
 use crate::proxy::admission::acquire_gateway_permits_excluding;
 use crate::proxy::chat_helpers::{accept_header_for_body, non_streaming_usage};
+use crate::proxy::hedge;
 use crate::proxy::http::log_turn_request;
 use crate::proxy::messages::{
     mistral_validation_error, normalize_requested_model, resolve_model, validate_model_exists,
@@ -28,6 +29,21 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::warn;
 pub(crate) const MAX_RETRIES: usize = 8;
+
+/// Drop guard releasing one in-flight attempt on the loop when the client
+/// response finishes (i.e. when the handler returns), on every exit path.
+struct LoopAttemptGuard {
+    tracker: Arc<crate::loop_tracker::LoopTracker>,
+    session_id: Option<String>,
+}
+
+impl Drop for LoopAttemptGuard {
+    fn drop(&mut self) {
+        if let Some(session_id) = &self.session_id {
+            self.tracker.attempt_finished(session_id);
+        }
+    }
+}
 
 /// POST /v1/chat/completions
 ///
@@ -131,6 +147,21 @@ pub async fn chat_completions(
             None => None,
         },
     };
+    // An in-flight attempt counts as loop activity until the client response
+    // finishes (RFC dirmacs/nimakai#63): this is what forbids an idle close
+    // (`ended_by = Idle`) while an upstream attempt — including both calls of
+    // a hedge — is still waiting for a first byte or streaming.
+    if let Some(lk) = &loop_key {
+        state.loop_tracker.attempt_started(&lk.session_id);
+    }
+    // Ensure the counter is released on EVERY exit path from this handler:
+    // a scope guard drops it when `chat_completions` returns, whichever path
+    // produced the response.
+    let _loop_guard = LoopAttemptGuard {
+        tracker: state.loop_tracker.clone(),
+        session_id: loop_key.as_ref().map(|lk| lk.session_id.clone()),
+    };
+
     let n = state.pool.len().clamp(1, MAX_RETRIES);
     let mut last_auth_failure_response: Option<Response> = None;
     // The key the previous attempt stalled on, if any. The next attempt
@@ -189,6 +220,25 @@ pub async fn chat_completions(
     // (`n` already exceeds 1), and the budget check inside each `can_retry`
     // still caps the total client wait.
     let attempts = n.max(2);
+    // The late hedge (RFC dirmacs/nimakai#63): on the FIRST attempt only, a
+    // timer armed at the attempt's send (t0) fires after the decided delay of
+    // silence and tries ONCE, non-blocking, to take a second slot on a
+    // different key. While a hedge is armed or running, the sequential
+    // RetryPolicy retry is disabled for this request and attempts are clamped
+    // to 2 — no third call.
+    let rail_ms = first_byte_timeout_for_model(&state, &model_id);
+    // The late hedge arms only when the decided delay of silence is shorter
+    // than the rail AND the pool has more than one key. A delay >= rail means
+    // the hedge would fire at/after the first call's own rail (a no-op race),
+    // and a single-key pool would degrade the exclusion to the same key; in
+    // both cases the first call runs alone exactly as before, with the
+    // sequential RetryPolicy retry intact.
+    let hedge_delay = hedge::hedge_delay_ms(&state, &model_id, rail_ms);
+    // A degenerate tiny rail (rail < 1000 ms, e.g. test configs at 250 ms)
+    // saturates the delay cap to 0, which would arm an immediate hedge on every
+    // request; treat that as hedge-disabled so the sequential retry is kept.
+    let hedge_enabled = state.pool.len() > 1 && hedge_delay > 0 && hedge_delay < rail_ms;
+    let _hedge_running = false;
     for attempt in 0..attempts {
         let (upstream_permit, key_lease) =
             match acquire_gateway_permits_excluding(&state, failed_key_idx).await {
@@ -201,18 +251,129 @@ pub async fn chat_completions(
         let key_label = key_lease.label.clone();
         let t0 = Instant::now();
         let request_timeout_ms = first_byte_timeout_for_model(&state, &model_id);
-        let result = timeout(
-            std::time::Duration::from_millis(request_timeout_ms),
-            state
-                .client
-                .post(upstream_url.as_str())
-                .header("Authorization", format!("Bearer {}", key_lease.key))
-                .header("Content-Type", "application/json")
-                .header("Accept", accept_header)
-                .body(body.clone())
-                .send(),
-        )
-        .await;
+        // Build this leg's send future. On the first attempt we ALSO arm the
+        // hedge timer: after `hedge_delay` of silence from t0, try once,
+        // non-blocking, to take a second slot on a different key and race it
+        // against this leg. The winner is the first upstream first byte,
+        // claimed atomically in a shared per-request winner slot BEFORE the
+        // loser's future is dropped, so the loser's permits release
+        // immediately and the client body is sent exactly once.
+        let send = state
+            .client
+            .post(upstream_url.as_str())
+            .header("Authorization", format!("Bearer {}", key_lease.key))
+            .header("Content-Type", "application/json")
+            .header("Accept", accept_header)
+            .body(body.clone())
+            .send();
+        // The late hedge (RFC dirmacs/nimakai#63): on the FIRST attempt only,
+        // arm a timer at t0; after `hedge_delay` of silence, try ONCE,
+        // non-blocking, to take a second slot on a different key and race it
+        // against this leg. The first upstream first byte wins, claimed
+        // atomically in a shared per-request winner slot BEFORE the loser's
+        // future is dropped, so the loser's permits release immediately and
+        // the client body is sent exactly once. If no second slot is free,
+        // the first call runs alone (no queued second call, no client
+        // failure).
+        let race = if hedge_enabled {
+            hedge::race_first_byte_with_hedge(
+                state.clone(),
+                send,
+                idx,
+                &upstream_url,
+                accept_header,
+                &body,
+                &model_id,
+                hedge_delay,
+                std::time::Duration::from_millis(request_timeout_ms),
+            )
+            .await
+        } else {
+            // Hedge disabled (single-key pool, or degenerate delay): run the
+            // first call alone under its own rail, exactly as the sequential
+            // path would. A rail expiry maps to the Raced/no-winner shape so
+            // the downstream 504 arm fires unchanged.
+            match timeout(std::time::Duration::from_millis(request_timeout_ms), send).await {
+                Ok(res) => hedge::FirstByteRace::FirstOnly(res),
+                Err(_) => hedge::FirstByteRace::Raced {
+                    winner_leg: usize::MAX,
+                    winner: hedge::LegFirstByte::RailExpired,
+                    loser: None,
+                    both_rail_expired: false,
+                    resolved: None,
+                    winner_first_byte_ms: None,
+                },
+            }
+        };
+        // The winning leg's own first-byte wait, when a leg won the race with
+        // a byte. Threaded into the `x-nimaproxy-attempt` response header on
+        // the success path below (RFC dirmacs/nimakai#63); `None` on every
+        // path that delivers no body.
+        let mut winner_first_byte_ms: Option<u64> = None;
+        // A leg won the race: forward the winning response directly and end
+        // this request. The loser is logged as `other_call_won` inside the
+        // handler; the client body stays a byte-for-byte passthrough.
+        // A leg won the race with a first byte: rebuild its response and let
+        // the EXISTING sequential Ok(Ok(resp)) path forward it, so the client
+        // body stays a byte-for-byte passthrough and every downstream branch
+        // (429/401/400/streaming) is reused unchanged.
+        let result: Result<Result<reqwest::Response, reqwest::Error>, tokio::time::error::Elapsed> =
+            match race {
+                hedge::FirstByteRace::Raced {
+                    resolved: Some(Ok(resp)),
+                    loser,
+                    winner_first_byte_ms: fb,
+                    ..
+                } => {
+                    // Log the loser as `other_call_won` (not scored, not an
+                    // error round) before forwarding the winner.
+                    hedge::log_loser(
+                        &state,
+                        &original_model,
+                        &model_id,
+                        loser,
+                        loop_key.clone(),
+                        t0,
+                        request_timeout_ms,
+                    );
+                    winner_first_byte_ms = fb;
+                    Ok(Ok(resp))
+                }
+                hedge::FirstByteRace::FirstOnly(r) => {
+                    // No second slot was free (or hedge disabled with a
+                    // resolved send): the first call's send result is already
+                    // resolved under its rail — pass it through unchanged.
+                    Ok(r)
+                }
+                hedge::FirstByteRace::Raced {
+                    winner: hedge::LegFirstByte::RailExpired,
+                    ..
+                }
+                | hedge::FirstByteRace::Raced {
+                    winner: hedge::LegFirstByte::Failed(_),
+                    ..
+                }
+                | hedge::FirstByteRace::Raced { resolved: None, .. } => {
+                    // Both calls ended at their rails with no byte (or the
+                    // send failed): ONE 504, no third call. Signal as a rail
+                    // expiry so the existing Err(_) arm returns the 504.
+                    timeout(
+                        std::time::Duration::from_millis(0),
+                        futures::future::pending::<()>(),
+                    )
+                    .await
+                    .map(|_| unreachable!())
+                }
+                hedge::FirstByteRace::Raced {
+                    resolved: Some(Err(_)),
+                    ..
+                } => timeout(
+                    std::time::Duration::from_millis(0),
+                    futures::future::pending::<()>(),
+                )
+                .await
+                .map(|_| unreachable!()),
+            };
         match result {
             Err(_) => {
                 state.gateway_metrics.record_timeout();
@@ -274,6 +435,9 @@ pub async fn chat_completions(
                         // ttfb and failure records, and the non-streaming body id is filled
                         // in where the body is assembled.
                         response_body_id: None,
+                        attempt_end: None,
+                        rail_ms: None,
+                        won_by_request_id: None,
                     });
                     continue;
                 }
@@ -303,6 +467,9 @@ pub async fn chat_completions(
                     // ttfb and failure records, and the non-streaming body id is filled
                     // in where the body is assembled.
                     response_body_id: None,
+                    attempt_end: None,
+                    rail_ms: None,
+                    won_by_request_id: None,
                 });
                 return (
                     StatusCode::GATEWAY_TIMEOUT,
@@ -349,6 +516,9 @@ pub async fn chat_completions(
                     // ttfb and failure records, and the non-streaming body id is filled
                     // in where the body is assembled.
                     response_body_id: None,
+                    attempt_end: None,
+                    rail_ms: None,
+                    won_by_request_id: None,
                 });
                 return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
             }
@@ -440,6 +610,9 @@ pub async fn chat_completions(
                         // ttfb and failure records, and the non-streaming body id is filled
                         // in where the body is assembled.
                         response_body_id: None,
+                        attempt_end: None,
+                        rail_ms: None,
+                        won_by_request_id: None,
                     });
                     // Same-key re-attempt is pointless here: the key was just
                     // quarantined, so attempt 1 would stall in admission and
@@ -528,6 +701,9 @@ pub async fn chat_completions(
                             // ttfb and failure records, and the non-streaming body id is filled
                             // in where the body is assembled.
                             response_body_id: None,
+                            attempt_end: None,
+                            rail_ms: None,
+                            won_by_request_id: None,
                         });
                         // Next-key only, as above: re-sending a structurally
                         // rejected body on the same key cannot succeed.
@@ -659,6 +835,9 @@ pub async fn chat_completions(
                             // ttfb and failure records, and the non-streaming body id is filled
                             // in where the body is assembled.
                             response_body_id: None,
+                            attempt_end: None,
+                            rail_ms: None,
+                            won_by_request_id: None,
                         });
                         continue;
                     }
@@ -691,6 +870,9 @@ pub async fn chat_completions(
                         // ttfb and failure records, and the non-streaming body id is filled
                         // in where the body is assembled.
                         response_body_id: None,
+                        attempt_end: None,
+                        rail_ms: None,
+                        won_by_request_id: None,
                     });
                     return (
                         StatusCode::GATEWAY_TIMEOUT,
@@ -878,6 +1060,9 @@ pub async fn chat_completions(
                                 // ttfb and failure records, and the non-streaming body id is filled
                                 // in where the body is assembled.
                                 response_body_id: None,
+                                attempt_end: None,
+                                rail_ms: None,
+                                won_by_request_id: None,
                             });
                             continue;
                         }
@@ -910,6 +1095,9 @@ pub async fn chat_completions(
                             // ttfb and failure records, and the non-streaming body id is filled
                             // in where the body is assembled.
                             response_body_id: None,
+                            attempt_end: None,
+                            rail_ms: None,
+                            won_by_request_id: None,
                         });
                         return (
                             StatusCode::GATEWAY_TIMEOUT,
@@ -988,6 +1176,9 @@ pub async fn chat_completions(
                     // ttfb and failure records, and the non-streaming body id is filled
                     // in where the body is assembled.
                     response_body_id: None,
+                    attempt_end: None,
+                    rail_ms: None,
+                    won_by_request_id: None,
                 });
                 let tap_for_completion = tap.clone();
 
@@ -1002,6 +1193,24 @@ pub async fn chat_completions(
                 response.headers_mut().insert(
                     "x-request-id",
                     HeaderValue::from_str(request_id.as_deref().unwrap_or("unknown"))
+                        .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+                );
+                // RFC dirmacs/nimakai#63: the caller-facing identity of the
+                // ONE attempt whose body the client receives — its request id,
+                // its own first-byte wait, and the request's generation wall
+                // time — goes in this RESPONSE HEADER, never in the SSE body
+                // (the body stays a byte-for-byte passthrough). On a hedged
+                // request `first_byte_ms` is the WINNING leg's own wait (the
+                // loser never produces a client response); on a non-hedged
+                // request it is this attempt's `ttfc_ms`.
+                let attempt = hedge::AttemptIdentity {
+                    request_id: request_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                    first_byte_ms: winner_first_byte_ms.unwrap_or(ttfc_ms as u128 as u64),
+                    generation_ms: t0.elapsed().as_millis() as u64,
+                };
+                response.headers_mut().insert(
+                    hedge::ATTEMPT_HEADER,
+                    HeaderValue::from_str(&hedge::attempt_header_value(&attempt))
                         .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
                 );
 

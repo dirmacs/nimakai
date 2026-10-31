@@ -191,6 +191,40 @@ fn test_validate_mistral_tool_call_ids_invalid_length() {
     assert!(result.is_ok()); // validate is warn-only, not hard reject;
 }
 
+/// RFC dirmacs/nimakai#63: a non-alphanumeric id is SKIPPED by the check and
+/// must not also be reported as "no matching call". The request is never
+/// rejected and the id is forwarded unchanged.
+#[test]
+fn test_skipped_id_is_not_unmatched() {
+    let json = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call-with-dash", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call-with-dash", "content": "ok"}
+        ]
+    });
+    // warn-only, never a reject:
+    let result = crate::proxy::messages::validate_mistral_tool_call_ids(
+        &json,
+        "mistralai/mistral-7b-instruct",
+    );
+    assert!(result.is_ok(), "skipped id must never reject the request");
+    // And a genuinely unmatched id still reports (predicate keeps teeth):
+    let json2 = serde_json::json!({
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "AAAAAAAAA", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "BBBBBBBBB", "content": "ok"}
+        ]
+    });
+    let result2 = crate::proxy::messages::validate_mistral_tool_call_ids(
+        &json2,
+        "mistralai/mistral-7b-instruct",
+    );
+    assert!(
+        result2.is_ok(),
+        "unmatched ids are still warn-only, never rejected"
+    );
+}
+
 #[test]
 fn test_validate_mistral_tool_call_ids_invalid_chars() {
     let json = serde_json::json!({"messages": [{"role": "assistant", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test"}}]}]});

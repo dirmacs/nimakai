@@ -805,6 +805,17 @@ impl ModelStatsStore {
         }
     }
 
+    /// The `(p95_ms, ring_len)` reading the hedge delay is computed from.
+    ///
+    /// The ring is SUCCESS-ONLY (`record_success` pushes; failures and
+    /// timeouts never do), so a rail-capped or stalled call cannot drag the
+    /// p95 up and the learned hedge delay can never reach the rail.
+    pub fn hedge_delay_sample(&self, model_id: &str) -> Option<(f64, usize)> {
+        let map = self.inner.lock().unwrap();
+        map.get(model_id)
+            .map(|e| (e.p95_ms().unwrap_or(0.0), e.ring_len))
+    }
+
     #[cfg(test)]
     pub fn force_timeout_probe_ready_for_test(&self, model_id: &str) {
         let mut map = self.inner.lock().unwrap();

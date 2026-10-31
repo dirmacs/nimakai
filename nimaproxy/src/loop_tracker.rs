@@ -149,12 +149,22 @@ struct OpenLoop {
     tool_call_fragments: u64,
     tool_calls_distinct: u64,
     last_finish_reason: Option<String>,
+    /// In-flight attempts for this loop (RFC dirmacs/nimakai#63). An attempt,
+    /// including both calls of a hedge, counts as activity until the client
+    /// response finishes; `sweep` skips loops with count > 0, so an idle
+    /// close (`ended_by = Idle`) cannot fire while any attempt is open.
+    in_flight: u64,
 }
 
 #[derive(Debug)]
 struct SessionState {
     /// Highest loop number issued for this session. Monotonic, so a loop id is
     /// never reused even after the sweeper drops the session entry.
+    ///
+    /// This is now ALSO a tombstone: it survives session eviction (RFC
+    /// dirmacs/nimakai#63), held in `loop_seq_high_water`, so a `loop_seq`
+    /// is never reissued after the session entry is dropped. See
+    /// [`LoopTracker::loop_seq_high_water`].
     loop_seq: u64,
     open: Option<OpenLoop>,
     /// Last activity of the SESSION, used to drop abandoned entries so the map
@@ -183,6 +193,11 @@ pub struct LoopTracker {
     /// depth endpoint sees a faithful recent history rather than half of one.
     recent: Mutex<VecDeque<ClosedLoop>>,
     idle_timeout: Duration,
+    /// Per-session `loop_seq` high-water mark (tombstone). Retained PAST
+    /// session eviction (RFC dirmacs/nimakai#63) so a `loop_seq` is never
+    /// reused after the sweeper drops the session: a join on
+    /// (session, loop_seq) can never collide a false close with a later loop.
+    loop_seq_high_water: Mutex<HashMap<String, u64>>,
 }
 
 impl LoopTracker {
@@ -191,6 +206,7 @@ impl LoopTracker {
             sessions: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
             idle_timeout,
+            loop_seq_high_water: Mutex::new(HashMap::new()),
         }
     }
 
@@ -255,7 +271,15 @@ impl LoopTracker {
         }
 
         if state.open.is_none() {
-            state.loop_seq += 1;
+            // The tombstone: issue from the high-water mark, never below it,
+            // so a loop_seq is never reused even after the session entry was
+            // evicted and re-created (RFC dirmacs/nimakai#63).
+            {
+                let mut hw = self.loop_seq_high_water.lock();
+                let entry = hw.entry(session_id.to_string()).or_insert(0);
+                *entry = (*entry).max(state.loop_seq) + 1;
+                state.loop_seq = *entry;
+            }
             let seq = state.loop_seq;
             state.open = Some(OpenLoop {
                 session_id: session_id.to_string(),
@@ -270,6 +294,7 @@ impl LoopTracker {
                 tool_call_fragments: 0,
                 tool_calls_distinct: 0,
                 last_finish_reason: None,
+                in_flight: 0,
             });
         }
 
@@ -325,6 +350,50 @@ impl LoopTracker {
         state.last_touched = now;
     }
 
+    /// Mark one attempt of this loop's open loop as in flight. Called at
+    /// request start (RFC dirmacs/nimakai#63). An in-flight attempt —
+    /// including both calls of a hedge — counts as activity until the client
+    /// response finishes, so `sweep` will not idle-close the loop under it.
+    pub fn attempt_started(&self, session_id: &str) {
+        let mut sessions = self.sessions.lock();
+        if let Some(state) = sessions.get_mut(session_id) {
+            if let Some(open) = state.open.as_mut() {
+                open.in_flight = open.in_flight.saturating_add(1);
+            }
+        }
+    }
+
+    /// Mark one in-flight attempt as finished (client response done).
+    /// Saturating so a double-decrement can never underflow the counter.
+    pub fn attempt_finished(&self, session_id: &str) {
+        let mut sessions = self.sessions.lock();
+        if let Some(state) = sessions.get_mut(session_id) {
+            if let Some(open) = state.open.as_mut() {
+                open.in_flight = open.in_flight.saturating_sub(1);
+            }
+        }
+    }
+
+    /// In-flight attempt count of the session's open loop (0 when none).
+    pub fn in_flight(&self, session_id: &str) -> u64 {
+        self.sessions
+            .lock()
+            .get(session_id)
+            .and_then(|s| s.open.as_ref())
+            .map(|open| open.in_flight)
+            .unwrap_or(0)
+    }
+
+    /// The session's `loop_seq` high-water mark (tombstone). Survives
+    /// session eviction, so a `loop_seq` is never reused after a close.
+    pub fn loop_seq_high_water(&self, session_id: &str) -> u64 {
+        self.loop_seq_high_water
+            .lock()
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Close every loop that has been silent for longer than the idle timeout,
     /// and forget sessions that are finished and equally stale.
     ///
@@ -345,10 +414,15 @@ impl LoopTracker {
         let mut abandon = Vec::new();
 
         for (id, state) in sessions.iter_mut() {
-            if state
-                .open
-                .as_ref()
-                .is_some_and(|open| is_idle(open.last_seen))
+            // An idle close is forbidden while any attempt for the loop is
+            // open (RFC dirmacs/nimakai#63): a waiting-for-first-byte or
+            // streaming attempt is activity, so the loop is skipped here.
+            let in_flight = state.open.as_ref().map(|o| o.in_flight).unwrap_or(0);
+            if in_flight == 0
+                && state
+                    .open
+                    .as_ref()
+                    .is_some_and(|open| is_idle(open.last_seen))
             {
                 if let Some(finished) = state.open.take() {
                     closed.push(finalize(finished, LoopEnd::Idle));
@@ -641,15 +715,22 @@ mod tests {
     }
 
     /// An abandoned session is forgotten, so the map cannot grow without bound.
+    /// The `loop_seq` HIGH-WATER tombstone survives the eviction (RFC
+    /// dirmacs/nimakai#63), so the later request starts loop 2, never a reused
+    /// loop 1: a join on (session, loop_seq) cannot collide the false close
+    /// with a later loop.
     #[test]
-    fn sweep_forgets_an_abandoned_session() {
+    fn sweep_forgets_an_abandoned_session_but_keeps_the_seq_tombstone() {
         let t = tracker();
         t.begin("s1", Some("user"), 2, false, at("2026-10-18T10:00:00Z"));
         t.sweep(at("2026-10-18T11:00:00Z"));
-        // The entry must be gone: a later request starts a fresh loop at 1
-        // rather than resuming a conversation the sweeper already closed.
+        // The entry is gone from the sessions map...
+        assert_eq!(t.open_loops(), 0);
+        // ...but the high-water mark survives, so the next loop is 2, not a
+        // reused 1.
+        assert_eq!(t.loop_seq_high_water("s1"), 1);
         let pos = t.begin("s1", Some("user"), 2, false, at("2026-10-18T12:00:00Z"));
-        assert_eq!(pos.loop_seq, 1);
+        assert_eq!(pos.loop_seq, 2);
     }
 
     /// `record_round` for a session that was never begun is a no-op rather than
